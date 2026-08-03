@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="AI Cove Turbo 本地加速配置与运行面板" />
+    <meta name="theme-color" content="#080c0b" />
+    <title>AI Cove Turbo</title>
+    <link rel="icon" type="image/png" href="./assets/turbo-icon.png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="sr-only" href="#main-content">跳到主要内容</a>
+
+    <div class="turbo-shell">
+      <header class="turbo-shell__header">
+        <a class="turbo-shell__brand" href="?tab=config" aria-label="AI Cove Turbo 配置页">
+          <img class="turbo-icon turbo-icon--shell" src="./assets/turbo-icon.png" width="32" height="32" alt="" />
+          <span><strong>Turbo</strong><small>AI Cove</small></span>
+        </a>
+
+        <nav class="turbo-tabs" role="tablist" aria-label="Turbo 页面">
+          <button id="tab-config" class="turbo-tab" type="button" role="tab" aria-selected="true" aria-controls="panel-config" tabindex="0" data-tab="config">配置</button>
+          <button id="tab-runtime" class="turbo-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-runtime" tabindex="-1" data-tab="runtime">运行</button>
+        </nav>
+
+        <span class="turbo-shell__meta">DESKTOP MVP</span>
+      </header>
+
+      <main id="main-content" class="turbo-panels">
+        <section id="panel-config" class="tab-panel variant variant--b" role="tabpanel" aria-labelledby="tab-config" data-panel="config">
+          <div class="b-stage">
+            <div class="b-backdrop" aria-hidden="true"><span></span><span></span><span></span></div>
+            <article class="b-popover">
+              <header class="b-header">
+                <a class="b-brand" href="#config-title" aria-label="AI Cove Turbo">
+                  <img class="turbo-icon turbo-icon--popover" src="./assets/turbo-icon.png" width="24" height="24" alt="" />
+                  <span><strong>Turbo</strong><small>AI Cove</small></span>
+                </a>
+                <span class="b-window-label">菜单栏 / 托盘</span>
+                <span class="icon-button" aria-hidden="true"><span>···</span></span>
+              </header>
+
+              <section class="b-status" aria-labelledby="config-title">
+                <div class="status-orb" aria-hidden="true"><span></span></div>
+                <div><p class="eyebrow">AI Cove / 桌面壳就绪</p><h1 id="config-title">等待接管</h1><p>本地通道将在后续能力启用后显示</p></div>
+                <span class="status-tick" aria-label="桌面应用已启动">✓</span>
+              </section>
+
+              <div class="b-divider"></div>
+              <section class="b-controls" aria-labelledby="b-controls-title">
+                <h2 id="b-controls-title" class="sr-only">快速控制</h2>
+                <button class="b-control" type="button" data-action="toggle-compression" aria-pressed="true">
+                  <span class="b-control__icon" aria-hidden="true">↓</span><span><strong>压缩模式</strong><small>减少请求上行字节</small></span><span class="b-control__state" data-state="compression">开</span><span class="b-switch" aria-hidden="true"><i></i></span>
+                </button>
+              </section>
+
+              <section class="b-stats" aria-labelledby="b-stats-title">
+                <header><h2 id="b-stats-title">本次会话</h2><span class="live-label"><span class="presence-dot" aria-hidden="true"></span>实时</span></header>
+                <div class="b-stat-grid">
+                  <div><span>请求</span><strong data-state="requests">0</strong></div>
+                  <div><span>已发送</span><strong data-state="sent-bytes">0 B</strong></div>
+                  <div><span>压缩率</span><strong data-state="ratio">—</strong></div>
+                </div>
+                <p class="b-transport"><span class="presence-dot" aria-hidden="true"></span><span>压缩等待首次请求验证</span><em>仅内存聚合</em></p>
+              </section>
+
+              <footer class="b-footer">
+                <button class="b-autostart" type="button" data-action="toggle-autostart" aria-pressed="true"><span class="b-autostart__icon" aria-hidden="true">⌁</span><span>开机自启动</span><strong data-state="autostart">开</strong></button>
+                <button class="b-restart" type="button" data-action="restart-codex"><span data-state="restart">重启 Codex</span><span aria-hidden="true">↗</span></button>
+              </footer>
+            </article>
+            <p class="b-hint">从菜单栏或系统托盘重新打开 · 关闭窗口不会停止 Turbo</p>
+          </div>
+        </section>
+
+        <section id="panel-runtime" class="tab-panel variant variant--c" role="tabpanel" aria-labelledby="tab-runtime" data-panel="runtime" hidden>
+          <div class="c-console">
+            <header class="c-topbar">
+              <div class="c-product"><span class="c-prompt" aria-hidden="true">//</span><strong>AI COVE TURBO</strong><span class="c-version">v0.1 MVP</span></div>
+              <div class="c-topbar__right"><span class="c-live"><i aria-hidden="true"></i> DESKTOP SHELL READY</span><code>SESSION LOCAL</code></div>
+            </header>
+
+            <div class="c-titlebar">
+              <div><p class="c-overline">OPERATIONS / TELEMETRY</p><h1>传输面板</h1><p>只保留当前运行周期的聚合观测。没有正文，没有密钥，没有历史数据库。</p></div>
+            </div>
+
+            <div class="c-layout">
+              <aside class="c-sidebar" aria-label="当前路由">
+                <section class="c-side-section c-route" aria-labelledby="c-route-title">
+                  <header><span class="c-overline">ROUTE</span><h2 id="c-route-title">当前路径</h2></header>
+                  <dl><div><dt>LOCAL</dt><dd><code>等待启动</code></dd></div><div><dt>UPSTREAM</dt><dd><code>等待配置</code></dd></div><div><dt>HTTP MODE</dt><dd><span class="c-good">ZSTD WAITING</span></dd></div></dl>
+                </section>
+                <p class="c-sidebar-note"><span aria-hidden="true">[i]</span> 运行面板只展示聚合状态，配置请在<span class="keep-together">“配置”Tab</span> 修改。</p>
+              </aside>
+
+              <div class="c-main">
+                <section class="c-readout" aria-labelledby="c-readout-title">
+                  <header class="c-section-heading"><div><span class="c-overline">OBSERVED / WAITING</span><h2 id="c-readout-title">当前运行周期</h2></div><span class="c-stream"><i aria-hidden="true"></i>IDLE</span></header>
+                  <div class="c-metrics">
+                    <div class="c-metric c-metric--primary"><span>REQUESTS</span><strong data-state="requests">0</strong><small>requests observed</small></div>
+                    <div class="c-metric"><span>RAW BYTES</span><strong data-state="raw-bytes">0 B</strong><small>before transform</small></div>
+                    <div class="c-metric"><span>SENT BYTES</span><strong data-state="sent-bytes">0 B</strong><small>after transform</small></div>
+                    <div class="c-metric"><span>RATIO</span><strong data-state="ratio">—</strong><small>compression delta</small></div>
+                  </div>
+                  <div class="c-graph" role="img" aria-label="等待真实请求后显示转发字节趋势">
+                    <div class="c-graph__head"><span>TRANSFER VOLUME / WAITING FOR REQUESTS</span><span>RAW <b data-state="raw-bytes">0 B</b> → SENT <b data-state="sent-bytes">0 B</b></span></div>
+                    <div class="c-bars" aria-hidden="true"><span class="c-bars__empty">NO REQUESTS OBSERVED</span></div>
+                  </div>
+                </section>
+
+                <section class="c-events" aria-labelledby="c-events-title">
+                  <header class="c-section-heading"><div><span class="c-overline">EVENT STREAM</span><h2 id="c-events-title">最近事件</h2></div><span class="c-muted">memory only</span></header>
+                  <div class="c-table-wrap">
+                    <table>
+                      <thead><tr><th scope="col">TIME</th><th scope="col">EVENT</th><th scope="col">PATH</th><th scope="col">STATUS</th></tr></thead>
+                      <tbody><tr><td>START</td><td>turbo.desktop.ready</td><td><code>local shell</code></td><td><span class="c-good">READY</span></td></tr><tr><td>WAIT</td><td>codex.config.pending</td><td><code>next ticket</code></td><td><span class="c-warn">WAITING</span></td></tr><tr><td>WAIT</td><td>compression.pending</td><td><code>zstd / level 3</code></td><td><span class="c-warn">PENDING</span></td></tr></tbody>
+                    </table>
+                  </div>
+                  <div class="c-event-footer"><span>HTTP REQUESTS</span><strong data-state="requests">0</strong><span>COMPRESSION</span><strong>WAITING</strong></div>
+                </section>
+              </div>
+            </div>
+            <footer class="c-footer"><span>AI COVE TURBO / LOCAL-FIRST ENHANCEMENT</span><span>NO REQUEST BODY RETAINED</span><span>DESKTOP MVP</span></footer>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

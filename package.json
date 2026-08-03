@@ -1,0 +1,14 @@
+{
+  "name": "ai-cove-turbo",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "check": "node --check src/app.js && cargo check --manifest-path src-tauri/Cargo.toml",
+    "test": "node --test tests/*.test.mjs && cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1"
+  }
+}

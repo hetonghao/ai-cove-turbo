@@ -1,0 +1,55 @@
+[package]
+name = "ai-cove-turbo"
+version = "0.1.0"
+description = "AI Cove Turbo desktop shell"
+authors = ["AI Cove"]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/hetonghao/ai-cove-turbo"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+elided_lifetimes_in_paths = "warn"
+non_ascii_idents = "deny"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+single_use_lifetimes = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+mem_forget = "deny"
+dbg_macro = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+module_name_repetitions = "allow"
+multiple_crate_versions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
