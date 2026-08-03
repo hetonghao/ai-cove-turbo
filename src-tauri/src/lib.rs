@@ -7,6 +7,9 @@ pub(crate) mod config;
 pub(crate) mod proxy;
 pub(crate) mod runtime;
 
+#[cfg(test)]
+mod benchmark;
+
 use std::{
     process::Command,
     sync::{
