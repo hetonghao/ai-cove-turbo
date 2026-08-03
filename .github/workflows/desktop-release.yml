@@ -1,0 +1,166 @@
+name: AI Cove Turbo Desktop Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "turbo-v*"
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: 22
+  DOWNLOAD_BASE_URL: https://ai-cove.com/downloads/turbo
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-aarch64
+            os: macos-14
+          - platform: windows-x86_64
+            os: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check and test
+        run: |
+          npm run check
+          npm test
+
+      - name: Build Tauri bundle
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.AI_COVE_TURBO_TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.AI_COVE_TURBO_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run desktop:build
+
+      - name: Collect release artifacts
+        shell: bash
+        run: |
+          mkdir -p release-inputs/${{ matrix.platform }}
+          find src-tauri/target/release/bundle -type f \
+            \( -name '*.dmg' -o -name '*.exe' -o -name '*.app.tar.gz' -o \
+               -name '*.dmg.sig' -o -name '*.exe.sig' -o -name '*.app.tar.gz.sig' -o \
+               -name 'latest.json' \) -exec cp {} release-inputs/${{ matrix.platform }}/ \;
+          test -n "$(find release-inputs/${{ matrix.platform }} -type f -print -quit)"
+
+      - name: Upload platform artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-cove-turbo-${{ matrix.platform }}
+          path: release-inputs/${{ matrix.platform }}
+          if-no-files-found: error
+
+  assemble:
+    name: Assemble and validate release
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-inputs
+          pattern: ai-cove-turbo-*
+
+      - name: Assemble merged latest.json
+        env:
+          DOWNLOAD_BASE_URL: ${{ env.DOWNLOAD_BASE_URL }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const root = 'release-inputs';
+          const output = 'desktop-release';
+          const baseUrl = process.env.DOWNLOAD_BASE_URL.replace(/\/$/, '');
+          fs.mkdirSync(output, { recursive: true });
+
+          function listFiles(dir) {
+            return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+              const entryPath = path.join(dir, entry.name);
+              return entry.isDirectory() ? listFiles(entryPath) : [entryPath];
+            });
+          }
+
+          const files = listFiles(root);
+          const manifests = files.filter((file) => path.basename(file) === 'latest.json');
+          if (manifests.length !== 2) throw new Error(`expected 2 platform latest.json files, got ${manifests.length}`);
+
+          let merged;
+          for (const manifestPath of manifests) {
+            const next = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            if (!next.version || !next.platforms || Object.keys(next.platforms).length !== 1) {
+              throw new Error(`invalid platform manifest: ${manifestPath}`);
+            }
+            if (!merged) {
+              merged = { version: next.version, notes: next.notes || '', pub_date: next.pub_date, platforms: {} };
+            } else if (merged.version !== next.version) {
+              throw new Error(`version mismatch: ${merged.version} != ${next.version}`);
+            }
+            for (const [platform, details] of Object.entries(next.platforms)) {
+              if (merged.platforms[platform]) throw new Error(`duplicate platform: ${platform}`);
+              const artifactName = path.basename(new URL(details.url).pathname);
+              if (!artifactName || !details.signature) throw new Error(`incomplete platform entry: ${platform}`);
+              merged.platforms[platform] = {
+                ...details,
+                url: `${baseUrl}/${artifactName}`
+              };
+            }
+          }
+
+          const requiredPlatforms = ['darwin-aarch64', 'windows-x86_64'];
+          for (const platform of requiredPlatforms) {
+            if (!merged.platforms[platform]) throw new Error(`missing updater platform: ${platform}`);
+          }
+
+          for (const filePath of files) {
+            const file = path.basename(filePath);
+            if (file !== 'latest.json' && /\.(dmg|exe|app\.tar\.gz)(\.sig)?$/.test(file)) {
+              fs.copyFileSync(filePath, path.join(output, file));
+            }
+          }
+          fs.writeFileSync(path.join(output, 'latest.json'), `${JSON.stringify(merged, null, 2)}\n`);
+          NODE
+          test -s desktop-release/latest.json
+          test -n "$(find desktop-release -type f -name '*.dmg' -print -quit)"
+          test -n "$(find desktop-release -type f -name '*.exe' -print -quit)"
+          test -n "$(find desktop-release -type f -name '*.sig' -print -quit)"
+
+      - name: Upload publish directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-cove-turbo-downloads
+          path: desktop-release
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: desktop-release/*
