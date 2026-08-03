@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="AI Cove Turbo 本地加速配置与运行面板原型" />
+    <meta name="theme-color" content="#080c0b" />
+    <title>AI Cove Turbo</title>
+    <link rel="icon" type="image/png" href="./assets/turbo-icon.png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="sr-only" href="#main-content">跳到主要内容</a>
+
+    <div class="turbo-shell">
+      <header class="turbo-shell__header">
+        <a class="turbo-shell__brand" href="?tab=config" aria-label="AI Cove Turbo 配置页">
+          <img class="turbo-icon turbo-icon--shell" src="./assets/turbo-icon.png" width="32" height="32" alt="" />
+          <span><strong>Turbo</strong><small>AI Cove</small></span>
+        </a>
+
+        <nav class="turbo-tabs" role="tablist" aria-label="Turbo 页面">
+          <button id="tab-config" class="turbo-tab" type="button" role="tab" aria-selected="true" aria-controls="panel-config" tabindex="0" data-tab="config">配置</button>
+          <button id="tab-runtime" class="turbo-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-runtime" tabindex="-1" data-tab="runtime">运行</button>
+        </nav>
+
+        <span class="turbo-shell__meta">LOCAL PREVIEW</span>
+      </header>
+
+      <main id="main-content" class="turbo-panels">
+        <section id="panel-config" class="tab-panel variant variant--b" role="tabpanel" aria-labelledby="tab-config" data-panel="config">
+          <div class="b-stage">
+            <div class="b-backdrop" aria-hidden="true"><span></span><span></span><span></span></div>
+            <article class="b-popover">
+              <header class="b-header">
+                <a class="b-brand" href="#config-title" aria-label="AI Cove Turbo">
+                  <img class="turbo-icon turbo-icon--popover" src="./assets/turbo-icon.png" width="24" height="24" alt="" />
+                  <span><strong>Turbo</strong><small>AI Cove</small></span>
+                </a>
+                <span class="b-window-label">菜单栏</span>
+                <span class="icon-button" aria-hidden="true"><span>···</span></span>
+              </header>
+
+              <section class="b-status" aria-labelledby="config-title">
+                <div class="status-orb" aria-hidden="true"><span></span></div>
+                <div><p class="eyebrow">AI Cove / 运行中</p><h1 id="config-title">连接稳定</h1><p>本机通道 <code>4317</code> 正在转发</p></div>
+                <span class="status-tick" aria-label="健康检查通过">✓</span>
+              </section>
+
+              <div class="b-divider"></div>
+              <section class="b-controls" aria-labelledby="b-controls-title">
+                <h2 id="b-controls-title" class="sr-only">快速控制</h2>
+                <button class="b-control" type="button" data-action="toggle-compression" aria-pressed="true">
+                  <span class="b-control__icon" aria-hidden="true">↓</span><span><strong>压缩模式</strong><small>减少请求上行字节</small></span><span class="b-control__state" data-state="compression">开</span><span class="b-switch" aria-hidden="true"><i></i></span>
+                </button>
+                <button class="b-control" type="button" data-action="toggle-websocket" aria-pressed="true">
+                  <span class="b-control__icon" aria-hidden="true">↔</span><span><strong>WebSocket</strong><small>保持连接复用</small></span><span class="b-control__state" data-state="websocket">开</span><span class="b-switch" aria-hidden="true"><i></i></span>
+                </button>
+              </section>
+
+              <section class="b-stats" aria-labelledby="b-stats-title">
+                <header><h2 id="b-stats-title">本次会话</h2><span class="live-label"><span class="presence-dot" aria-hidden="true"></span>实时</span></header>
+                <div class="b-stat-grid">
+                  <div><span>请求</span><strong data-state="requests">24</strong></div>
+                  <div><span>已发送</span><strong data-state="sent-bytes">1.06 MB</strong></div>
+                  <div><span>压缩率</span><strong data-state="ratio">42.4%</strong></div>
+                </div>
+                <p class="b-transport"><span class="presence-dot" aria-hidden="true"></span><span data-state="ws-status">WebSocket 已连接</span><em>回退 <b data-state="fallbacks">2</b> 次</em></p>
+              </section>
+
+              <footer class="b-footer">
+                <button class="b-autostart" type="button" data-action="toggle-autostart" aria-pressed="true"><span class="b-autostart__icon" aria-hidden="true">⌁</span><span>开机自启动</span><strong data-state="autostart">开</strong></button>
+                <button class="b-restart" type="button" data-action="restart-codex"><span data-state="restart">重启 Codex</span><span aria-hidden="true">↗</span></button>
+              </footer>
+            </article>
+            <p class="b-hint"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>T</kbd> 打开设置 · 关闭窗口不会停止 Turbo</p>
+          </div>
+        </section>
+
+        <section id="panel-runtime" class="tab-panel variant variant--c" role="tabpanel" aria-labelledby="tab-runtime" data-panel="runtime" hidden>
+          <div class="c-console">
+            <header class="c-topbar">
+              <div class="c-product"><span class="c-prompt" aria-hidden="true">//</span><strong>AI COVE TURBO</strong><span class="c-version">v0.1 prototype</span></div>
+              <div class="c-topbar__right"><span class="c-live"><i aria-hidden="true"></i> LOCAL CHANNEL ONLINE</span><code>SESSION 8F21-A4</code></div>
+            </header>
+
+            <div class="c-titlebar">
+              <div><p class="c-overline">OPERATIONS / TELEMETRY</p><h1>传输面板</h1><p>只保留当前运行周期的聚合观测。没有正文，没有密钥，没有历史数据库。</p></div>
+            </div>
+
+            <div class="c-layout">
+              <aside class="c-sidebar" aria-label="当前路由">
+                <section class="c-side-section c-route" aria-labelledby="c-route-title">
+                  <header><span class="c-overline">ROUTE</span><h2 id="c-route-title">当前路径</h2></header>
+                  <dl><div><dt>LOCAL</dt><dd><code>127.0.0.1:4317</code></dd></div><div><dt>UPSTREAM</dt><dd><code>api.ai-cove.com/v1</code></dd></div><div><dt>WS STATUS</dt><dd><span class="c-good" data-state="ws-status">CONNECTED</span></dd></div></dl>
+                </section>
+                <p class="c-sidebar-note"><span aria-hidden="true">[i]</span> 运行面板只展示聚合状态，配置请在<span class="keep-together">“配置”Tab</span> 修改。</p>
+              </aside>
+
+              <div class="c-main">
+                <section class="c-readout" aria-labelledby="c-readout-title">
+                  <header class="c-section-heading"><div><span class="c-overline">OBSERVED / 00:09:42</span><h2 id="c-readout-title">当前运行周期</h2></div><span class="c-stream"><i aria-hidden="true"></i>STREAMING</span></header>
+                  <div class="c-metrics">
+                    <div class="c-metric c-metric--primary"><span>REQUESTS</span><strong data-state="requests">24</strong><small>requests observed</small></div>
+                    <div class="c-metric"><span>RAW BYTES</span><strong data-state="raw-bytes">1.84 MB</strong><small>before transform</small></div>
+                    <div class="c-metric"><span>SENT BYTES</span><strong data-state="sent-bytes">1.06 MB</strong><small>after transform</small></div>
+                    <div class="c-metric"><span>RATIO</span><strong data-state="ratio">42.4%</strong><small>compression delta</small></div>
+                  </div>
+                  <div class="c-graph" role="img" aria-label="过去 24 个请求的转发字节趋势">
+                    <div class="c-graph__head"><span>TRANSFER VOLUME / LAST 24 REQUESTS</span><span>RAW <b data-state="raw-bytes">1.84 MB</b> → SENT <b data-state="sent-bytes">1.06 MB</b></span></div>
+                    <div class="c-bars" aria-hidden="true"><i style="--bar: 26%"></i><i style="--bar: 42%"></i><i style="--bar: 31%"></i><i style="--bar: 58%"></i><i style="--bar: 49%"></i><i style="--bar: 70%"></i><i style="--bar: 54%"></i><i style="--bar: 82%"></i><i style="--bar: 63%"></i><i style="--bar: 76%"></i><i style="--bar: 68%"></i><i style="--bar: 91%"></i><i style="--bar: 72%"></i><i style="--bar: 84%"></i><i style="--bar: 60%"></i><i style="--bar: 77%"></i><i style="--bar: 49%"></i><i style="--bar: 67%"></i><i style="--bar: 45%"></i><i style="--bar: 73%"></i><i style="--bar: 56%"></i><i style="--bar: 80%"></i><i style="--bar: 63%"></i><i style="--bar: 88%"></i></div>
+                  </div>
+                </section>
+
+                <section class="c-events" aria-labelledby="c-events-title">
+                  <header class="c-section-heading"><div><span class="c-overline">EVENT STREAM</span><h2 id="c-events-title">最近事件</h2></div><span class="c-muted">memory only</span></header>
+                  <div class="c-table-wrap">
+                    <table>
+                      <thead><tr><th scope="col">TIME</th><th scope="col">EVENT</th><th scope="col">PATH</th><th scope="col">STATUS</th></tr></thead>
+                      <tbody><tr><td>09:42:18</td><td>response.completed</td><td><code>/v1/responses</code></td><td><span class="c-good">OK</span></td></tr><tr><td>09:42:14</td><td>websocket.upgrade</td><td><code>permessage-deflate</code></td><td><span class="c-good">VERIFIED</span></td></tr><tr><td>09:41:57</td><td>http.fallback</td><td><code>zstd / level 3</code></td><td><span class="c-warn">FALLBACK</span></td></tr></tbody>
+                    </table>
+                  </div>
+                  <div class="c-event-footer"><span>HTTP FALLBACKS</span><strong data-state="fallbacks">2</strong><span>WS HANDSHAKE</span><strong data-state="ws-status">CONNECTED</strong></div>
+                </section>
+              </div>
+            </div>
+            <footer class="c-footer"><span>AI COVE TURBO / LOCAL-FIRST ENHANCEMENT</span><span>NO REQUEST BODY RETAINED</span><span>LOCAL PREVIEW</span></footer>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
