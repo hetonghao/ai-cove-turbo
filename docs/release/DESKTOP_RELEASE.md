@@ -7,7 +7,7 @@
 - `macos-14`：macOS arm64
 - `windows-latest`：Windows x64
 
-每个平台先执行 `npm run check` 和 `npm test`，再执行 Tauri 构建。平台产物上传后，在 Ubuntu 汇总 job 中合并并校验 `latest.json`。
+每个平台先执行 `npm run check` 和 `npm test`，再执行 Tauri 构建。平台产物上传后，在 Ubuntu 汇总 job 中合并并校验 `latest.json`；Windows 同时收集安装器 `.exe` 和 updater 实际消费的 `.exe.zip` 及签名。
 
 ## 签名 Secrets
 
@@ -16,7 +16,11 @@
 - `AI_COVE_TURBO_TAURI_SIGNING_PRIVATE_KEY`
 - `AI_COVE_TURBO_TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 
-签名私钥仍需由主 Agent/仓库管理员在 GitHub 仓库 Secrets 中配置。
+并读取以下 GitHub Actions Repository Variable：
+
+- `AI_COVE_TURBO_TAURI_SIGNING_PUBLIC_KEY`
+
+签名私钥仍需由仓库管理员在 GitHub 仓库 Secrets 中配置；对应独立公钥放入 Repository Variable，构建时注入 `TURBO_UPDATER_PUBLIC_KEY`。工作流通过 `TAURI_CONFIG` 只在正式构建启用 updater artifacts；本地开发构建不要求私钥，并在未注入公钥时显示“未配置”。
 
 ## 正式下载地址
 
@@ -34,15 +38,25 @@ https://ai-cove.com/downloads/turbo/
 
 GitHub Actions 会生成 `ai-cove-turbo-downloads` 汇总 artifact，并在 tag 发布时附加 GitHub Release。将该目录同步到正式静态下载目录的动作需要由现有 AI Cove 发布链路承接。
 
-## 主 Agent 必须接入的配置点
+## 当前客户端接入状态
 
-本子 Agent 未修改 `src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 或 Cargo 源码。要让 updater 真正工作，主 Agent 需要：
+- `src-tauri/tauri.conf.json` 已配置正式 updater endpoint、平台图标和安装目标。
+- `tauri-plugin-updater` 已注册，前端可检查、下载并安装签名更新；未注入独立公钥的本地构建会明确显示“未配置”。
+- `src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json` 当前版本均为 `0.1.0`。
+- 正式构建仍必须提供上述私钥、密码和公钥；缺少任一签名参数时工作流应直接失败。
 
-1. 在 `src-tauri/tauri.conf.json` 的 `plugins` 增加 updater 配置：
-   - `endpoints`: `https://ai-cove.com/downloads/turbo/latest.json`
-   - `pubkey`: AI Cove Turbo 专用 updater 公钥
-2. 在 `bundle` 中保留 `icons/32x32.png`、`icons/128x128.png`、`icons/128x128@2x.png`、`icons/icon.icns`、`icons/icon.ico`。
-3. 在 `src-tauri/Cargo.toml` 增加并启用 `tauri-plugin-updater`；在 `src-tauri/src/main.rs` 注册该插件，并接入前端更新检查调用。
-4. 用同一版本号同步 `src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json`，使两个 runner 生成的 manifest 版本一致。
+## WebSocket 发布验证
 
-以上配置点刻意没有在本子 Agent 的提交中修改，避免覆盖并行 Agent 的 Rust/Tauri 工作。
+普通测试使用本地模拟上游验证 Upgrade、标准透明 `permessage-deflate` 头透传、私有 `ai-cove-zstd.v1` 双向 text/binary、固定跨语言解码向量、私有握手剥离 Extensions、拒绝私有能力后的透明重连、连接关闭、禁用与 HTTP zstd 回退。具备 AI Cove 凭证且服务端私有协议已部署时再显式运行线上门禁：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml \
+  live_ai_cove_websocket_handshake_passes_through_turbo -- --ignored
+
+cargo test --manifest-path src-tauri/Cargo.toml \
+  live_codex_request_uses_turbo_websocket -- --ignored
+```
+
+两个线上测试都使用隔离配置或环境变量，不应修改用户真实的 `~/.codex/config.toml`。此前标准 WebSocket 门禁已通过，脱敏记录见 `docs/verification/2026-08-03-websocket-live.md`；该记录早于私有 zstd 实现，不能作为公网腿 zstd 已生效的证据。
+
+私有模式下，Codex→Turbo 回环握手不接受 `permessage-deflate`，Turbo→AI Cove 只提出 `ai-cove-zstd.v1` 且不提出 Extensions；只有服务端未接受该 subprotocol 时，Turbo 才重连标准透明 WS 并恢复 Codex 原始 `permessage-deflate` 头。发布前必须以 `websocketZstdVerified=true`、公网发送字节指标和服务端聚合字节共同证明真实 zstd 已发生；不新增第三个用户开关。

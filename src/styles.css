@@ -142,6 +142,15 @@ h2 {
 .keep-together {
   white-space: nowrap;
 }
+
+.is-conditional[hidden] {
+  display: none !important;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
 /* B — compact menu-bar popover */
 .variant--b {
   --b-bg: #0b1010;
@@ -353,6 +362,115 @@ h2 {
   background: var(--b-line);
 }
 
+.b-config,
+.b-update {
+  margin: 0 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--b-line);
+}
+
+.b-config header,
+.b-update header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.b-config h2,
+.b-update h2 {
+  color: var(--b-muted);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.b-config header span,
+.b-update header span {
+  color: var(--b-accent);
+  font-family: var(--font-mono);
+  font-size: 0.57rem;
+}
+
+.b-config dl {
+  display: grid;
+  gap: 7px;
+  margin: 11px 0 0;
+}
+
+.b-config dl > div {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.b-config dt,
+.b-config dd,
+.b-config__message,
+.b-update p {
+  margin: 0;
+  font-size: 0.6rem;
+  line-height: 1.45;
+}
+
+.b-config dt {
+  color: var(--b-faint);
+}
+
+.b-config dd {
+  overflow: hidden;
+  color: var(--b-muted);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.b-config code {
+  font-size: 0.57rem;
+}
+
+.b-config__message,
+.b-update p {
+  margin-top: 10px;
+  color: var(--b-faint);
+}
+
+.b-notice {
+  margin: 11px 16px 0;
+  padding: 11px 12px;
+  border: 1px solid var(--b-accent-border);
+  border-radius: 9px;
+  color: var(--b-muted);
+  background: var(--b-accent-soft);
+}
+
+.b-notice--warn {
+  border-color: rgba(230, 185, 139, 0.24);
+  background: rgba(230, 185, 139, 0.07);
+}
+
+.b-notice strong {
+  color: var(--b-ink);
+  font-size: 0.65rem;
+}
+
+.b-notice p {
+  margin-top: 4px;
+  font-size: 0.59rem;
+  line-height: 1.5;
+}
+
+.b-notice button {
+  margin-top: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--b-line);
+  border-radius: 6px;
+  color: var(--b-ink);
+  background: var(--b-surface-2);
+  font-size: 0.58rem;
+}
+
 .b-controls {
   display: grid;
   gap: 4px;
@@ -536,6 +654,7 @@ h2 {
 }
 
 .b-footer {
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 10px;
   padding: 13px 16px 15px;
@@ -583,6 +702,38 @@ h2 {
 .b-restart:hover {
   border-color: rgba(112, 216, 238, 0.4);
   background: #243029;
+}
+
+.b-update {
+  border-bottom: 0;
+}
+
+.b-progress {
+  position: relative;
+  height: 16px;
+  margin-top: 9px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--b-surface-2);
+}
+
+.b-progress i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--progress);
+  background: var(--b-accent-soft);
+}
+
+.b-progress span {
+  position: relative;
+  z-index: 1;
+  display: block;
+  padding-right: 5px;
+  color: var(--b-accent);
+  font-family: var(--font-mono);
+  font-size: 0.54rem;
+  line-height: 16px;
+  text-align: right;
 }
 
 .b-hint {
@@ -952,6 +1103,38 @@ h2 {
   font-size: 0.54rem;
   letter-spacing: 0.08em;
   text-align: center;
+}
+
+.c-bars--totals {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.c-bars--totals > span {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: end;
+  height: 100%;
+  min-width: 0;
+}
+
+.c-bars--totals i {
+  height: var(--volume);
+}
+
+.c-bars--totals small {
+  padding-top: 4px;
+  color: var(--c-faint);
+  font-family: var(--font-mono);
+  font-size: 0.5rem;
+  text-align: center;
+}
+
+body[data-service-healthy="false"] .status-orb,
+body[data-service-healthy="false"] .status-tick {
+  border-color: rgba(230, 185, 139, 0.45);
+  color: var(--c-warn);
+  background: rgba(230, 185, 139, 0.08);
 }
 
 .c-events {

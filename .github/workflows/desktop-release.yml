@@ -52,15 +52,21 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.AI_COVE_TURBO_TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.AI_COVE_TURBO_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run desktop:build
+          TURBO_UPDATER_PUBLIC_KEY: ${{ vars.AI_COVE_TURBO_TAURI_SIGNING_PUBLIC_KEY }}
+          TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":true}}'
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          test -n "$TURBO_UPDATER_PUBLIC_KEY"
+          npm run desktop:build
 
       - name: Collect release artifacts
         shell: bash
         run: |
           mkdir -p release-inputs/${{ matrix.platform }}
           find src-tauri/target/release/bundle -type f \
-            \( -name '*.dmg' -o -name '*.exe' -o -name '*.app.tar.gz' -o \
-               -name '*.dmg.sig' -o -name '*.exe.sig' -o -name '*.app.tar.gz.sig' -o \
+            \( -name '*.dmg' -o -name '*.exe' -o -name '*.exe.zip' -o -name '*.app.tar.gz' -o \
+               -name '*.dmg.sig' -o -name '*.exe.sig' -o -name '*.exe.zip.sig' -o -name '*.app.tar.gz.sig' -o \
                -name 'latest.json' \) -exec cp {} release-inputs/${{ matrix.platform }}/ \;
           test -n "$(find release-inputs/${{ matrix.platform }} -type f -print -quit)"
 
@@ -125,6 +131,9 @@ jobs:
               if (merged.platforms[platform]) throw new Error(`duplicate platform: ${platform}`);
               const artifactName = path.basename(new URL(details.url).pathname);
               if (!artifactName || !details.signature) throw new Error(`incomplete platform entry: ${platform}`);
+              if (!files.some((file) => path.basename(file) === artifactName)) {
+                throw new Error(`missing updater artifact referenced by ${platform}: ${artifactName}`);
+              }
               merged.platforms[platform] = {
                 ...details,
                 url: `${baseUrl}/${artifactName}`
@@ -139,7 +148,7 @@ jobs:
 
           for (const filePath of files) {
             const file = path.basename(filePath);
-            if (file !== 'latest.json' && /\.(dmg|exe|app\.tar\.gz)(\.sig)?$/.test(file)) {
+            if (file !== 'latest.json' && /\.(dmg|exe|exe\.zip|app\.tar\.gz)(\.sig)?$/.test(file)) {
               fs.copyFileSync(filePath, path.join(output, file));
             }
           }
@@ -148,6 +157,7 @@ jobs:
           test -s desktop-release/latest.json
           test -n "$(find desktop-release -type f -name '*.dmg' -print -quit)"
           test -n "$(find desktop-release -type f -name '*.exe' -print -quit)"
+          test -n "$(find desktop-release -type f -name '*.exe.zip' -print -quit)"
           test -n "$(find desktop-release -type f -name '*.sig' -print -quit)"
 
       - name: Upload publish directory

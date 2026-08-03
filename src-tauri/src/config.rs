@@ -1,0 +1,644 @@
+use std::{
+    fmt, fs,
+    io::Write,
+    net::IpAddr,
+    path::{Path, PathBuf},
+};
+
+use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
+use toml_edit::{DocumentMut, Item, value};
+use url::Url;
+
+pub(crate) const AI_COVE_UPSTREAM: &str = "https://api.ai-cove.com/v1";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UpstreamCompatibility {
+    AiCove,
+    OtherHttps,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Preflight {
+    pub(crate) config_path: PathBuf,
+    pub(crate) provider: String,
+    pub(crate) upstream: Url,
+    pub(crate) supports_websockets: Option<bool>,
+    pub(crate) compatibility: UpstreamCompatibility,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ManagedConfig {
+    config_path: PathBuf,
+    provider: String,
+    original_base_url: String,
+    managed_base_url: String,
+    #[serde(default)]
+    original_supports_websockets: Option<bool>,
+    #[serde(default)]
+    managed_supports_websockets: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RestoreOutcome {
+    Restored,
+    Conflict,
+    NoRecord,
+}
+
+#[derive(Debug)]
+pub(crate) enum ConfigError {
+    Missing,
+    Read(std::io::Error),
+    InvalidToml(toml_edit::TomlError),
+    MissingProviderSelection,
+    MissingProvider(String),
+    MissingBaseUrl(String),
+    InvalidBaseUrl(url::ParseError),
+    LoopbackUpstream,
+    InsecureUpstream,
+    InvalidManagedEndpoint,
+    Write(std::io::Error),
+    Json(serde_json::Error),
+    InvalidManagedState(String),
+    FieldOwnershipLost(&'static str),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing => write!(formatter, "未找到默认 Codex 配置 ~/.codex/config.toml"),
+            Self::Read(error) => write!(formatter, "无法读取 Codex 配置：{error}"),
+            Self::InvalidToml(error) => write!(formatter, "Codex 配置 TOML 无法解析：{error}"),
+            Self::MissingProviderSelection => write!(formatter, "Codex 根配置缺少 model_provider"),
+            Self::MissingProvider(provider) => {
+                write!(formatter, "Codex 配置缺少受管 Provider：{provider}")
+            }
+            Self::MissingBaseUrl(provider) => {
+                write!(formatter, "受管 Provider {provider} 缺少 base_url")
+            }
+            Self::InvalidBaseUrl(error) => write!(formatter, "Provider base_url 无效：{error}"),
+            Self::LoopbackUpstream => {
+                write!(formatter, "当前上游是本机回环地址，Turbo 已阻止代理回环")
+            }
+            Self::InsecureUpstream => write!(formatter, "Turbo 只接管 HTTPS 上游"),
+            Self::InvalidManagedEndpoint => write!(formatter, "Turbo 本地端点必须是 HTTP 回环地址"),
+            Self::Write(error) => write!(formatter, "无法原子更新 Codex 配置：{error}"),
+            Self::Json(error) => write!(formatter, "Turbo 恢复记录无效：{error}"),
+            Self::InvalidManagedState(provider) => {
+                write!(formatter, "受管 Provider {provider} 的配置结构已改变")
+            }
+            Self::FieldOwnershipLost(field) => {
+                write!(
+                    formatter,
+                    "Codex 配置中的 {field} 已被外部修改，Turbo 不会覆盖"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+pub(crate) fn preflight(path: &Path) -> Result<Preflight, ConfigError> {
+    if !path.exists() {
+        return Err(ConfigError::Missing);
+    }
+    let source = fs::read_to_string(path).map_err(ConfigError::Read)?;
+    let document = source
+        .parse::<DocumentMut>()
+        .map_err(ConfigError::InvalidToml)?;
+    let provider = document
+        .get("model_provider")
+        .and_then(toml_edit::Item::as_str)
+        .ok_or(ConfigError::MissingProviderSelection)?
+        .to_owned();
+    let provider_table = document
+        .get("model_providers")
+        .and_then(|providers| providers.get(&provider))
+        .and_then(toml_edit::Item::as_table_like)
+        .ok_or_else(|| ConfigError::MissingProvider(provider.clone()))?;
+    let raw_upstream = provider_table
+        .get("base_url")
+        .and_then(toml_edit::Item::as_str)
+        .ok_or_else(|| ConfigError::MissingBaseUrl(provider.clone()))?;
+    let upstream = Url::parse(raw_upstream).map_err(ConfigError::InvalidBaseUrl)?;
+    let supports_websockets = match provider_table.get("supports_websockets") {
+        Some(item) => Some(
+            item.as_bool()
+                .ok_or_else(|| ConfigError::InvalidManagedState(provider.clone()))?,
+        ),
+        None => None,
+    };
+
+    if is_loopback(&upstream) {
+        return Err(ConfigError::LoopbackUpstream);
+    }
+    if upstream.scheme() != "https" {
+        return Err(ConfigError::InsecureUpstream);
+    }
+
+    let compatibility = if upstream.host_str() == Some("api.ai-cove.com") {
+        UpstreamCompatibility::AiCove
+    } else {
+        UpstreamCompatibility::OtherHttps
+    };
+
+    Ok(Preflight {
+        config_path: path.to_path_buf(),
+        provider,
+        upstream,
+        supports_websockets,
+        compatibility,
+    })
+}
+
+pub(crate) fn set_ai_cove_upstream(path: &Path) -> Result<(), ConfigError> {
+    let source = fs::read_to_string(path).map_err(ConfigError::Read)?;
+    let mut document = source
+        .parse::<DocumentMut>()
+        .map_err(ConfigError::InvalidToml)?;
+    let provider = document
+        .get("model_provider")
+        .and_then(Item::as_str)
+        .ok_or(ConfigError::MissingProviderSelection)?
+        .to_owned();
+    let current = provider_base_url(&document, &provider)?;
+    let current_url = Url::parse(&current).map_err(ConfigError::InvalidBaseUrl)?;
+    if !is_loopback(&current_url) {
+        return Err(ConfigError::FieldOwnershipLost("base_url"));
+    }
+    provider_table_mut(&mut document, &provider)?.insert("base_url", value(AI_COVE_UPSTREAM));
+    write_atomic(path, document.to_string().as_bytes())
+}
+
+pub(crate) fn take_over(
+    check: &Preflight,
+    endpoint: &str,
+    websocket_enabled: bool,
+    recovery_path: &Path,
+) -> Result<ManagedConfig, ConfigError> {
+    let endpoint_url = Url::parse(endpoint).map_err(ConfigError::InvalidBaseUrl)?;
+    if endpoint_url.scheme() != "http" || !is_loopback(&endpoint_url) {
+        return Err(ConfigError::InvalidManagedEndpoint);
+    }
+
+    let managed = ManagedConfig {
+        config_path: check.config_path.clone(),
+        provider: check.provider.clone(),
+        original_base_url: check.upstream.as_str().to_owned(),
+        managed_base_url: endpoint.to_owned(),
+        original_supports_websockets: check.supports_websockets,
+        managed_supports_websockets: Some(websocket_enabled),
+    };
+    write_json_atomic(recovery_path, &managed)?;
+
+    let result = update_managed_values(
+        &managed.config_path,
+        &managed.provider,
+        endpoint,
+        websocket_enabled,
+    );
+    if result.is_err() {
+        let _ = fs::remove_file(recovery_path);
+    }
+    result.map(|()| managed)
+}
+
+pub(crate) fn recover_stale(recovery_path: &Path) -> Result<RestoreOutcome, ConfigError> {
+    if !recovery_path.exists() {
+        return Ok(RestoreOutcome::NoRecord);
+    }
+    let bytes = fs::read(recovery_path).map_err(ConfigError::Read)?;
+    let managed = serde_json::from_slice::<ManagedConfig>(&bytes).map_err(ConfigError::Json)?;
+    restore(&managed, recovery_path)
+}
+
+pub(crate) fn restore(
+    managed: &ManagedConfig,
+    recovery_path: &Path,
+) -> Result<RestoreOutcome, ConfigError> {
+    let source = fs::read_to_string(&managed.config_path).map_err(ConfigError::Read)?;
+    let mut document = source
+        .parse::<DocumentMut>()
+        .map_err(ConfigError::InvalidToml)?;
+    let base_url_owned =
+        provider_base_url(&document, &managed.provider)? == managed.managed_base_url;
+    let websocket_owned = managed.managed_supports_websockets.is_some_and(|value| {
+        provider_websocket(&document, &managed.provider).ok() == Some(Some(value))
+    });
+    let websocket_conflict = managed.managed_supports_websockets.is_some() && !websocket_owned;
+
+    if base_url_owned || websocket_owned {
+        let provider_table = provider_table_mut(&mut document, &managed.provider)?;
+        if base_url_owned {
+            provider_table.insert("base_url", value(&managed.original_base_url));
+        }
+        if websocket_owned {
+            match managed.original_supports_websockets {
+                Some(original) => {
+                    provider_table.insert("supports_websockets", value(original));
+                }
+                None => {
+                    provider_table.remove("supports_websockets");
+                }
+            }
+        }
+        write_atomic(&managed.config_path, document.to_string().as_bytes())?;
+    }
+    let outcome = if base_url_owned && !websocket_conflict {
+        RestoreOutcome::Restored
+    } else {
+        RestoreOutcome::Conflict
+    };
+    match fs::remove_file(recovery_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ConfigError::Write(error)),
+    }
+    Ok(outcome)
+}
+
+pub(crate) fn owns_current_value(managed: &ManagedConfig) -> Result<bool, ConfigError> {
+    let source = fs::read_to_string(&managed.config_path).map_err(ConfigError::Read)?;
+    let document = source
+        .parse::<DocumentMut>()
+        .map_err(ConfigError::InvalidToml)?;
+    Ok(provider_base_url(&document, &managed.provider)? == managed.managed_base_url)
+}
+
+pub(crate) fn owns_websocket_value(managed: &ManagedConfig) -> Result<bool, ConfigError> {
+    let Some(expected) = managed.managed_supports_websockets else {
+        return Ok(false);
+    };
+    let source = fs::read_to_string(&managed.config_path).map_err(ConfigError::Read)?;
+    let document = source
+        .parse::<DocumentMut>()
+        .map_err(ConfigError::InvalidToml)?;
+    Ok(provider_websocket(&document, &managed.provider)? == Some(expected))
+}
+
+pub(crate) const fn manages_websocket(managed: &ManagedConfig) -> bool {
+    managed.managed_supports_websockets.is_some()
+}
+
+pub(crate) fn set_managed_websocket(
+    managed: &mut ManagedConfig,
+    enabled: bool,
+    recovery_path: &Path,
+) -> Result<(), ConfigError> {
+    if !owns_websocket_value(managed)? {
+        return Err(ConfigError::FieldOwnershipLost("supports_websockets"));
+    }
+    let previous = managed.clone();
+    managed.managed_supports_websockets = Some(enabled);
+    write_json_atomic(recovery_path, managed)?;
+    if let Err(error) = update_websocket(&managed.config_path, &managed.provider, Some(enabled)) {
+        *managed = previous;
+        let _ = write_json_atomic(recovery_path, managed);
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub(crate) fn relinquish_websocket(
+    managed: &mut ManagedConfig,
+    recovery_path: &Path,
+) -> Result<(), ConfigError> {
+    managed.managed_supports_websockets = None;
+    write_json_atomic(recovery_path, managed)
+}
+
+fn update_managed_values(
+    path: &Path,
+    provider: &str,
+    base_url: &str,
+    websocket_enabled: bool,
+) -> Result<(), ConfigError> {
+    let source = fs::read_to_string(path).map_err(ConfigError::Read)?;
+    let mut document = source
+        .parse::<DocumentMut>()
+        .map_err(ConfigError::InvalidToml)?;
+    let provider_table = provider_table_mut(&mut document, provider)?;
+    provider_table.insert("base_url", value(base_url));
+    provider_table.insert("supports_websockets", value(websocket_enabled));
+    write_atomic(path, document.to_string().as_bytes())
+}
+
+fn update_websocket(
+    path: &Path,
+    provider: &str,
+    websocket_enabled: Option<bool>,
+) -> Result<(), ConfigError> {
+    let source = fs::read_to_string(path).map_err(ConfigError::Read)?;
+    let mut document = source
+        .parse::<DocumentMut>()
+        .map_err(ConfigError::InvalidToml)?;
+    let provider_table = provider_table_mut(&mut document, provider)?;
+    match websocket_enabled {
+        Some(enabled) => {
+            provider_table.insert("supports_websockets", value(enabled));
+        }
+        None => {
+            provider_table.remove("supports_websockets");
+        }
+    }
+    write_atomic(path, document.to_string().as_bytes())
+}
+
+fn provider_table_mut<'a>(
+    document: &'a mut DocumentMut,
+    provider: &str,
+) -> Result<&'a mut dyn toml_edit::TableLike, ConfigError> {
+    document
+        .get_mut("model_providers")
+        .and_then(|providers| providers.get_mut(provider))
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| ConfigError::InvalidManagedState(provider.to_owned()))
+}
+
+fn provider_base_url(document: &DocumentMut, provider: &str) -> Result<String, ConfigError> {
+    document
+        .get("model_providers")
+        .and_then(|providers| providers.get(provider))
+        .and_then(Item::as_table_like)
+        .and_then(|provider_table| provider_table.get("base_url"))
+        .and_then(Item::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| ConfigError::InvalidManagedState(provider.to_owned()))
+}
+
+fn provider_websocket(document: &DocumentMut, provider: &str) -> Result<Option<bool>, ConfigError> {
+    let provider_table = document
+        .get("model_providers")
+        .and_then(|providers| providers.get(provider))
+        .and_then(Item::as_table_like)
+        .ok_or_else(|| ConfigError::InvalidManagedState(provider.to_owned()))?;
+    provider_table
+        .get("supports_websockets")
+        .map_or(Ok(None), |item| {
+            item.as_bool()
+                .map(Some)
+                .ok_or_else(|| ConfigError::InvalidManagedState(provider.to_owned()))
+        })
+}
+
+fn write_json_atomic(path: &Path, value: &ManagedConfig) -> Result<(), ConfigError> {
+    let bytes = serde_json::to_vec(value).map_err(ConfigError::Json)?;
+    write_atomic(path, &bytes)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ConfigError::Write(std::io::Error::other("target has no parent")))?;
+    fs::create_dir_all(parent).map_err(ConfigError::Write)?;
+    let mut temporary = NamedTempFile::new_in(parent).map_err(ConfigError::Write)?;
+    temporary.write_all(bytes).map_err(ConfigError::Write)?;
+    temporary.as_file().sync_all().map_err(ConfigError::Write)?;
+    if let Ok(metadata) = fs::metadata(path) {
+        temporary
+            .as_file()
+            .set_permissions(metadata.permissions())
+            .map_err(ConfigError::Write)?;
+    }
+    temporary
+        .persist(path)
+        .map_err(|error| ConfigError::Write(error.error))?;
+    Ok(())
+}
+
+fn is_loopback(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn preflight_selects_only_the_root_provider() -> Result<(), Box<dyn Error>> {
+        let home = tempdir()?;
+        let config_dir = home.path().join(".codex");
+        fs::create_dir(&config_dir)?;
+        let path = config_dir.join("config.toml");
+        fs::write(
+            &path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "AI Cove"
+base_url = "https://api.ai-cove.com/v1"
+supports_websockets = false
+
+[model_providers.other]
+base_url = "https://example.com/v1"
+"#,
+        )?;
+
+        let result = preflight(&path)?;
+
+        assert_eq!(result.provider, "custom");
+        assert_eq!(result.upstream.as_str(), "https://api.ai-cove.com/v1");
+        assert_eq!(result.compatibility, UpstreamCompatibility::AiCove);
+        Ok(())
+    }
+
+    #[test]
+    fn takeover_and_restore_manage_base_url_and_websocket_independently()
+    -> Result<(), Box<dyn Error>> {
+        let home = tempdir()?;
+        let config_dir = home.path().join(".codex");
+        fs::create_dir(&config_dir)?;
+        let config_path = config_dir.join("config.toml");
+        let recovery_path = home.path().join("turbo/recovery.json");
+        fs::write(
+            &config_path,
+            r#"# keep this comment
+model_provider = "custom"
+model = "gpt-5.6-luna"
+
+[model_providers.custom]
+name = "AI Cove"
+base_url = "https://api.ai-cove.com/v1"
+supports_websockets = false
+
+[model_providers.other]
+base_url = "https://example.com/v1"
+"#,
+        )?;
+        let check = preflight(&config_path)?;
+
+        let managed = take_over(&check, "http://127.0.0.1:44175/v1", true, &recovery_path)?;
+        let taken_over = fs::read_to_string(&config_path)?;
+        assert!(taken_over.contains("# keep this comment"));
+        assert!(taken_over.contains("model = \"gpt-5.6-luna\""));
+        assert!(taken_over.contains("supports_websockets = true"));
+        assert!(taken_over.contains("base_url = \"https://example.com/v1\""));
+        assert!(taken_over.contains("base_url = \"http://127.0.0.1:44175/v1\""));
+        assert!(recovery_path.exists());
+
+        let outcome = restore(&managed, &recovery_path)?;
+        assert_eq!(outcome, RestoreOutcome::Restored);
+        let restored = fs::read_to_string(&config_path)?;
+        assert!(restored.contains("base_url = \"https://api.ai-cove.com/v1\""));
+        assert!(restored.contains("supports_websockets = false"));
+        assert!(restored.contains("base_url = \"https://example.com/v1\""));
+        assert!(!recovery_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn external_base_url_edit_takes_ownership() -> Result<(), Box<dyn Error>> {
+        let home = tempdir()?;
+        let config_dir = home.path().join(".codex");
+        fs::create_dir(&config_dir)?;
+        let config_path = config_dir.join("config.toml");
+        let recovery_path = home.path().join("turbo/recovery.json");
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.ai-cove.com/v1"
+"#,
+        )?;
+        let managed = take_over(
+            &preflight(&config_path)?,
+            "http://127.0.0.1:44175/v1",
+            true,
+            &recovery_path,
+        )?;
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://external.example/v1"
+"#,
+        )?;
+
+        assert!(!owns_current_value(&managed)?);
+        assert_eq!(restore(&managed, &recovery_path)?, RestoreOutcome::Conflict);
+        assert!(fs::read_to_string(&config_path)?.contains("https://external.example/v1"));
+        assert!(!recovery_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn restore_removes_websocket_field_that_was_originally_absent() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_path = root.path().join("config.toml");
+        let recovery_path = root.path().join("recovery.json");
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.ai-cove.com/v1"
+"#,
+        )?;
+
+        let managed = take_over(
+            &preflight(&config_path)?,
+            "http://127.0.0.1:44175/v1",
+            true,
+            &recovery_path,
+        )?;
+        assert!(fs::read_to_string(&config_path)?.contains("supports_websockets = true"));
+
+        assert_eq!(restore(&managed, &recovery_path)?, RestoreOutcome::Restored);
+        assert!(!fs::read_to_string(&config_path)?.contains("supports_websockets"));
+        Ok(())
+    }
+
+    #[test]
+    fn external_websocket_edit_does_not_block_base_url_restore() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_path = root.path().join("config.toml");
+        let recovery_path = root.path().join("recovery.json");
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.ai-cove.com/v1"
+supports_websockets = false
+"#,
+        )?;
+        let managed = take_over(
+            &preflight(&config_path)?,
+            "http://127.0.0.1:44175/v1",
+            true,
+            &recovery_path,
+        )?;
+        let source = fs::read_to_string(&config_path)?
+            .replace("supports_websockets = true", "supports_websockets = false");
+        fs::write(&config_path, source)?;
+
+        assert_eq!(restore(&managed, &recovery_path)?, RestoreOutcome::Conflict);
+        let restored = fs::read_to_string(&config_path)?;
+        assert!(restored.contains("base_url = \"https://api.ai-cove.com/v1\""));
+        assert!(restored.contains("supports_websockets = false"));
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_blocks_loopback_and_insecure_upstreams() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let path = root.path().join("config.toml");
+        for (base_url, expected) in [
+            ("http://127.0.0.1:44175/v1", "回环地址"),
+            ("http://example.com/v1", "HTTPS"),
+        ] {
+            fs::write(
+                &path,
+                format!(
+                    "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"{base_url}\"\n"
+                ),
+            )?;
+            let error = preflight(&path).expect_err("must reject unsafe upstream");
+            assert!(error.to_string().contains(expected));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn set_ai_cove_upstream_preserves_provider_fields() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let path = root.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:44175/v1"
+name = "AI Cove"
+api_key = "keep-me"
+supports_websockets = false
+"#,
+        )?;
+
+        set_ai_cove_upstream(&path)?;
+
+        let check = preflight(&path)?;
+        assert_eq!(check.upstream.as_str(), "https://api.ai-cove.com/v1");
+        let source = fs::read_to_string(&path)?;
+        assert!(source.contains("name = \"AI Cove\""));
+        assert!(source.contains("api_key = \"keep-me\""));
+        assert!(source.contains("supports_websockets = false"));
+        Ok(())
+    }
+}

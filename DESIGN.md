@@ -32,7 +32,7 @@
 
 - `TurboShellHeader`：Turbo 图标、产品名、配置/运行 Tab、预览标识。
 - `Tabs`：原生按钮与 `tablist/tab/tabpanel` 语义，支持点击、左右方向键、Home、End。
-- `BPopover`：状态、压缩开关、会话摘要、自启动与重启 Codex；WebSocket 在用户解锁对应票前不出现。
+- `BPopover`：状态、压缩与 WebSocket 独立开关、会话摘要、自启动、更新与重启 Codex；公网腿 zstd 复用 WebSocket 自动协商，不新增第三个开关。
 - `CConsole`：只读路由、运行指标、传输图和事件表。
 - `TurboIcon`：使用 `assets/turbo-icon.png`，只作为品牌标识，不替代真实交互控件。
 
@@ -40,7 +40,7 @@
 
 - 保留旧 B/C 的 hover、focus、pressed 反馈。
 - Tab 切换只改变可见面板与 URL 的 `?tab=config|runtime`，不增加装饰动画。
-- 压缩开关只更新当前可见状态；真实接管能力由后续票接入。
+- 配置动作通过 Tauri 命令更新真实运行状态；WebSocket 开关同时更新受管 Provider 的 `supports_websockets`，并提示重启 Codex Desktop 后验证。
 - `prefers-reduced-motion: reduce` 下将交互过渡缩短为近即时。
 
 ## 7. Depth & Surface
@@ -54,5 +54,5 @@
 - 状态不能只靠颜色表达；所有开关保留文字状态与 `aria-pressed`。
 - Tab 焦点顺序、选中状态和面板关联必须可被键盘与辅助技术识别。
 - Turbo 图标在已有文字品牌旁作为装饰图，使用空替代文本。
-- 已接受债务：当前票只交付桌面壳，数据与系统动作仍为内存状态；配置接管、代理、自启动和进程控制由后续票实现。
+- 已接受债务：运行指标只保留当前进程内的聚合值，不做历史数据库；节省时间估算要等后续基准校准后再展示。
 - 已接受债务：B/C 继承原型的局部颜色、间距和字号字面量，本票为保持用户确认的原样式不做全量令牌化；新增或调整的外壳与海蓝强调色必须使用语义令牌。

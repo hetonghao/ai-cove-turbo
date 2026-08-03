@@ -18,7 +18,7 @@ Turbo 以 AI Cove 为主要兼容上游。用户可以继续使用其他 HTTPS �
 
 1. 作为 Codex 用户，我希望 Turbo 自动启动本地加速通道，以便不再手动运行网关脚本。
 2. 作为首次使用者，我希望压缩模式默认开启，以便无需先理解传输细节就能获得核心收益。
-3. 作为首次使用者，我希望 WebSocket 模式默认开启，以便上游能力可用后应用已经处于就绪状态。
+3. 作为首次使用者，我希望 WebSocket 模式默认开启，以便直接使用 AI Cove 已上线的 Responses WebSocket 能力。
 4. 作为用户，我希望压缩模式和 WebSocket 模式是独立开关，以便可以只开一个、两个都开或两个都关。
 5. 作为用户，我希望关闭压缩模式时保留 WebSocket 模式，以便修改一个能力不会意外改变另一个能力。
 6. 作为用户，我希望关闭 WebSocket 模式时保留压缩模式，以便 HTTP 上传仍能压缩。
@@ -47,7 +47,7 @@ Turbo 以 AI Cove 为主要兼容上游。用户可以继续使用其他 HTTPS �
 29. 作为用户，我希望 hop-by-hop 头被正确过滤，以便单跳连接状态不会跨代理传播。
 30. 作为发送超大请求体的用户，我希望 Turbo 按明确上限拒绝请求，以便本地请求不能无限消耗内存。
 31. 作为使用 Responses WebSocket 的用户，我希望 Turbo 透明转发 Upgrade 和数据帧，以便 Codex 无需自定义协议即可使用上游连接模式。
-32. 作为使用 WebSocket 压缩的用户，我希望保留标准 `permessage-deflate` 协商，以便 Turbo 不引入私有 zstd 帧格式。
+32. 作为使用 WebSocket 压缩的用户，我希望私有模式的回环腿不接受 `permessage-deflate`、公网腿只使用协商后的 zstd，而标准回退恢复原始 `permessage-deflate` 协商，以便避免双重压缩且保持兼容性。
 33. 作为 WebSocket 尝试后回退 HTTP 的用户，我希望回退请求仍可使用 zstd，以便一个模式失败不会关闭另一个模式。
 34. 作为 AI Cove 用户，我希望标准 AI Cove 端点被识别为主要受支持上游，以便兼容状态明确。
 35. 作为使用其他 HTTPS 上游的用户，我希望 Turbo 提示风险但允许继续测试，以便理解风险同时保留控制权。
@@ -82,6 +82,10 @@ Turbo 以 AI Cove 为主要兼容上游。用户可以继续使用其他 HTTPS �
 64. 作为发布人员，我希望 Turbo 使用独立更新签名密钥，以便密钥泄露或轮换不影响其他 AI Cove 桌面产品。
 65. 作为开发者，我希望在 AI Cove 开启生产 WebSocket 前，先用本地模拟上游验证 Turbo 转发，以便客户端开发可以独立推进。
 66. 作为开发者，我希望最终 WebSocket 端到端验证同时以 Turbo 和 AI Cove 支持完成为门禁，以便本地成功不会被误报为生产可用。
+67. 作为 AI Cove 用户，我希望现有 WebSocket 开关在双方明确协商成功时自动启用公网腿 zstd，以便不增加第三个配置开关。
+68. 作为用户，我希望 AI Cove 不支持私有 zstd 时继续使用标准 WebSocket，以便传输优化不会破坏连接可用性。
+69. 作为用户，我希望私有 zstd 在发送应用消息后发生协议错误时安全关闭而不静默重放，以便避免重复执行请求。
+70. 作为用户，我希望只有真实发送过 zstd 消息后界面才标记已验证，以便握手声明不会被误报为实际压缩。
 
 ## Implementation Decisions
 
@@ -104,24 +108,28 @@ Turbo 以 AI Cove 为主要兼容上游。用户可以继续使用其他 HTTPS �
 - MVP 请求体上限为 128 MiB。
 - 认证、模型选择和 AI Cove 端到端自定义头会被转发；hop-by-hop 头按出站协议过滤或重建。
 - SSE 响应逐步流式透传，不做整段缓冲。
-- Responses WebSocket 透明转发，并保留标准 `permessage-deflate` 协商；不定义自定义 WebSocket zstd 帧格式。
+- 标准 Responses WebSocket 回退路径透明转发并保留 Codex 原始 `permessage-deflate` 协商；私有模式的 Codex→Turbo 回环腿明确不返回 `Sec-WebSocket-Extensions`，Turbo→AI Cove 私有腿也不提出该扩展，避免 zstd envelope 被二次压缩。
 - HTTP 回退路径仍独立支持请求体 zstd 压缩。
+- 公网腿 WebSocket zstd 不占用标准 RSV 位，也不暴露给 Codex；Turbo 只在 AI Cove 明确接受版本化私有协议后终止完整应用消息并做双端翻译。
+- 私有 zstd 复用现有 WebSocket 开关自动协商，不新增第三个用户开关；AI Cove 拒绝或不认识能力时继续走现有标准 WebSocket 透明路径。
+- 每条消息独立使用 zstd level 3，只有压缩后更小时才发送压缩 payload；声明长度与解压后长度都必须经过硬上限校验。
+- AI Cove 未接受私有 subprotocol 且尚未发送应用消息时，Turbo 重连标准透明 WebSocket；私有连接发送应用消息后发生任何协议错误时不得静默重放，应关闭连接并允许 Codex 按现有行为回退 HTTP。
 - Turbo 不把 API Key 作为应用配置读取或持久化，认证信息只随请求透传。
 - 运行状态分别表示本地服务可用、配置写入完成、Codex Desktop 已重启、HTTP 压缩已验证和 WebSocket 已验证。
 - 只有观察到匹配的真实请求后，功能才标记为已验证；此前界面显示中性的等待状态。
 - 重启动作只针对可识别的 Codex Desktop，使用平台适配的优雅退出和重新打开机制，不按宽泛进程名结束进程。
-- 运行遥测只保存在内存并且只记录聚合值：请求数、原始与转发字节数、压缩率、WebSocket 握手状态、HTTP 回退次数。它不记录正文、API Key 或完整请求头。
+- 运行遥测只保存在内存并且只记录聚合值：HTTP 请求数、原始与转发字节数、压缩率、WebSocket 握手状态、私有 WS 原始与公网发送字节数、WS zstd 实际发送验证和 HTTP 回退次数。它不记录正文、API Key 或完整请求头。
 - MVP 展示真实流量指标，但不展示未经校准的节省时间估算。
 - 后续 HTTP 收益估算使用减少字节、实测上行条件和压缩 CPU 成本；WebSocket 估算使用请求轮次、RTT、连接复用、TLS 建连和回退频率，token 数只作为工作负载特征。
 - 更新使用 Tauri 签名更新流程。Turbo 使用独立签名密钥，并从 AI Cove 下载域名读取合并后的更新清单。
 - 发布流程复用现有原生 macOS/Windows Runner、平台产物收集、清单合并和发布校验方案。CI Artifacts 只用于构建交付和备份，不作为正式更新源。
-- AI Cove 上游 WebSocket 能力在本项目外交付。Turbo 先使用本地模拟上游验证透明转发，待上游能力完成后再做生产端到端集成。
+- AI Cove 上游 WebSocket 能力在本项目外交付；截至 2026-08-03，生产端点已接受 Upgrade，Turbo 已完成本地模拟上游、认证握手和真实 Codex 请求三层验证。
 
 ## Testing Decisions
 
 - 测试只断言外部可观察行为，不绑定内部函数结构。高质量测试从三个最高层 seam 之一进入，观察配置、网络、进程或更新包结果。
 - 配置接管与恢复 seam 覆盖默认路径发现、解析失败、Provider 选择、最小字段修改、原子写入、正常恢复、残留状态修复和外部编辑冲突。
-- 本地 HTTP/WebSocket 代理 seam 覆盖回环绑定、动态端口、健康后写配置、可压缩与不可压缩请求、zstd 行为、请求体上限、header 转发、hop-by-hop 过滤、SSE 流式透传、WebSocket Upgrade 与字节透传、`permessage-deflate` 保留和 HTTP 回退。
+- 本地 HTTP/WebSocket 代理 seam 覆盖回环绑定、动态端口、健康后写配置、可压缩与不可压缩请求、zstd 行为、请求体上限、header 转发、hop-by-hop 过滤、SSE 流式透传、WebSocket Upgrade、私有握手不提出/不接受 `permessage-deflate`、拒绝私有能力后的透明协商恢复和 HTTP 回退。
 - 桌面生命周期与更新 seam 覆盖首次启动默认值、托盘/菜单栏行为、隐藏窗口与退出的区别、开机自启动、Dock 可见性、Codex Desktop 检测与安全重启、更新清单解析、签名拒绝、下载/安装进度、应用重启和跨平台打包。
 - 配置测试使用临时用户目录和代表性 TOML fixture，检查最终文件和恢复状态，不测试私有解析辅助函数。
 - 代理测试使用本地 HTTP、SSE、WebSocket 模拟上游，从公共监听入口发请求，并观察两端真实字节与 header。
@@ -129,7 +137,8 @@ Turbo 以 AI Cove 为主要兼容上游。用户可以继续使用其他 HTTPS �
 - 运行指标测试通过公共代理发送已知流量，验证聚合计数，并断言持久化状态中不存在敏感正文。
 - 更新测试使用正确签名和被篡改的清单及产物，从更新边界验证接受或拒绝行为。
 - 平台验证包含 macOS arm64 本地原生构建、Windows x64 CI 原生构建，以及产物和合并更新清单的完整性校验。
-- WebSocket 交付分两道门禁：本项目先通过本地模拟上游验收；上游实现完成后，再执行真实 AI Cove 端到端测试。
+- WebSocket 交付保留两道门禁：本地模拟上游测试作为普通测试运行；真实 AI Cove 认证握手和 Codex 端到端测试标记为 ignored，只在具备线上凭证时显式执行。两道门禁均已于 2026-08-03 验收通过，脱敏记录见 `docs/verification/2026-08-03-websocket-live.md`。
+- 公网腿 zstd 测试必须从 Turbo 公共回环入口覆盖能力接受/拒绝、双向 text/binary、压缩不划算、损坏 payload、长度上限、控制帧、分片、背压和 HTTP zstd 回退；最终再以隔离 `CODEX_HOME` 和服务端聚合字节证明真实 zstd 已发生。
 - 现有 AI Cove 压缩网关和 Tauri 桌面发布流程作为行为参考，但 Turbo 测试针对自身公开 seam 编写，不复制实现细节测试。
 
 ## Out of Scope
@@ -141,7 +150,7 @@ Turbo 以 AI Cove 为主要兼容上游。用户可以继续使用其他 HTTPS �
 - 自定义配置文件选择器、自动创建 Provider、自动修复损坏的用户 TOML。
 - 把本地服务绑定到局域网或公网接口。
 - 结束占用首选端口的未知进程。
-- 自定义 WebSocket zstd 帧或标准协商之外的协议扩展。
+- 在 AI Cove 服务端合同冻结前，由 Turbo 单方面定义私有 WebSocket zstd 协议。
 - 持久化请求历史、记录流量正文、保存 API Key 或建立历史指标数据库。
 - 在基准校准前宣称精确节省时间。
 - 在 MVP 中实现公开付费发布就绪、Intel Mac、Windows ARM64 或 Linux 打包。
@@ -155,5 +164,7 @@ Turbo 以 AI Cove 为主要兼容上游。用户可以继续使用其他 HTTPS �
 - 计划中的正式更新清单地址是 `https://ai-cove.com/downloads/turbo/latest.json`。
 - AI Cove 是主要兼容目标；非 AI Cove 上游只提供尽力兼容，界面必须持续明确这一边界。
 - HTTP 压缩以此前验证过的 zstd level 3 网关行为为基线，但正式实现保持 Rust 原生和最小化。
-- 当前 Codex 观测显示它会协商标准 WebSocket `permessage-deflate`；Turbo 应保留该行为，而不是引入新的帧编码。
+- 当前 Codex 观测显示它会协商标准 WebSocket `permessage-deflate`；Turbo 只在私有模式的低成本回环腿拒绝该扩展，标准透明回退仍完整保留原协商头。
+- 2026-08-03 线上 `https://api.ai-cove.com/v1/responses` 已返回 `101 Switching Protocols`。当次生产握手未返回 `Sec-WebSocket-Extensions`，Turbo 保持透明透传，不把未协商的 `permessage-deflate` 宣称为已生效。
+- 公网腿 zstd 合同已冻结为 subprotocol `ai-cove-zstd.v1`：应用消息使用 Binary frame 与 `AICZ` v1 十字节头，zstd level 3，原始和 wire payload 均限制为 128 MiB；协议/长度、数据、超限错误分别关闭 1002、1007、1009。
 - 后续 UI 原型明确为一次性代码，只用于在三个结构明显不同的方向中选择设置与状态信息层级。
