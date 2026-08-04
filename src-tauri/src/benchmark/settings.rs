@@ -65,10 +65,10 @@ impl BenchmarkSettings {
 }
 
 pub(super) fn validate_runs(runs: usize) -> Result<usize, io::Error> {
-    if runs == 0 || !runs.is_multiple_of(4) {
+    if runs == 0 || !runs.is_multiple_of(3) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "TURBO_BENCHMARK_RUNS must be a positive multiple of 4",
+            "TURBO_BENCHMARK_RUNS must be a positive multiple of 3",
         ));
     }
     Ok(runs)

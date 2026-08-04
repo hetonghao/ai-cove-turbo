@@ -12,9 +12,8 @@ use settings::{
 };
 
 const DIRECT_PATH: &str = "直连（不走 Turbo）";
-const HTTP_PATH: &str = "Turbo HTTP + zstd";
-const DIRECT_WS_PATH: &str = "直连 WS（标准 WebSocket）";
-const WEBSOCKET_PATH: &str = "Turbo WS + zstd";
+const HTTP_PATH: &str = "Turbo HTTP + 自适应 zstd";
+const WEBSOCKET_PATH: &str = "Turbo WS + 自适应 zstd";
 const BENCHMARK_INSTRUCTIONS: &str = "Treat the input as context and reply with OK only.";
 
 #[cfg(test)]

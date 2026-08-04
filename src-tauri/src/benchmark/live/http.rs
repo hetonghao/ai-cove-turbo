@@ -166,7 +166,11 @@ pub(super) async fn collect_sample(
         websocket_handshakes: 0,
         round_e2e: round_samples.iter().map(|sample| sample.e2e).collect(),
         first_events,
-        warm_round_e2e: Vec::new(),
+        warm_round_e2e: round_samples
+            .iter()
+            .skip(1)
+            .map(|sample| sample.e2e)
+            .collect(),
         connection_lifetime: None,
         websocket_reconnects: 0,
         messages_per_connection: None,

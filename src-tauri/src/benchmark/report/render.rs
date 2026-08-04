@@ -109,7 +109,7 @@ pub(super) fn print_report(
     let mut output = stdout.lock();
     writeln!(
         output,
-        "Turbo 3×4 基准（runs={}, warmups={}，负载来源={}，FNV-1a={:016x}，长输入={} bytes）",
+        "Turbo 3×3 基准（runs={}, warmups={}，负载来源={}，FNV-1a={:016x}，长输入={} bytes）",
         settings.runs,
         settings.warmups,
         settings.workload_source.label(),
@@ -123,7 +123,7 @@ pub(super) fn print_report(
     )?;
     writeln!(
         output,
-        "口径：路径按轮次交错执行；TTFT=首个有效 SSE/首个 WS 应用数据；complete=完整响应；WS 生命周期单列；不输出伪公网传输时间。"
+        "口径：每个样本公网连接独立、样本内多轮复用；路径按轮次交错执行；TTFT=首个有效 SSE/首个 WS 应用数据；complete=完整响应；不输出伪公网传输时间。"
     )?;
     writeln!(
         output,
@@ -131,7 +131,7 @@ pub(super) fn print_report(
     )?;
     writeln!(
         output,
-        "场景 | 技术路径 | 总 E2E complete median[min,max] ms | TTFT median[min,max] ms | 每轮 complete median[min,max] ms | cold setup median[min,max] ms | warm request median[min,max] ms | connection lifetime median[min,max] ms | reconnects | messages/connection | 请求/消息/响应事件/握手 | 原始正文 → 编码负载 | 减少率 | payload@10Mbps ms"
+        "场景 | 技术路径 | 总 E2E complete median[min,max] ms | TTFT median[min,max] ms | 每轮 complete median[min,max] ms | WS cold setup median[min,max] ms | warm request median[min,max] ms | connection lifetime median[min,max] ms | reconnects | messages/connection | 请求/消息/响应事件/握手 | 原始正文 → 编码负载 | 减少率 | payload@10Mbps ms"
     )?;
     writeln!(
         output,
@@ -173,7 +173,7 @@ pub(super) fn print_report(
                 .find(|candidate| {
                     candidate.scenario == report.scenario && candidate.path == DIRECT_PATH
                 })
-                .ok_or_else(|| io::Error::other("3×4 benchmark is missing its direct baseline"))?;
+                .ok_or_else(|| io::Error::other("3×3 benchmark is missing its direct baseline"))?;
             writeln!(
                 output,
                 "  相对同场景直连的观测 E2E 中位数差：{:+.1}%（仅观测，不归因于 Turbo）",

@@ -151,16 +151,16 @@ fn http_and_websocket_payloads_share_the_same_workload_contract() {
 }
 
 #[test]
-fn requires_complete_four_path_rotation_cycles() {
+fn requires_complete_three_path_rotation_cycles() {
     assert_eq!(
-        super::settings::validate_runs(4).expect("one cycle is valid"),
-        4
+        super::settings::validate_runs(3).expect("one cycle is valid"),
+        3
     );
     assert_eq!(
         super::settings::validate_runs(12).expect("default-sized cycle count is valid"),
         12
     );
-    assert!(super::settings::validate_runs(3).is_err());
+    assert!(super::settings::validate_runs(4).is_err());
     assert!(super::settings::validate_runs(1).is_err());
     assert!(super::settings::validate_runs(10).is_err());
 }
