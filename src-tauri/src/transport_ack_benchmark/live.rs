@@ -196,7 +196,7 @@ async fn exercise_paths(setup: &LiveSetup) -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires explicit loopback New API and local Turbo proxy fixture"]
+#[ignore = "requires explicit loopback or production ACK authorization"]
 async fn live_transport_ack_benchmark() -> Result<(), Box<dyn Error>> {
     let upstream = env::var("TURBO_TRANSPORT_ACK_UPSTREAM").map_err(|_| {
         io::Error::new(
@@ -209,9 +209,10 @@ async fn live_transport_ack_benchmark() -> Result<(), Box<dyn Error>> {
     if authorization.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "AI_COVE_API_KEY is empty").into());
     }
+    let allow_production = env::var("TURBO_TRANSPORT_ACK_ALLOW_PRODUCTION").as_deref() == Ok("1");
     let upstream_url = Url::parse(&upstream)?;
-    let direct_http_url = ack_url(&upstream, false)?;
-    let direct_ws_url = ack_url(&upstream, true)?;
+    let direct_http_url = ack_url(&upstream, false, allow_production)?;
+    let direct_ws_url = ack_url(&upstream, true, allow_production)?;
     let client = reqwest::Client::builder().timeout(ACK_TIMEOUT).build()?;
     let payload = fixture_payload();
     let http_metrics = Arc::new(Metrics::default());
@@ -248,9 +249,9 @@ async fn live_transport_ack_benchmark() -> Result<(), Box<dyn Error>> {
         authorization,
         payload,
         direct_http_url,
-        turbo_http_url: ack_url(http_proxy.endpoint(), false)?,
+        turbo_http_url: ack_url(http_proxy.endpoint(), false, false)?,
         direct_ws_url,
-        turbo_ws_url: ack_url(websocket_proxy.endpoint(), true)?,
+        turbo_ws_url: ack_url(websocket_proxy.endpoint(), true, false)?,
         http_metrics,
         websocket_metrics,
     };

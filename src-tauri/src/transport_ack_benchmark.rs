@@ -9,6 +9,7 @@ mod observe;
 
 const ACK_PATH: &str = "/transport/ack";
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+const PRODUCTION_ACK_UPSTREAM: &str = "https://api.ai-cove.com/v1";
 const FIXTURE_TARGET_BYTES: usize = 64 * 1024;
 const FIXTURE_PATTERN: &str = "transport-ack-issue-14;0123456789abcdef\n";
 const ACK_KEYS: [&str; 6] = [
@@ -61,7 +62,7 @@ fn parse_ack(payload: &[u8]) -> Result<TransportAck, io::Error> {
     Ok(ack)
 }
 
-fn ack_url(base: &str, websocket: bool) -> Result<String, io::Error> {
+fn ack_url(base: &str, websocket: bool, allow_production: bool) -> Result<String, io::Error> {
     let mut url =
         Url::parse(base).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let host = url.host_str().ok_or_else(|| {
@@ -75,10 +76,10 @@ fn ack_url(base: &str, websocket: bool) -> Result<String, io::Error> {
         || host
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback());
-    if !loopback {
+    if !(loopback || allow_production && base == PRODUCTION_ACK_UPSTREAM) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "transport ACK benchmark only permits loopback upstreams",
+            "transport ACK benchmark only permits loopback or the explicitly authorized production upstream",
         ));
     }
     let base_path = url.path().trim_end_matches('/');
@@ -212,17 +213,32 @@ mod tests {
 
     #[test]
     fn rejects_non_loopback_upstream_and_builds_http_and_ws_urls() {
-        assert!(ack_url("https://api.ai-cove.com/v1", false).is_err());
+        assert!(ack_url("https://api.ai-cove.com/v1", false, false).is_err());
         assert_eq!(
-            ack_url("http://127.0.0.1:3000/v1", false).ok().as_deref(),
+            ack_url("http://127.0.0.1:3000/v1", false, false)
+                .ok()
+                .as_deref(),
             Some("http://127.0.0.1:3000/v1/transport/ack")
         );
-        let ipv6 = ack_url("http://[::1]:3000/v1", true);
+        let ipv6 = ack_url("http://[::1]:3000/v1", true, false);
         assert!(ipv6.is_ok(), "loopback IPv6 URL must be accepted: {ipv6:?}");
         assert_eq!(
             ipv6.ok().as_deref(),
             Some("ws://[::1]:3000/v1/transport/ack")
         );
+    }
+
+    #[test]
+    fn production_ack_requires_explicit_opt_in_and_exact_upstream() {
+        assert!(ack_url("https://api.ai-cove.com/v1", false, false).is_err());
+        assert_eq!(
+            ack_url("https://api.ai-cove.com/v1", false, true)
+                .ok()
+                .as_deref(),
+            Some("https://api.ai-cove.com/v1/transport/ack")
+        );
+        assert!(ack_url("https://api.ai-cove.com/v1/", false, true).is_err());
+        assert!(ack_url("https://example.com/v1", false, true).is_err());
     }
 
     #[test]
