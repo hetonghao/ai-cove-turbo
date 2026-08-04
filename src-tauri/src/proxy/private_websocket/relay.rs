@@ -156,10 +156,7 @@ async fn forward_private_application(
     metrics: &Metrics,
 ) -> Result<(), PrivateProtocolError> {
     let raw_len = payload.len();
-    let encoded =
-        tokio::task::spawn_blocking(move || encode_private_message(&payload, original_binary))
-            .await
-            .map_err(join_error)??;
+    let encoded = encode_private_message_async(payload, original_binary).await?;
     let compressed = encoded
         .get(5)
         .is_some_and(|flags| flags & FLAG_ZSTD_COMPRESSED != 0);
@@ -170,6 +167,24 @@ async fn forward_private_application(
         .map_err(|_| PrivateProtocolError::internal("private websocket send failed"))?;
     metrics.record_websocket_zstd_message(raw_len, sent_len, compressed);
     Ok(())
+}
+
+const fn should_offload_private_encoding(payload_len: usize) -> bool {
+    payload_len >= super::super::MIN_COMPRESSION_INPUT_BYTES
+}
+
+pub(in crate::proxy) async fn encode_private_message_async(
+    payload: Vec<u8>,
+    original_binary: bool,
+) -> Result<Vec<u8>, PrivateProtocolError> {
+    if should_offload_private_encoding(payload.len()) {
+        return tokio::task::spawn_blocking(move || {
+            encode_private_message(&payload, original_binary)
+        })
+        .await
+        .map_err(join_error)?;
+    }
+    encode_private_message(&payload, original_binary)
 }
 
 async fn decode_private_message_async(
@@ -212,5 +227,19 @@ const fn websocket_error_code(error: &tokio_tungstenite::tungstenite::Error) -> 
         tokio_tungstenite::tungstenite::Error::Capacity(_) => 1009,
         tokio_tungstenite::tungstenite::Error::Utf8(_) => 1007,
         _ => 1002,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_offload_private_encoding;
+    use crate::proxy::MIN_COMPRESSION_INPUT_BYTES;
+
+    #[test]
+    fn private_encoding_offload_decision_changes_at_threshold() {
+        assert!(!should_offload_private_encoding(
+            MIN_COMPRESSION_INPUT_BYTES - 1
+        ));
+        assert!(should_offload_private_encoding(MIN_COMPRESSION_INPUT_BYTES));
     }
 }

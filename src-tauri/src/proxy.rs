@@ -34,12 +34,16 @@ mod private_websocket;
 use private_websocket::{client_upgrade_response, connect_private, relay_private};
 
 #[cfg(test)]
+use private_websocket::encode_private_message_async;
+
+#[cfg(test)]
 use private_websocket::{
     PRIVATE_ENVELOPE_HEADER_BYTES, PRIVATE_WEBSOCKET_SUBPROTOCOL, decode_private_message,
     encode_private_message,
 };
 
 const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const MIN_COMPRESSION_INPUT_BYTES: usize = 1024;
 const HOP_BY_HOP_HEADERS: [&str; 8] = [
     "connection",
     "keep-alive",
@@ -73,6 +77,7 @@ pub(crate) struct Metrics {
     websocket_handshakes: AtomicU64,
     websocket_active: AtomicU64,
     websocket_failures: AtomicU64,
+    websocket_messages: AtomicU64,
     websocket_raw_bytes: AtomicU64,
     websocket_sent_bytes: AtomicU64,
     pending_http_fallbacks: AtomicU64,
@@ -91,6 +96,7 @@ pub(crate) struct MetricsSnapshot {
     pub(crate) websocket_handshakes: u64,
     pub(crate) websocket_active: u64,
     pub(crate) websocket_failures: u64,
+    pub(crate) websocket_messages: u64,
     pub(crate) websocket_raw_bytes: u64,
     pub(crate) websocket_sent_bytes: u64,
     pub(crate) http_fallbacks: u64,
@@ -108,6 +114,7 @@ impl Metrics {
             websocket_handshakes: self.websocket_handshakes.load(Ordering::Relaxed),
             websocket_active: self.websocket_active.load(Ordering::Relaxed),
             websocket_failures: self.websocket_failures.load(Ordering::Relaxed),
+            websocket_messages: self.websocket_messages.load(Ordering::Relaxed),
             websocket_raw_bytes: self.websocket_raw_bytes.load(Ordering::Relaxed),
             websocket_sent_bytes: self.websocket_sent_bytes.load(Ordering::Relaxed),
             http_fallbacks: self.http_fallbacks.load(Ordering::Relaxed),
@@ -165,6 +172,7 @@ impl Metrics {
     }
 
     fn record_websocket_zstd_message(&self, raw_bytes: usize, sent_bytes: usize, compressed: bool) {
+        self.websocket_messages.fetch_add(1, Ordering::Relaxed);
         self.websocket_raw_bytes
             .fetch_add(raw_bytes as u64, Ordering::Relaxed);
         self.websocket_sent_bytes
@@ -490,6 +498,9 @@ fn is_compressible_json(method: &Method, headers: &HeaderMap) -> bool {
 }
 
 async fn compress_if_smaller(body: Bytes) -> Result<Option<Bytes>, ()> {
+    if body.len() < MIN_COMPRESSION_INPUT_BYTES {
+        return Ok(None);
+    }
     let original_len = body.len();
     tokio::task::spawn_blocking(move || {
         zstd::stream::encode_all(Cursor::new(body), 3)
@@ -499,6 +510,21 @@ async fn compress_if_smaller(body: Bytes) -> Result<Option<Bytes>, ()> {
     })
     .await
     .map_err(|_| ())?
+}
+
+#[cfg(test)]
+pub(crate) async fn measure_http_encoding(body: Bytes) -> Result<Option<Bytes>, ()> {
+    compress_if_smaller(body).await
+}
+
+#[cfg(test)]
+pub(crate) async fn measure_private_encoding(
+    payload: Vec<u8>,
+    original_binary: bool,
+) -> Result<Vec<u8>, String> {
+    encode_private_message_async(payload, original_binary)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn resolve_target(upstream: &Url, uri: &axum::http::Uri) -> Url {
@@ -1250,6 +1276,7 @@ mod tests {
         assert!(!binary.2);
         let snapshot = metrics.snapshot();
         assert!(snapshot.websocket_zstd_verified);
+        assert_eq!(snapshot.websocket_messages, 2);
         assert!(snapshot.websocket_sent_bytes < snapshot.websocket_raw_bytes);
 
         proxy.stop().await;
@@ -1719,7 +1746,7 @@ supports_websockets = true
                 "--ephemeral",
                 "--sandbox",
                 "read-only",
-                "只回复 OK，不使用工具。",
+                "请执行一次只读 shell 工具 pwd，读取工具结果后只回复 OK，不要再调用工具。",
             ])
             .env("CODEX_HOME", codex_home.path())
             .env("AI_COVE_API_KEY", api_key)
@@ -1740,8 +1767,33 @@ supports_websockets = true
             child.kill()?;
         }
         assert!(exit_status.is_some_and(|status| status.success()));
+        for _ in 0..50 {
+            if metrics.snapshot().websocket_active == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let snapshot = metrics.snapshot();
+        let reconnects = snapshot.websocket_handshakes.saturating_sub(1);
+        let messages_per_connection =
+            (snapshot.websocket_handshakes == 1).then_some(snapshot.websocket_messages);
+        eprintln!(
+            "real Codex WebSocket lifecycle evidence: handshakes={}, messages={}, messages_per_connection={messages_per_connection:?}, reconnects={}, failures={}",
+            snapshot.websocket_handshakes,
+            snapshot.websocket_messages,
+            reconnects,
+            snapshot.websocket_failures,
+        );
         assert!(snapshot.websocket_handshakes > 0);
+        assert!(snapshot.websocket_messages > 0);
+        if let Some(messages_per_connection) = messages_per_connection {
+            assert!(
+                messages_per_connection >= 2,
+                "real Codex session did not produce a multi-message connection: handshakes={}, messages={}, reconnects={reconnects}",
+                snapshot.websocket_handshakes,
+                snapshot.websocket_messages,
+            );
+        }
         assert!(snapshot.websocket_zstd_verified);
         assert!(snapshot.websocket_sent_bytes < snapshot.websocket_raw_bytes);
 

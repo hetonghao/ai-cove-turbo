@@ -19,6 +19,8 @@ mod relay;
 pub(super) use codec::{PRIVATE_ENVELOPE_HEADER_BYTES, PRIVATE_WEBSOCKET_SUBPROTOCOL};
 #[cfg(test)]
 pub(super) use codec::{decode_private_message, encode_private_message};
+#[cfg(test)]
+pub(super) use relay::encode_private_message_async;
 pub(super) use relay::relay_private;
 
 use super::hop_by_hop_headers;

@@ -9,6 +9,8 @@ pub(crate) mod runtime;
 
 #[cfg(test)]
 mod benchmark;
+#[cfg(test)]
+mod transport_ack_benchmark;
 
 use std::{
     process::Command,

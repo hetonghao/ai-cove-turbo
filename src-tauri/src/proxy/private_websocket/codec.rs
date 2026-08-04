@@ -82,11 +82,19 @@ pub(in crate::proxy) fn encode_private_message(
         ));
     }
 
-    let compressed = zstd::stream::encode_all(Cursor::new(payload), ZSTD_LEVEL)
-        .map_err(|_| PrivateProtocolError::internal("zstd compression failed"))?;
-    let use_compressed = compressed.len() < payload.len();
+    let compressed = if payload.len() >= super::super::MIN_COMPRESSION_INPUT_BYTES {
+        Some(
+            zstd::stream::encode_all(Cursor::new(payload), ZSTD_LEVEL)
+                .map_err(|_| PrivateProtocolError::internal("zstd compression failed"))?,
+        )
+    } else {
+        None
+    };
+    let use_compressed = compressed
+        .as_ref()
+        .is_some_and(|compressed| compressed.len() < payload.len());
     let wire_payload = if use_compressed {
-        compressed.as_slice()
+        compressed.as_deref().unwrap_or(payload)
     } else {
         payload
     };
