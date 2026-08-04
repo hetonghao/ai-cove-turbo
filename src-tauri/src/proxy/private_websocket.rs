@@ -1,12 +1,13 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     body::Body,
     http::{HeaderMap, Response, StatusCode, header},
 };
+use rustls::ClientConfig;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
     tungstenite::{
         client::IntoClientRequest, handshake::derive_accept_key, protocol::WebSocketConfig,
     },
@@ -27,6 +28,24 @@ use super::hop_by_hop_headers;
 use codec::{PRIVATE_MESSAGE_MAX_BYTES, PrivateProtocolError};
 
 const PRIVATE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Debug)]
+pub(super) struct PrivateTlsConfig(Arc<ClientConfig>);
+
+impl PrivateTlsConfig {
+    pub(super) const fn new(config: Arc<ClientConfig>) -> Self {
+        Self(config)
+    }
+
+    fn connector(&self) -> Connector {
+        Connector::Rustls(Arc::clone(&self.0))
+    }
+
+    #[cfg(test)]
+    fn shares_config_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 pub(in crate::proxy) type PrivateUpstream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -67,6 +86,7 @@ pub(super) fn client_upgrade_response(
 pub(super) async fn connect_private(
     target: &Url,
     client_headers: &HeaderMap,
+    tls_config: &PrivateTlsConfig,
 ) -> Option<PrivateUpstream> {
     let mut target = target.clone();
     let websocket_scheme = match target.scheme() {
@@ -95,7 +115,7 @@ pub(super) async fn connect_private(
         .max_frame_size(Some(message_limit));
     let connected = tokio::time::timeout(
         PRIVATE_HANDSHAKE_TIMEOUT,
-        connect_async_with_config(request, Some(config), false),
+        connect_async_tls_with_config(request, Some(config), false, Some(tls_config.connector())),
     )
     .await
     .ok()?
@@ -125,4 +145,24 @@ fn is_client_handshake_header(name: &header::HeaderName) -> bool {
         || *name == header::SEC_WEBSOCKET_VERSION
         || *name == header::SEC_WEBSOCKET_EXTENSIONS
         || *name == header::SEC_WEBSOCKET_PROTOCOL
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rustls::{ClientConfig, RootCertStore};
+
+    use super::PrivateTlsConfig;
+
+    #[test]
+    fn private_connections_reuse_shared_tls_config() {
+        let config = ClientConfig::builder()
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+        let shared = PrivateTlsConfig::new(Arc::new(config));
+        let cloned = shared.clone();
+
+        assert!(shared.shares_config_with(&cloned));
+    }
 }

@@ -20,7 +20,7 @@ use axum::{
 };
 use futures_util::TryStreamExt;
 use http_body_util::Empty;
-use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper_rustls::{ConfigBuilderExt, HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
     client::legacy::{Client, connect::HttpConnector},
     rt::{TokioExecutor, TokioIo},
@@ -32,7 +32,9 @@ use url::Url;
 mod private_websocket;
 pub(crate) mod traffic;
 
-use private_websocket::{client_upgrade_response, connect_private, relay_private};
+use private_websocket::{
+    PrivateTlsConfig, client_upgrade_response, connect_private, relay_private,
+};
 
 #[cfg(test)]
 use private_websocket::encode_private_message_async;
@@ -45,6 +47,7 @@ use private_websocket::{
 
 const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 128 * 1024 * 1024;
 pub(crate) const MIN_COMPRESSION_INPUT_BYTES: usize = 1024;
+const PRIVATE_TLS_SESSION_CACHE_SIZE: usize = 256;
 const HOP_BY_HOP_HEADERS: [&str; 8] = [
     "connection",
     "keep-alive",
@@ -308,6 +311,7 @@ struct ProxyState {
     metrics: Arc<Metrics>,
     client: reqwest::Client,
     websocket_client: WebSocketClient,
+    private_tls_config: PrivateTlsConfig,
     max_request_body_bytes: usize,
 }
 
@@ -323,6 +327,12 @@ pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, Pr
         .https_or_http()
         .enable_http1()
         .build();
+    let mut private_tls_config = rustls::ClientConfig::builder()
+        .with_native_roots()
+        .map_err(|error| ProxyError::WebSocketClient(error.to_string()))?
+        .with_no_client_auth();
+    private_tls_config.resumption =
+        rustls::client::Resumption::in_memory_sessions(PRIVATE_TLS_SESSION_CACHE_SIZE);
     let state = ProxyState {
         upstream: options.upstream,
         compression_enabled: options.compression_enabled,
@@ -334,6 +344,7 @@ pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, Pr
             .build()
             .map_err(ProxyError::Client)?,
         websocket_client: Client::builder(TokioExecutor::new()).build(websocket_connector),
+        private_tls_config: PrivateTlsConfig::new(Arc::new(private_tls_config)),
         max_request_body_bytes: if options.max_request_body_bytes == 0 {
             DEFAULT_MAX_REQUEST_BODY_BYTES
         } else {
@@ -497,7 +508,9 @@ async fn proxy_websocket(state: ProxyState, request: &mut AxumRequest) -> Respon
                 .record_websocket_error(&path, StatusCode::BAD_REQUEST.as_u16());
             return json_error(StatusCode::BAD_REQUEST, "invalid websocket handshake");
         };
-        if let Some(upstream) = connect_private(&target, request.headers()).await {
+        if let Some(upstream) =
+            connect_private(&target, request.headers(), &state.private_tls_config).await
+        {
             let client_upgrade = hyper::upgrade::on(&mut *request);
             let metrics = Arc::clone(&state.metrics);
             let path = path.clone();

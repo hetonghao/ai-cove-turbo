@@ -6,6 +6,7 @@ use url::Url;
 mod live;
 mod measure;
 mod observe;
+mod tls_session_reuse;
 
 const ACK_PATH: &str = "/transport/ack";
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
