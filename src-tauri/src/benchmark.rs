@@ -1,59 +1,48 @@
-use std::{env, error::Error, io, time::Duration};
+use std::{error::Error, io, time::Duration};
 
 use crate::proxy::MetricsSnapshot;
 
 mod live;
 mod report;
+mod settings;
+
+use settings::{
+    BenchmarkSettings, DEFAULT_MODEL, DEFAULT_MULTI_ROUNDS, DEFAULT_TIMEOUT, DEFAULT_UPSTREAM,
+    UsageScenario, default_long_prompt, usage_scenarios, workload_fingerprint,
+};
+
+const DIRECT_PATH: &str = "直连（不走 Turbo）";
+const HTTP_PATH: &str = "Turbo HTTP + zstd";
+const DIRECT_WS_PATH: &str = "直连 WS（标准 WebSocket）";
+const WEBSOCKET_PATH: &str = "Turbo WS + zstd";
+const BENCHMARK_INSTRUCTIONS: &str = "Treat the input as context and reply with OK only.";
 
 #[cfg(test)]
 mod tests;
 
-const DEFAULT_UPSTREAM: &str = "https://api.ai-cove.com/v1";
-const DEFAULT_MODEL: &str = "gpt-5.6-luna";
-const DEFAULT_PROMPT_SEED: &str =
-    "Turbo benchmark context: keep this context unchanged and reply with OK only.\n";
-const DEFAULT_SHORT_PROMPT: &str = "Reply with OK only.";
-const DEFAULT_MULTI_ROUNDS: usize = 5;
-const DEFAULT_RUNS: usize = 5;
-const DEFAULT_WARMUPS: usize = 1;
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
-
-#[derive(Debug)]
-struct BenchmarkSettings {
-    upstream: String,
-    model: String,
-    prompt: String,
-    runs: usize,
-    warmups: usize,
-    timeout: Duration,
-}
-
-#[derive(Debug)]
-struct UsageScenario {
-    name: &'static str,
-    prompts: Vec<String>,
-}
-
 #[derive(Debug)]
 struct RoundSample {
     e2e: Duration,
-    transport: Duration,
+    first_event: Option<Duration>,
     response_events: u64,
 }
 
 #[derive(Debug)]
 struct Sample {
     e2e: Duration,
-    transport: Duration,
     setup: Duration,
     raw_bytes: u64,
-    wire_bytes: u64,
+    encoded_bytes: u64,
     logical_requests: u64,
     application_messages: u64,
     response_events: u64,
     websocket_handshakes: u64,
     round_e2e: Vec<Duration>,
-    round_transport: Vec<Duration>,
+    first_events: Vec<Duration>,
+    warm_round_e2e: Vec<Duration>,
+    connection_lifetime: Option<Duration>,
+    websocket_reconnects: u64,
+    messages_per_connection: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -64,90 +53,17 @@ struct BenchmarkCase {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct LatencySummary {
-    median_ms: f64,
-    p95_ms: f64,
-}
-
-impl BenchmarkSettings {
-    fn from_env() -> Result<Self, Box<dyn Error>> {
-        Ok(Self {
-            upstream: env::var("TURBO_BENCHMARK_UPSTREAM")
-                .unwrap_or_else(|_| DEFAULT_UPSTREAM.to_owned()),
-            model: env::var("TURBO_BENCHMARK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned()),
-            prompt: env::var("TURBO_BENCHMARK_PROMPT")
-                .unwrap_or_else(|_| DEFAULT_PROMPT_SEED.repeat(256)),
-            runs: positive_env("TURBO_BENCHMARK_RUNS", DEFAULT_RUNS)?,
-            warmups: non_negative_env("TURBO_BENCHMARK_WARMUPS", DEFAULT_WARMUPS)?,
-            timeout: Duration::from_secs(positive_env_u64(
-                "TURBO_BENCHMARK_TIMEOUT_SECS",
-                DEFAULT_TIMEOUT.as_secs(),
-            )?),
-        })
-    }
-}
-
-fn positive_env(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {
-    let value = env::var(name).unwrap_or_else(|_| default.to_string());
-    let parsed = value.parse::<usize>()?;
-    if parsed == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{name} must be positive"),
-        )
-        .into());
-    }
-    Ok(parsed)
-}
-
-fn positive_env_u64(name: &str, default: u64) -> Result<u64, Box<dyn Error>> {
-    let value = env::var(name).unwrap_or_else(|_| default.to_string());
-    let parsed = value.parse::<u64>()?;
-    if parsed == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{name} must be positive"),
-        )
-        .into());
-    }
-    Ok(parsed)
-}
-
-fn non_negative_env(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {
-    Ok(env::var(name)
-        .unwrap_or_else(|_| default.to_string())
-        .parse::<usize>()?)
-}
-
-fn usage_scenarios(settings: &BenchmarkSettings) -> Vec<UsageScenario> {
-    let multi_turn_prompts = (1..=DEFAULT_MULTI_ROUNDS)
-        .map(|round| {
-            format!(
-                "Turbo benchmark multi-turn round {round}; keep the context unchanged and reply with OK only.\n{}",
-                settings.prompt
-            )
-        })
-        .collect();
-    vec![
-        UsageScenario {
-            name: "单轮短上下文",
-            prompts: vec![DEFAULT_SHORT_PROMPT.to_owned()],
-        },
-        UsageScenario {
-            name: "单轮长上下文",
-            prompts: vec![settings.prompt.clone()],
-        },
-        UsageScenario {
-            name: "连续多轮会话",
-            prompts: multi_turn_prompts,
-        },
-    ]
+struct LatencyMsSummary {
+    median: f64,
+    min: f64,
+    max: f64,
 }
 
 fn http_payload(model: &str, prompt: &str) -> String {
     serde_json::json!({
         "model": model,
         "input": prompt,
+        "instructions": BENCHMARK_INSTRUCTIONS,
         "stream": true,
         "max_output_tokens": 16,
     })
@@ -159,6 +75,7 @@ fn websocket_payload(model: &str, prompt: &str) -> String {
         "type": "response.create",
         "model": model,
         "input": prompt,
+        "instructions": BENCHMARK_INSTRUCTIONS,
         "max_output_tokens": 16,
     })
     .to_string()
@@ -176,25 +93,25 @@ fn response_is_complete(event: &str) -> bool {
         .is_some_and(|kind| matches!(kind.as_str(), "response.completed" | "response.done"))
 }
 
-fn summarize_latency(values: &[Duration]) -> Option<LatencySummary> {
+fn summarize_latency(values: &[Duration]) -> Option<LatencyMsSummary> {
     let mut sorted = values.iter().map(Duration::as_secs_f64).collect::<Vec<_>>();
     if sorted.is_empty() {
         return None;
     }
     sorted.sort_by(f64::total_cmp);
-    Some(LatencySummary {
-        median_ms: percentile_ms(&sorted, 50)?,
-        p95_ms: percentile_ms(&sorted, 95)?,
+    let middle = sorted.len() / 2;
+    let upper = sorted.get(middle).copied()?;
+    let median = if sorted.len().is_multiple_of(2) {
+        let lower = sorted.get(middle.checked_sub(1)?).copied()?;
+        lower.midpoint(upper)
+    } else {
+        upper
+    };
+    Some(LatencyMsSummary {
+        median: median * 1000.0,
+        min: sorted.first().copied()? * 1000.0,
+        max: sorted.last().copied()? * 1000.0,
     })
-}
-
-fn percentile_ms(sorted: &[f64], percentile: usize) -> Option<f64> {
-    let rank = sorted
-        .len()
-        .checked_mul(percentile)?
-        .div_ceil(100)
-        .saturating_sub(1);
-    sorted.get(rank).copied().map(|seconds| seconds * 1000.0)
 }
 
 fn responses_url(base: &str, websocket: bool) -> Result<String, Box<dyn Error>> {
