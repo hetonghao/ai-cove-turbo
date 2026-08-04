@@ -322,6 +322,10 @@ async fn proxy_request(
     State(state): State<ProxyState>,
     mut request: AxumRequest,
 ) -> Response<Body> {
+    request.headers_mut().insert(
+        HeaderName::from_static("x-ai-cove-client"),
+        header::HeaderValue::from_static("turbo"),
+    );
     if is_websocket_upgrade(request.headers()) {
         return proxy_websocket(state, &mut request).await;
     }
@@ -885,6 +889,12 @@ mod tests {
             headers.get("authorization").and_then(|v| v.to_str().ok()),
             Some("Bearer test-only")
         );
+        assert_eq!(
+            headers
+                .get("x-ai-cove-client")
+                .and_then(|v| v.to_str().ok()),
+            Some("turbo")
+        );
         let decoded = zstd::stream::decode_all(Cursor::new(compressed))?;
         assert_eq!(decoded, input.as_bytes());
 
@@ -1226,6 +1236,10 @@ mod tests {
         assert_eq!(
             http_header_value(&upstream_head, "Authorization"),
             Some("Bearer test-only")
+        );
+        assert_eq!(
+            http_header_value(&upstream_head, "X-AI-Cove-Client"),
+            Some("turbo")
         );
         let (text, binary) = messages_rx.await?;
         assert_eq!(text.0, text_input.as_bytes());
