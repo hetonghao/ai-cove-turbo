@@ -5,10 +5,15 @@ use crate::proxy::MetricsSnapshot;
 mod live;
 mod report;
 
+#[cfg(test)]
+mod tests;
+
 const DEFAULT_UPSTREAM: &str = "https://api.ai-cove.com/v1";
 const DEFAULT_MODEL: &str = "gpt-5.6-luna";
 const DEFAULT_PROMPT_SEED: &str =
     "Turbo benchmark context: keep this context unchanged and reply with OK only.\n";
+const DEFAULT_SHORT_PROMPT: &str = "Reply with OK only.";
+const DEFAULT_MULTI_ROUNDS: usize = 5;
 const DEFAULT_RUNS: usize = 5;
 const DEFAULT_WARMUPS: usize = 1;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -23,18 +28,38 @@ struct BenchmarkSettings {
     timeout: Duration,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
+struct UsageScenario {
+    name: &'static str,
+    prompts: Vec<String>,
+}
+
+#[derive(Debug)]
+struct RoundSample {
+    e2e: Duration,
+    transport: Duration,
+    response_events: u64,
+}
+
+#[derive(Debug)]
 struct Sample {
     e2e: Duration,
     transport: Duration,
     setup: Duration,
     raw_bytes: u64,
     wire_bytes: u64,
+    logical_requests: u64,
+    application_messages: u64,
+    response_events: u64,
+    websocket_handshakes: u64,
+    round_e2e: Vec<Duration>,
+    round_transport: Vec<Duration>,
 }
 
 #[derive(Debug)]
 struct BenchmarkCase {
-    name: &'static str,
+    scenario: &'static str,
+    path: &'static str,
     samples: Vec<Sample>,
 }
 
@@ -94,21 +119,46 @@ fn non_negative_env(name: &str, default: usize) -> Result<usize, Box<dyn Error>>
         .parse::<usize>()?)
 }
 
-fn http_payload(settings: &BenchmarkSettings) -> String {
+fn usage_scenarios(settings: &BenchmarkSettings) -> Vec<UsageScenario> {
+    let multi_turn_prompts = (1..=DEFAULT_MULTI_ROUNDS)
+        .map(|round| {
+            format!(
+                "Turbo benchmark multi-turn round {round}; keep the context unchanged and reply with OK only.\n{}",
+                settings.prompt
+            )
+        })
+        .collect();
+    vec![
+        UsageScenario {
+            name: "单轮短上下文",
+            prompts: vec![DEFAULT_SHORT_PROMPT.to_owned()],
+        },
+        UsageScenario {
+            name: "单轮长上下文",
+            prompts: vec![settings.prompt.clone()],
+        },
+        UsageScenario {
+            name: "连续多轮会话",
+            prompts: multi_turn_prompts,
+        },
+    ]
+}
+
+fn http_payload(model: &str, prompt: &str) -> String {
     serde_json::json!({
-        "model": settings.model,
-        "input": settings.prompt,
+        "model": model,
+        "input": prompt,
         "stream": true,
         "max_output_tokens": 16,
     })
     .to_string()
 }
 
-fn websocket_payload(settings: &BenchmarkSettings) -> String {
+fn websocket_payload(model: &str, prompt: &str) -> String {
     serde_json::json!({
         "type": "response.create",
-        "model": settings.model,
-        "input": settings.prompt,
+        "model": model,
+        "input": prompt,
         "max_output_tokens": 16,
     })
     .to_string()
@@ -187,47 +237,5 @@ fn metric_delta(before: MetricsSnapshot, after: MetricsSnapshot, websocket: bool
             after.raw_bytes.saturating_sub(before.raw_bytes),
             after.sent_bytes.saturating_sub(before.sent_bytes),
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reports_median_and_p95_without_reordering_samples() {
-        let summary = summarize_latency(&[
-            Duration::from_millis(10),
-            Duration::from_millis(40),
-            Duration::from_millis(20),
-            Duration::from_millis(30),
-            Duration::from_millis(50),
-        ])
-        .expect("non-empty latency samples must summarize");
-
-        assert!((summary.median_ms - 30.0).abs() < 0.001);
-        assert!((summary.p95_ms - 50.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn recognizes_responses_completion_events_only() {
-        assert!(response_is_complete(r#"{"type":"response.completed"}"#));
-        assert!(response_is_complete(r#"{"type":"response.done"}"#));
-        assert!(!response_is_complete(
-            r#"{"type":"response.output_text.delta"}"#
-        ));
-        assert!(!response_is_complete("[DONE]"));
-    }
-
-    #[test]
-    fn builds_http_and_websocket_responses_urls_from_the_same_base() {
-        assert_eq!(
-            responses_url("https://api.ai-cove.com/v1", false).expect("valid HTTP URL"),
-            "https://api.ai-cove.com/v1/responses"
-        );
-        assert_eq!(
-            responses_url("http://127.0.0.1:44175/v1", true).expect("valid loopback URL"),
-            "ws://127.0.0.1:44175/v1/responses"
-        );
     }
 }
