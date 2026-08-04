@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
-
+#[cfg(test)]
+#[path = "private_websocket_test.rs"]
+mod tests;
 use axum::{
     body::Body,
     http::{HeaderMap, Response, StatusCode, header},
@@ -39,11 +41,6 @@ impl PrivateTlsConfig {
 
     fn connector(&self) -> Connector {
         Connector::Rustls(Arc::clone(&self.0))
-    }
-
-    #[cfg(test)]
-    fn shares_config_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -145,24 +142,4 @@ fn is_client_handshake_header(name: &header::HeaderName) -> bool {
         || *name == header::SEC_WEBSOCKET_VERSION
         || *name == header::SEC_WEBSOCKET_EXTENSIONS
         || *name == header::SEC_WEBSOCKET_PROTOCOL
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use rustls::{ClientConfig, RootCertStore};
-
-    use super::PrivateTlsConfig;
-
-    #[test]
-    fn private_connections_reuse_shared_tls_config() {
-        let config = ClientConfig::builder()
-            .with_root_certificates(RootCertStore::empty())
-            .with_no_client_auth();
-        let shared = PrivateTlsConfig::new(Arc::new(config));
-        let cloned = shared.clone();
-
-        assert!(shared.shares_config_with(&cloned));
-    }
 }
