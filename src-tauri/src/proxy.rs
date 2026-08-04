@@ -30,6 +30,7 @@ use tokio::{io::copy_bidirectional, net::TcpListener, sync::oneshot, task::JoinH
 use url::Url;
 
 mod private_websocket;
+pub(crate) mod traffic;
 
 use private_websocket::{client_upgrade_response, connect_private, relay_private};
 
@@ -82,6 +83,9 @@ pub(crate) struct Metrics {
     websocket_sent_bytes: AtomicU64,
     pending_http_fallbacks: AtomicU64,
     http_fallbacks: AtomicU64,
+    traffic: traffic::TrafficStore,
+    #[cfg(test)]
+    traffic_recorded: tokio::sync::Notify,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -121,7 +125,14 @@ impl Metrics {
         }
     }
 
-    fn record(&self, raw_bytes: usize, sent_bytes: usize, compressed: bool) {
+    fn record_http(
+        &self,
+        path: &str,
+        status: u16,
+        raw_bytes: usize,
+        sent_bytes: usize,
+        compressed: bool,
+    ) {
         self.requests.fetch_add(1, Ordering::Relaxed);
         self.raw_bytes
             .fetch_add(raw_bytes as u64, Ordering::Relaxed);
@@ -131,15 +142,30 @@ impl Metrics {
             self.compression_verified.store(true, Ordering::Relaxed);
         }
         // ponytail: 当前按全局“失败 WS -> 下一次 HTTP”近似归因；只有并发客户端归因成为产品需求时才按客户端关联。
-        if self
+        let fallback = self
             .pending_http_fallbacks
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
                 (pending > 0).then(|| pending - 1)
             })
-            .is_ok()
-        {
+            .is_ok();
+        if fallback {
             self.http_fallbacks.fetch_add(1, Ordering::Relaxed);
         }
+        self.traffic.record(traffic::TrafficRecord {
+            timestamp_ms: traffic::now_ms(),
+            status,
+            path,
+            raw_bytes: raw_bytes as u64,
+            sent_bytes: sent_bytes as u64,
+            transport: traffic::TrafficTransport::Http,
+            result: if status >= 400 {
+                traffic::TrafficResult::Error
+            } else if fallback {
+                traffic::TrafficResult::Fallback
+            } else {
+                traffic::TrafficResult::Success
+            },
+        });
     }
 
     pub(crate) fn reset_compression_verification(&self) {
@@ -171,7 +197,18 @@ impl Metrics {
         self.pending_http_fallbacks.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_websocket_zstd_message(&self, raw_bytes: usize, sent_bytes: usize, compressed: bool) {
+    fn record_websocket_error(&self, path: &str, status: u16) {
+        self.record_websocket_failure();
+        self.record_websocket_traffic(path, status, 0, 0, traffic::TrafficResult::Error);
+    }
+
+    fn record_websocket_zstd_message(
+        &self,
+        path: &str,
+        raw_bytes: usize,
+        sent_bytes: usize,
+        compressed: bool,
+    ) {
         self.websocket_messages.fetch_add(1, Ordering::Relaxed);
         self.websocket_raw_bytes
             .fetch_add(raw_bytes as u64, Ordering::Relaxed);
@@ -180,6 +217,42 @@ impl Metrics {
         if compressed {
             self.websocket_zstd_verified.store(true, Ordering::Relaxed);
         }
+        self.record_websocket_traffic(
+            path,
+            StatusCode::SWITCHING_PROTOCOLS.as_u16(),
+            raw_bytes as u64,
+            sent_bytes as u64,
+            traffic::TrafficResult::Success,
+        );
+    }
+
+    fn record_websocket_traffic(
+        &self,
+        path: &str,
+        status: u16,
+        raw_bytes: u64,
+        sent_bytes: u64,
+        result: traffic::TrafficResult,
+    ) {
+        self.traffic.record(traffic::TrafficRecord {
+            timestamp_ms: traffic::now_ms(),
+            status,
+            path,
+            raw_bytes,
+            sent_bytes,
+            transport: traffic::TrafficTransport::Ws,
+            result,
+        });
+        #[cfg(test)]
+        self.traffic_recorded.notify_one();
+    }
+
+    pub(crate) fn recent_requests(&self) -> Vec<traffic::RequestEvent> {
+        self.traffic.recent_requests()
+    }
+
+    pub(crate) fn traffic_windows(&self) -> Vec<traffic::TrafficWindow> {
+        self.traffic.windows()
     }
 }
 
@@ -338,7 +411,12 @@ async fn proxy_request(
         return proxy_websocket(state, &mut request).await;
     }
     let (parts, body) = request.into_parts();
-    let Ok(raw_body) = to_bytes(body, state.max_request_body_bytes).await else {
+    let path = parts.uri.path().to_owned();
+    let raw_body = to_bytes(body, state.max_request_body_bytes).await;
+    let Ok(raw_body) = raw_body else {
+        state
+            .metrics
+            .record_http(&path, StatusCode::PAYLOAD_TOO_LARGE.as_u16(), 0, 0, false);
         return json_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
     };
     let raw_len = raw_body.len();
@@ -348,7 +426,16 @@ async fn proxy_request(
         match compress_if_smaller(raw_body.clone()).await {
             Ok(Some(compressed)) => (compressed, true),
             Ok(None) => (raw_body, false),
-            Err(()) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "compression failed"),
+            Err(()) => {
+                state.metrics.record_http(
+                    &path,
+                    StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    raw_len,
+                    0,
+                    false,
+                );
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "compression failed");
+            }
         }
     } else {
         (raw_body, false)
@@ -366,11 +453,19 @@ async fn proxy_request(
     }
     let sent_len = outbound_body.len();
     let Ok(upstream_response) = upstream_request.body(outbound_body).send().await else {
+        state.metrics.record_http(
+            &path,
+            StatusCode::BAD_GATEWAY.as_u16(),
+            raw_len,
+            sent_len,
+            false,
+        );
         return json_error(StatusCode::BAD_GATEWAY, "upstream request failed");
     };
-    state.metrics.record(raw_len, sent_len, compressed);
-
     let status = upstream_response.status();
+    state
+        .metrics
+        .record_http(&path, status.as_u16(), raw_len, sent_len, compressed);
     let response_headers = upstream_response.headers().clone();
     let response_hop_by_hop = hop_by_hop_headers(&response_headers);
     let stream = upstream_response
@@ -387,37 +482,42 @@ async fn proxy_request(
 }
 
 async fn proxy_websocket(state: ProxyState, request: &mut AxumRequest) -> Response<Body> {
+    let path = request.uri().path().to_owned();
     if !state.websocket_enabled.load(Ordering::Relaxed) {
-        state.metrics.record_websocket_failure();
-        return json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "websocket mode is disabled",
-        );
+        state
+            .metrics
+            .record_websocket_error(&path, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "websocket disabled");
     }
-
     let target = resolve_target(&state.upstream, request.uri());
     if state.ai_cove_private_websocket_zstd {
         let Ok(response) = client_upgrade_response(request.headers()) else {
-            state.metrics.record_websocket_failure();
+            state
+                .metrics
+                .record_websocket_error(&path, StatusCode::BAD_REQUEST.as_u16());
             return json_error(StatusCode::BAD_REQUEST, "invalid websocket handshake");
         };
         if let Some(upstream) = connect_private(&target, request.headers()).await {
             let client_upgrade = hyper::upgrade::on(&mut *request);
             let metrics = Arc::clone(&state.metrics);
+            let path = path.clone();
             tokio::spawn(async move {
                 let Ok(client) = client_upgrade.await else {
-                    metrics.record_websocket_failure();
+                    metrics
+                        .record_websocket_error(&path, StatusCode::INTERNAL_SERVER_ERROR.as_u16());
                     return;
                 };
                 metrics.record_websocket_connected();
-                relay_private(client, upstream, Arc::clone(&metrics)).await;
+                relay_private(client, upstream, Arc::clone(&metrics), path).await;
                 metrics.record_websocket_closed();
             });
             return response;
         }
     }
     let Ok(target_uri) = target.as_str().parse() else {
-        state.metrics.record_websocket_failure();
+        state
+            .metrics
+            .record_websocket_error(&path, StatusCode::BAD_GATEWAY.as_u16());
         return json_error(StatusCode::BAD_GATEWAY, "invalid websocket upstream");
     };
     let client_upgrade = hyper::upgrade::on(&mut *request);
@@ -439,32 +539,42 @@ async fn proxy_websocket(state: ProxyState, request: &mut AxumRequest) -> Respon
         header::UPGRADE,
         header::HeaderValue::from_static("websocket"),
     );
-
     let Ok(mut upstream_response) = state.websocket_client.request(outbound).await else {
-        state.metrics.record_websocket_failure();
+        state
+            .metrics
+            .record_websocket_error(&path, StatusCode::BAD_GATEWAY.as_u16());
         return json_error(StatusCode::BAD_GATEWAY, "websocket upstream failed");
     };
     if upstream_response.status() != StatusCode::SWITCHING_PROTOCOLS {
-        state.metrics.record_websocket_failure();
+        state
+            .metrics
+            .record_websocket_error(&path, upstream_response.status().as_u16());
         let (parts, body) = upstream_response.into_parts();
         return Response::from_parts(parts, Body::new(body));
     }
-
     let upstream_upgrade = hyper::upgrade::on(&mut upstream_response);
     let mut response = Response::new(Body::empty());
     *response.status_mut() = upstream_response.status();
     *response.headers_mut() = upstream_response.headers().clone();
     let metrics = Arc::clone(&state.metrics);
     tokio::spawn(async move {
-        let (client, upstream) = tokio::join!(client_upgrade, upstream_upgrade);
-        let (Ok(client), Ok(upstream)) = (client, upstream) else {
-            metrics.record_websocket_failure();
+        let (Ok(client), Ok(upstream)) = tokio::join!(client_upgrade, upstream_upgrade) else {
+            metrics.record_websocket_error(&path, StatusCode::INTERNAL_SERVER_ERROR.as_u16());
             return;
         };
         metrics.record_websocket_connected();
         let mut client = TokioIo::new(client);
         let mut upstream = TokioIo::new(upstream);
-        let _ = copy_bidirectional(&mut client, &mut upstream).await;
+        match copy_bidirectional(&mut client, &mut upstream).await {
+            Ok((client_to_upstream, _)) => metrics.record_websocket_traffic(
+                &path,
+                StatusCode::SWITCHING_PROTOCOLS.as_u16(),
+                client_to_upstream,
+                client_to_upstream,
+                traffic::TrafficResult::Success,
+            ),
+            Err(_) => metrics.record_websocket_error(&path, 1011),
+        }
         metrics.record_websocket_closed();
     });
     response
@@ -929,6 +1039,20 @@ mod tests {
         assert_eq!(snapshot.raw_bytes, input.len() as u64);
         assert!(snapshot.sent_bytes < snapshot.raw_bytes);
         assert!(snapshot.compression_verified);
+        let event = metrics
+            .recent_requests()
+            .into_iter()
+            .next()
+            .ok_or("HTTP traffic event missing")?;
+        let event = serde_json::to_value(event)?;
+        assert_eq!(
+            event.get("status").and_then(serde_json::Value::as_u64),
+            Some(201)
+        );
+        assert_eq!(
+            event.get("result").and_then(serde_json::Value::as_str),
+            Some("success")
+        );
 
         proxy.stop().await;
         upstream_task.abort();
@@ -956,14 +1080,38 @@ mod tests {
         let response = reqwest::Client::new()
             .post(format!("{}/responses", proxy.endpoint()))
             .header("content-type", "application/json")
-            .body(input)
+            .body(input.clone())
             .send()
             .await?;
 
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.requests, 0);
+        assert_eq!(snapshot.requests, 1);
         assert!(!snapshot.compression_verified);
+        let event = metrics
+            .recent_requests()
+            .into_iter()
+            .next()
+            .ok_or("failed HTTP traffic event missing")?;
+        let event = serde_json::to_value(event)?;
+        assert_eq!(
+            event.get("status").and_then(serde_json::Value::as_u64),
+            Some(502)
+        );
+        assert_eq!(
+            event.get("result").and_then(serde_json::Value::as_str),
+            Some("error")
+        );
+        assert_eq!(
+            event.get("rawBytes").and_then(serde_json::Value::as_u64),
+            Some(input.len() as u64)
+        );
+        let sent_bytes = event
+            .get("sentBytes")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("failed HTTP sent bytes missing")?;
+        assert!(sent_bytes > 0);
+        assert!(sent_bytes < input.len() as u64);
         proxy.stop().await;
         Ok(())
     }
@@ -1124,12 +1272,13 @@ mod tests {
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
+        let metrics = Arc::new(Metrics::default());
         let proxy = start_proxy(ProxyOptions {
             upstream: Url::parse(&format!("http://{address}/v1"))?,
             compression_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             websocket_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             ai_cove_private_websocket_zstd: false,
-            metrics: Arc::new(Metrics::default()),
+            metrics: Arc::clone(&metrics),
             preferred_ports: vec![0],
             max_request_body_bytes: 4,
         })
@@ -1144,6 +1293,20 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert!(captured.lock().await.is_none());
+        let event = metrics
+            .recent_requests()
+            .into_iter()
+            .next()
+            .ok_or("413 traffic event missing")?;
+        let event = serde_json::to_value(event)?;
+        assert_eq!(
+            event.get("status").and_then(serde_json::Value::as_u64),
+            Some(413)
+        );
+        assert_eq!(
+            event.get("result").and_then(serde_json::Value::as_str),
+            Some("error")
+        );
         proxy.stop().await;
         task.abort();
         Ok(())
@@ -1278,6 +1441,7 @@ mod tests {
         assert!(snapshot.websocket_zstd_verified);
         assert_eq!(snapshot.websocket_messages, 2);
         assert!(snapshot.websocket_sent_bytes < snapshot.websocket_raw_bytes);
+        assert_eq!(snapshot.websocket_failures, 0);
 
         proxy.stop().await;
         upstream_task.abort();
@@ -1419,7 +1583,23 @@ mod tests {
             return Err("expected close frame".into());
         };
         assert_eq!(frame.code, CloseCode::Protocol);
-        assert!(!metrics.snapshot().websocket_zstd_verified);
+        let snapshot = metrics.snapshot();
+        assert!(!snapshot.websocket_zstd_verified);
+        assert_eq!(snapshot.websocket_failures, 1);
+        let event = metrics
+            .recent_requests()
+            .into_iter()
+            .next()
+            .ok_or("private protocol error traffic event missing")?;
+        let event = serde_json::to_value(event)?;
+        assert_eq!(
+            event.get("status").and_then(serde_json::Value::as_u64),
+            Some(1002)
+        );
+        assert_eq!(
+            event.get("result").and_then(serde_json::Value::as_str),
+            Some("error")
+        );
 
         proxy.stop().await;
         upstream_task.abort();
@@ -1578,6 +1758,7 @@ mod tests {
         );
         let payload = [0x82, 0x02, b'o', b'k'];
         client.write_all(&payload).await?;
+        client.shutdown().await?;
         let mut echoed = [0_u8; 4];
         client.read_exact(&mut echoed).await?;
         assert_eq!(echoed, payload);
@@ -1599,6 +1780,25 @@ mod tests {
         assert!(snapshot.websocket_verified);
         assert_eq!(snapshot.websocket_handshakes, 1);
         assert_eq!(snapshot.http_fallbacks, 0);
+        tokio::time::timeout(Duration::from_secs(1), metrics.traffic_recorded.notified()).await?;
+        let event = metrics
+            .recent_requests()
+            .into_iter()
+            .next()
+            .ok_or("standard websocket traffic event missing")?;
+        let event = serde_json::to_value(event)?;
+        assert_eq!(
+            event.get("status").and_then(serde_json::Value::as_u64),
+            Some(101)
+        );
+        assert_eq!(
+            event.get("rawBytes").and_then(serde_json::Value::as_u64),
+            Some(4)
+        );
+        assert_eq!(
+            event.get("sentBytes").and_then(serde_json::Value::as_u64),
+            Some(4)
+        );
 
         proxy.stop().await;
         upstream_task.abort();

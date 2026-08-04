@@ -21,7 +21,7 @@
     { status: 200, path: "/v1/responses", raw: 156_870, sent: 71_240, transport: "WS", fallback: false },
     { status: 200, path: "/v1/responses", raw: 204_110, sent: 92_680, transport: "HTTP", fallback: false },
   ];
-  const STAT_WINDOWS = [
+  const STAT_POINTS = [
     { label: "现在", age: 0.2, transport: "WS", result: "success", requests: 2, raw: 184_000, sent: 74_000 },
     { label: "−1m", age: 0.8, transport: "HTTP", result: "success", requests: 1, raw: 96_000, sent: 51_000 },
     { label: "−3m", age: 3, transport: "WS", result: "success", requests: 3, raw: 238_000, sent: 106_000 },
@@ -41,6 +41,12 @@
     { label: "近 1 小时", minutes: 60 },
     { label: "近 1 天", minutes: 1_440 },
   ];
+  const CHART_RANGES = {
+    1: { label: "最近 1 分钟", bucketMinutes: 1 / 6, bucketLabel: "每 10 秒" },
+    10: { label: "最近 10 分钟", bucketMinutes: 1, bucketLabel: "每 1 分钟" },
+    60: { label: "最近 1 小时", bucketMinutes: 5, bucketLabel: "每 5 分钟" },
+    1440: { label: "最近 1 天", bucketMinutes: 60, bucketLabel: "每 1 小时" },
+  };
   const state = {
     tab: "live",
     serviceHealthy: true,
@@ -99,6 +105,47 @@
 
   function summarize(items) {
     return items.reduce((sum, item) => ({ requests: sum.requests + item.requests, raw: sum.raw + item.raw, sent: sum.sent + item.sent }), { requests: 0, raw: 0, sent: 0 });
+  }
+
+  function statPointTimestamp(item, now) {
+    return item.timestamp ?? now - item.age * 60_000;
+  }
+
+  function buildChartBuckets(items, rangeMinutes) {
+    const chartRange = CHART_RANGES[rangeMinutes] ?? CHART_RANGES[1440];
+    const bucketCount = Math.ceil(rangeMinutes / chartRange.bucketMinutes);
+    const bucketDuration = chartRange.bucketMinutes * 60_000;
+    const now = Date.now();
+    const currentBucketStart = Math.floor(now / bucketDuration) * bucketDuration;
+    const rangeStart = currentBucketStart - (bucketCount - 1) * bucketDuration;
+    const rangeEnd = currentBucketStart + bucketDuration;
+    const buckets = Array.from({ length: bucketCount }, (_, index) => ({
+      start: new Date(rangeStart + index * bucketDuration),
+      end: new Date(Math.min(rangeEnd, rangeStart + (index + 1) * bucketDuration)),
+      requests: 0,
+      raw: 0,
+      sent: 0,
+    }));
+
+    items.forEach((item) => {
+      const timestamp = statPointTimestamp(item, now);
+      if (timestamp < rangeStart || timestamp >= rangeEnd) return;
+      const index = Math.min(bucketCount - 1, Math.max(0, Math.floor((timestamp - rangeStart) / bucketDuration)));
+      buckets[index].requests += item.requests;
+      buckets[index].raw += item.raw;
+      buckets[index].sent += item.sent;
+    });
+    return { buckets, chartRange, currentBucketStart: new Date(currentBucketStart), now, rangeStart: new Date(rangeStart) };
+  }
+
+  function formatChartTime(date, rangeMinutes) {
+    const options = { hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
+    if (rangeMinutes === 1) options.second = "2-digit";
+    if (rangeMinutes === 1_440) {
+      options.month = "numeric";
+      options.day = "numeric";
+    }
+    return new Intl.DateTimeFormat("zh-CN", options).format(date).replace(/\s+/g, " ");
   }
 
   function activationSummary() {
@@ -226,6 +273,7 @@
 
   function addLiveRequest(template = LIVE_TEMPLATES[liveTemplateIndex++ % LIVE_TEMPLATES.length], date = new Date()) {
     liveRequests.push({ ...template, time: formatClock(date) });
+    STAT_POINTS.push({ timestamp: date.getTime(), transport: template.transport, result: template.fallback ? "fallback" : "success", requests: 1, raw: template.raw, sent: template.sent });
     if (liveRequests.length > LIVE_REQUEST_LIMIT) liveRequests.shift();
     renderLiveStream();
   }
@@ -234,9 +282,9 @@
     const range = Number(document.querySelector('[data-filter="range"]')?.value ?? 1_440);
     const transport = document.querySelector('[data-filter="transport"]')?.value ?? "all";
     const result = document.querySelector('[data-filter="result"]')?.value ?? "all";
-    const matching = STAT_WINDOWS.filter((item) => (transport === "all" || item.transport === transport) && (result === "all" || item.result === result));
-    const filtered = matching.filter((item) => item.age <= range);
-    const totals = summarize(filtered);
+    const matching = STAT_POINTS.filter((item) => (transport === "all" || item.transport === transport) && (result === "all" || item.result === result));
+    const chart = buildChartBuckets(matching, range);
+    const totals = summarize(chart.buckets);
     const values = {
       requests: numberFormatter.format(totals.requests),
       "raw-bytes": formatBytes(totals.raw),
@@ -248,26 +296,40 @@
       target.textContent = values[target.dataset.stat] ?? "";
     });
 
-    const rangeLabels = { 1: "最近 1 分钟", 10: "最近 10 分钟", 60: "最近 1 小时", 1440: "最近 1 天" };
     const transportLabel = transport === "all" ? "全部方式" : transport === "WS" ? "WebSocket" : "HTTP";
-    const resultLabel = result === "all" ? "全部结果" : result === "success" ? "成功" : "回退";
+    const resultLabel = result === "all" ? "全部结果" : result === "success" ? "成功" : result === "fallback" ? "回退" : "失败";
     const summary = document.querySelector("[data-stats-summary]");
-    if (summary) summary.textContent = `${rangeLabels[range]} / ${transportLabel} / ${resultLabel}`;
+    if (summary) summary.textContent = `${chart.chartRange.label} / ${transportLabel} / ${resultLabel}`;
+    const granularity = document.querySelector("[data-stat-granularity]");
+    if (granularity) granularity.textContent = chart.chartRange.bucketLabel;
 
     const bars = document.querySelector("[data-stat-bars]");
     if (bars) {
-      const maxRaw = Math.max(...filtered.map((item) => item.raw), 1);
-      bars.innerHTML = filtered.map((item) => `<span class="c-bar-slot"><i class="c-bar" style="--bar: ${Math.round(18 + item.raw / maxRaw * 82)}%; --sent-share: ${Math.round(item.sent / item.raw * 100)}%"></i><small>${item.label}</small></span>`).join("");
+      bars.style.setProperty("--chart-bucket-count", String(chart.buckets.length));
+      const maxRequests = Math.max(...chart.buckets.map((bucket) => bucket.requests), 1);
+      bars.innerHTML = chart.buckets.map((bucket, index) => {
+        const saved = Math.max(0, bucket.raw - bucket.sent);
+        const time = `${formatChartTime(bucket.start, range)}–${formatChartTime(bucket.end, range)}`;
+        const height = bucket.requests ? Math.round(12 + bucket.requests / maxRequests * 88) : 2;
+        const sentShare = bucket.raw ? Math.round(bucket.sent / bucket.raw * 100) : 100;
+        const tooltipId = `chart-tooltip-${index}`;
+        return `<span class="c-bar-slot${bucket.requests ? "" : " is-empty"}" style="--bar: ${height}%; --sent-share: ${sentShare}%" tabindex="0" role="img" aria-describedby="${tooltipId}" aria-label="${time}，${numberFormatter.format(bucket.requests)} 个请求，发送 ${formatBytes(bucket.sent)}，节省 ${formatBytes(saved)}"><i class="c-bar"></i><span id="${tooltipId}" class="c-bar-tooltip" role="tooltip"><strong>时间</strong><span>${time}</span><strong>请求数</strong><span>${numberFormatter.format(bucket.requests)}</span><strong>发送</strong><span>${formatBytes(bucket.sent)}</span><strong>节省</strong><span>${formatBytes(saved)}</span></span></span>`;
+      }).join("");
+    }
+    const axis = document.querySelector("[data-stat-axis]");
+    if (axis) {
+      const middle = chart.buckets[Math.floor(chart.buckets.length / 2)].start;
+      axis.innerHTML = [chart.rangeStart, middle, chart.currentBucketStart].map((date) => `<span>${formatChartTime(date, range)}</span>`).join("");
     }
     const windows = document.querySelector("[data-stat-windows]");
     if (windows) {
       windows.innerHTML = ROLLING_WINDOWS.map((window) => {
-        const windowTotals = summarize(matching.filter((item) => item.age <= window.minutes));
+        const windowTotals = summarize(matching.filter((item) => chart.now - statPointTimestamp(item, chart.now) <= window.minutes * 60_000));
         return `<article class="c-window-card"><header><span>${window.label}</span><strong>${numberFormatter.format(windowTotals.requests)} 个请求</strong></header><div><p><span>请求数</span><strong>${numberFormatter.format(windowTotals.requests)}</strong></p><p><span>原始 → 发送</span><strong>${formatBytes(windowTotals.raw)} → ${formatBytes(windowTotals.sent)}</strong></p><p><span>节省率</span><strong>${formatRate(windowTotals.raw, windowTotals.sent)}</strong></p></div></article>`;
       }).join("");
     }
     const empty = document.querySelector("[data-stat-empty]");
-    if (empty) empty.hidden = filtered.length > 0;
+    if (empty) empty.hidden = totals.requests > 0;
   }
 
   function handleAction(action) {
@@ -453,7 +515,8 @@
     renderStatistics();
     updateUrl();
     window.setInterval(() => {
-      if (state.tab === "live" && !state.streamPaused) addLiveRequest();
+      if (!state.streamPaused) addLiveRequest();
+      if (state.tab === "statistics") renderStatistics();
     }, 3_500);
   }
 

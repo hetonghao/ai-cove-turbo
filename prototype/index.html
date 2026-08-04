@@ -38,7 +38,7 @@
             </header>
 
             <div class="c-titlebar">
-              <div><p class="c-overline">LIVE / RELIABILITY</p><h1>实时请求</h1><p>每一条请求都能看到结果、体积变化和实际传输方式。</p></div>
+              <div><p class="c-overline">LIVE / RELIABILITY</p><h1>实时传输</h1><p>每一条完成传输都能看到协议状态、体积变化和实际传输方式。</p></div>
             </div>
 
             <div class="c-layout c-layout--live">
@@ -68,7 +68,7 @@
               <div class="c-main c-main--live">
                 <section class="c-terminal" aria-labelledby="request-stream-title">
                   <header class="c-terminal__header">
-                    <div><span class="c-overline">REQUEST STREAM</span><h2 id="request-stream-title">请求终端</h2></div>
+                    <div><span class="c-overline">TRANSFER STREAM</span><h2 id="request-stream-title">传输终端</h2></div>
                     <div class="c-terminal__actions">
                       <span class="c-stream" data-live-stream-state><i aria-hidden="true"></i>实时更新</span>
                       <button type="button" data-action="toggle-stream" aria-pressed="false"><span data-live-action-label>暂停</span></button>
@@ -102,7 +102,7 @@
               <form class="c-filters" aria-label="统计筛选">
                 <label><span>时间范围</span><select data-filter="range"><option value="1">最近 1 分钟</option><option value="10">最近 10 分钟</option><option value="60">最近 1 小时</option><option value="1440" selected>最近 1 天</option></select></label>
                 <label><span>传输方式</span><select data-filter="transport"><option value="all" selected>全部方式</option><option value="HTTP">HTTP</option><option value="WS">WebSocket</option></select></label>
-                <label><span>结果</span><select data-filter="result"><option value="all" selected>全部结果</option><option value="success">成功</option><option value="fallback">回退</option></select></label>
+                <label><span>结果</span><select data-filter="result"><option value="all" selected>全部结果</option><option value="success">成功</option><option value="fallback">回退</option><option value="error">失败</option></select></label>
               </form>
             </div>
 
@@ -117,9 +117,10 @@
                     <div class="c-metric"><span>已节省</span><strong data-stat="saved-bytes">780 KB</strong><small>流量节省率 <span data-stat="savings-rate">42.4%</span></small></div>
                     <div class="c-metric c-metric--estimate"><span>速度提升约</span><strong>31.6%</strong><small>占位 · 待基准测试校准</small></div>
                   </div>
-                  <div class="c-graph" role="img" aria-label="筛选时间范围内的原始量、发送量和节省量">
-                    <div class="c-graph__head"><span>时间轴 / 每个时间桶的传输量</span><span><i class="c-legend c-legend--sent" aria-hidden="true"></i>发送 <i class="c-legend c-legend--saved" aria-hidden="true"></i>节省 · 合计 <b data-stat="saved-bytes">780 KB</b></span></div>
-                    <div class="c-bars" data-stat-bars aria-hidden="true"></div>
+                  <div class="c-graph" role="group" aria-label="筛选时间范围内的原始量、发送量和节省量">
+                    <div class="c-graph__head"><span>时间轴 · <b data-stat-granularity>每 1 小时</b></span><span><i class="c-legend c-legend--sent" aria-hidden="true"></i>发送 <i class="c-legend c-legend--saved" aria-hidden="true"></i>节省 · 合计 <b data-stat="saved-bytes">780 KB</b></span></div>
+                    <div class="c-bars" data-stat-bars></div>
+                    <div class="c-axis" data-stat-axis aria-hidden="true"></div>
                   </div>
                 </section>
 

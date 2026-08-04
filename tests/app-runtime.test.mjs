@@ -13,6 +13,12 @@ function element(dataset = {}) {
   };
 }
 
+async function runApp(source, context) {
+  const telemetrySource = await readFile(new URL("../src/telemetry.js", import.meta.url), "utf8");
+  vm.runInNewContext(telemetrySource, context);
+  vm.runInNewContext(source, context);
+}
+
 test("Tauri 首帧在真实状态返回前保持未验证", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const states = [
@@ -42,7 +48,7 @@ test("Tauri 首帧在真实状态返回前保持未验证", async () => {
     setInterval() {},
   };
 
-  vm.runInNewContext(source, { document, window, URL, Intl });
+  await runApp(source, { document, window, URL, Intl });
 
   assert.equal(states[0].textContent, "正在读取状态");
   assert.equal(states[1].textContent, "等待首次握手验证");
@@ -84,7 +90,7 @@ test("非 AI Cove 上游接管后仍持续显示兼容性警告", async () => {
     setInterval() {},
   };
 
-  vm.runInNewContext(source, { document, window, URL, Intl });
+  await runApp(source, { document, window, URL, Intl });
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(warning.hidden, false);
@@ -126,7 +132,7 @@ test("本机回环上游显示 AI Cove 修复入口而不是通用重试", async
     setInterval() {},
   };
 
-  vm.runInNewContext(source, { document, window, URL, Intl });
+  await runApp(source, { document, window, URL, Intl });
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(genericWarning.hidden, true);

@@ -22,7 +22,10 @@ use crate::{
         relinquish_websocket, restore, set_ai_cove_upstream as replace_loopback_upstream,
         set_managed_websocket, take_over,
     },
-    proxy::{Metrics, ProxyHandle, ProxyOptions, start_proxy},
+    proxy::{
+        Metrics, ProxyHandle, ProxyOptions, start_proxy,
+        traffic::{RequestEvent, TrafficWindow},
+    },
 };
 
 const DEFAULT_PORT: u16 = 44_175;
@@ -89,7 +92,10 @@ pub(crate) struct AppStatus {
     pub(crate) websocket_handshakes: u64,
     pub(crate) websocket_raw_bytes: u64,
     pub(crate) websocket_sent_bytes: u64,
+    pub(crate) websocket_messages: u64,
     pub(crate) http_fallbacks: u64,
+    pub(crate) recent_requests: Vec<RequestEvent>,
+    pub(crate) traffic_windows: Vec<TrafficWindow>,
     pub(crate) autostart_enabled: bool,
     pub(crate) dock_visible: bool,
     pub(crate) dock_control_available: bool,
@@ -128,7 +134,10 @@ impl AppStatus {
             websocket_handshakes: 0,
             websocket_raw_bytes: 0,
             websocket_sent_bytes: 0,
+            websocket_messages: 0,
             http_fallbacks: 0,
+            recent_requests: Vec::new(),
+            traffic_windows: Vec::new(),
             autostart_enabled: true,
             dock_visible: preferences.dock_visible,
             dock_control_available: cfg!(target_os = "macos"),
@@ -292,7 +301,10 @@ impl AppRuntime {
         status.websocket_handshakes = metrics.websocket_handshakes;
         status.websocket_raw_bytes = metrics.websocket_raw_bytes;
         status.websocket_sent_bytes = metrics.websocket_sent_bytes;
+        status.websocket_messages = metrics.websocket_messages;
         status.http_fallbacks = metrics.http_fallbacks;
+        status.recent_requests = self.metrics.recent_requests();
+        status.traffic_windows = self.metrics.traffic_windows();
         if status.websocket_state != "conflict" {
             status.websocket_state = if !status.websocket_enabled {
                 "disabled".to_owned()

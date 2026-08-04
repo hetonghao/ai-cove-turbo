@@ -1,9 +1,15 @@
 (() => {
   "use strict";
 
-  const TABS = ["config", "runtime"];
+  const TABS = ["live", "statistics", "config"];
+  const RANGE_LABELS = { 1: "最近 1 分钟", 10: "最近 10 分钟", 60: "最近 1 小时", 1440: "最近 1 天" };
+  const ROLLING_WINDOWS = [1, 10, 60, 1440];
   const invoke = window.__TAURI__?.core?.invoke;
+  const telemetry = window.TurboTelemetry;
   const numberFormatter = new Intl.NumberFormat("zh-CN");
+  const $ = (selector) => document.querySelector?.(selector) ?? null;
+  const all = (selector) => document.querySelectorAll?.(selector) ?? [];
+
   const desktopStatus = {
     serviceHealthy: false,
     endpoint: "—",
@@ -17,8 +23,12 @@
     compressionVerified: false,
     websocketEnabled: true,
     websocketVerified: false,
+    websocketZstdVerified: false,
     websocketState: "waiting",
     websocketHandshakes: 0,
+    websocketMessages: 0,
+    websocketRawBytes: 0,
+    websocketSentBytes: 0,
     httpFallbacks: 0,
     autostartEnabled: true,
     dockVisible: false,
@@ -29,21 +39,70 @@
     rawBytes: 0,
     sentBytes: 0,
     compressionRatio: 0,
+    recentRequests: [],
+    trafficWindows: [],
     updateState: "idle",
     updateMessage: "尚未检查更新",
     updateProgress: 0,
   };
+
+  function buildPreviewTelemetry() {
+    const now = Date.now();
+    const samples = [
+      { id: 1, ageSeconds: 3, status: 200, path: "/v1/responses", rawBytes: 186_420, sentBytes: 82_110, transport: "WS", result: "success" },
+      { id: 2, ageSeconds: 11, status: 200, path: "/v1/responses", rawBytes: 94_280, sentBytes: 51_360, transport: "HTTP", result: "success" },
+      { id: 3, ageSeconds: 48, status: 201, path: "/v1/files", rawBytes: 128_610, sentBytes: 67_240, transport: "HTTP", result: "success" },
+      { id: 4, ageSeconds: 210, status: 200, path: "/v1/responses", rawBytes: 121_000, sentBytes: 116_000, transport: "HTTP", result: "fallback" },
+      { id: 5, ageSeconds: 1_080, status: 200, path: "/v1/responses", rawBytes: 212_000, sentBytes: 104_000, transport: "WS", result: "success" },
+      { id: 6, ageSeconds: 10_800, status: 200, path: "/v1/responses", rawBytes: 246_000, sentBytes: 119_000, transport: "HTTP", result: "success" },
+      { id: 7, ageSeconds: 43_200, status: 200, path: "/v1/responses", rawBytes: 152_000, sentBytes: 143_000, transport: "HTTP", result: "fallback" },
+      { id: 8, ageSeconds: 82_800, status: 200, path: "/v1/responses", rawBytes: 178_000, sentBytes: 82_000, transport: "WS", result: "success" },
+    ].map((sample) => ({ ...sample, timestampMs: now - sample.ageSeconds * 1_000 }));
+    const specs = [[1, 10, 6], [10, 60, 10], [60, 300, 12], [1440, 3_600, 24]];
+    const trafficWindows = specs.map(([minutes, bucketSeconds, bucketCount]) => {
+      const bucketMs = bucketSeconds * 1_000;
+      const currentPeriodStartMs = now - now % bucketMs;
+      const rangeStart = currentPeriodStartMs - (bucketCount - 1) * bucketMs;
+      const buckets = Array.from({ length: bucketCount }, (_, index) => ({
+        startMs: rangeStart + index * bucketMs,
+        endMs: rangeStart + (index + 1) * bucketMs,
+        series: [],
+      }));
+      samples.forEach((sample) => {
+        const index = Math.floor((sample.timestampMs - rangeStart) / bucketMs);
+        if (index < 0 || index >= buckets.length) return;
+        const key = `${sample.transport}:${sample.result}`;
+        let series = buckets[index].series.find((item) => item.key === key);
+        if (!series) {
+          series = { key, transport: sample.transport, result: sample.result, requests: 0, rawBytes: 0, sentBytes: 0 };
+          buckets[index].series.push(series);
+        }
+        series.requests += 1;
+        series.rawBytes += sample.rawBytes;
+        series.sentBytes += sample.sentBytes;
+      });
+      buckets.forEach((bucket) => bucket.series.forEach((series) => delete series.key));
+      return { minutes, bucketSeconds, currentPeriodStartMs, buckets };
+    });
+    return { recentRequests: samples.slice(0, 5).reverse(), trafficWindows };
+  }
+
+  const previewTelemetry = buildPreviewTelemetry();
   const previewStatus = {
     ...desktopStatus,
+    ...previewTelemetry,
     serviceHealthy: true,
     endpoint: "http://127.0.0.1:44175/v1",
-    configState: "active",
+    configState: "managed",
     configMessage: "Preview：配置已接管",
     provider: "ai-cove",
     upstream: "https://api.ai-cove.com/v1",
+    compressionVerified: true,
     websocketVerified: true,
+    websocketZstdVerified: true,
     websocketState: "connected",
     websocketHandshakes: 8,
+    websocketMessages: 12,
     httpFallbacks: 2,
     requests: 24,
     rawBytes: 1_840_000,
@@ -51,9 +110,12 @@
     compressionRatio: 42.4,
     updateMessage: "Preview：尚未检查更新",
   };
-  let state = { ...(invoke ? desktopStatus : previewStatus), tab: "config", nonAiCoveConfirmed: false };
+  let state = { ...(invoke ? desktopStatus : previewStatus), tab: "live", nonAiCoveConfirmed: false };
   let pendingAction = "";
   let refreshing = false;
+  let streamPaused = false;
+  let clearedThroughId = 0;
+  let displayedRequests = [];
 
   const actions = {
     "toggle-compression": ["set_compression", () => ({ enabled: !state.compressionEnabled })],
@@ -70,7 +132,10 @@
 
   function readTab() {
     const requestedTab = new URL(window.location.href).searchParams.get("tab");
-    return TABS.includes(requestedTab) ? requestedTab : "config";
+    if (TABS.includes(requestedTab)) return requestedTab;
+    if (requestedTab === "runtime") return "live";
+    if (requestedTab === "stats") return "statistics";
+    return "live";
   }
 
   function updateUrl() {
@@ -78,13 +143,6 @@
     url.searchParams.delete("variant");
     url.searchParams.set("tab", state.tab);
     window.history.replaceState({}, "", url);
-  }
-
-  function formatBytes(value) {
-    const bytes = Number(value) || 0;
-    if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(2)} MB`;
-    if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(1)} KB`;
-    return `${numberFormatter.format(bytes)} B`;
   }
 
   function formatConfigState() {
@@ -101,6 +159,10 @@
       missing: "未找到配置",
     };
     return labels[String(state.configState).toLowerCase()] ?? state.configState ?? "未知";
+  }
+
+  function configReady() {
+    return ["active", "healthy", "managed"].includes(String(state.configState).toLowerCase());
   }
 
   function formatVerification() {
@@ -120,20 +182,13 @@
     return labels[String(state.websocketState).toLowerCase()] ?? "等待首次握手验证";
   }
 
-  function formatWebsocketDetail() {
-    if (!state.websocketEnabled) return "未启用";
-    const websocketState = String(state.websocketState).toLowerCase();
-    if (websocketState === "failed") return "握手失败";
-    if (websocketState === "conflict") return "配置冲突";
-    return "扩展由上游协商";
-  }
-
   function formatUpdateState() {
     const labels = {
       idle: "尚未检查",
       checking: "检查中",
       current: "已是最新",
       available: "发现新版本",
+      downloaded: "可安装",
       downloading: "下载中",
       installing: "安装中",
       ready: "安装完成",
@@ -143,14 +198,28 @@
     return labels[String(state.updateState).toLowerCase()] ?? state.updateState ?? "未知";
   }
 
+  function activationSummary() {
+    if (!state.serviceHealthy) return "本地通道尚未就绪";
+    if (!configReady()) return "等待 Turbo 完成配置接管";
+    if (state.restartRequired) return "需要重启 Codex 才会生效";
+    const httpReady = !state.compressionEnabled || state.compressionVerified;
+    const websocketReady = !state.websocketEnabled || (state.websocketVerified && state.websocketZstdVerified);
+    if (httpReady && websocketReady) return "HTTP / WebSocket 均已生效";
+    return "通道可用，等待真实请求验证";
+  }
+
+  function totalRequests() {
+    return (Number(state.requests) || 0) + (Number(state.websocketMessages) || 0);
+  }
+
   function formatState(key) {
     const configState = String(state.configState ?? "unknown").toUpperCase();
     const starting = configState === "STARTING";
-    const runtimeMode = invoke ? "DESKTOP" : "PREVIEW";
+    const observed = totalRequests() > 0 || Number(state.websocketHandshakes) > 0;
     const values = {
-      "runtime-mode": runtimeMode,
+      "runtime-mode": invoke ? "DESKTOP" : "PREVIEW",
       "service-label": `${invoke ? "AI Cove" : "PREVIEW"} / ${starting ? "正在读取状态" : state.serviceHealthy ? "本地服务正常" : "本地服务异常"}`,
-      "service-title": starting ? "正在读取状态" : state.serviceHealthy ? "通道运行中" : "通道未就绪",
+      "service-title": starting ? "正在读取状态" : state.serviceHealthy ? "Turbo 已接管" : "通道未就绪",
       "health-symbol": starting ? "…" : state.serviceHealthy ? "✓" : "!",
       endpoint: state.endpoint || "—",
       "config-state": formatConfigState(),
@@ -161,37 +230,51 @@
       compression: state.compressionEnabled ? "开" : "关",
       websocket: state.websocketEnabled ? "开" : "关",
       "websocket-status": formatWebsocketStatus(),
-      "websocket-detail": formatWebsocketDetail(),
+      "websocket-detail": state.websocketEnabled ? "扩展由上游协商" : "未启用",
       "websocket-handshakes": numberFormatter.format(Number(state.websocketHandshakes) || 0),
       "http-fallbacks": numberFormatter.format(Number(state.httpFallbacks) || 0),
       autostart: state.autostartEnabled ? "开" : "关",
       dock: state.dockVisible ? "开" : "关",
-      restart: pendingAction === "restart-codex"
-        ? "正在重启…"
-        : state.desktopRestarted
-          ? "已重启 Codex 桌面端"
-          : state.restartRequired
-            ? "需要重启 Codex 桌面端"
-            : "重启 Codex 桌面端",
-      requests: numberFormatter.format(Number(state.requests) || 0),
-      "raw-bytes": formatBytes(state.rawBytes),
-      "sent-bytes": formatBytes(state.sentBytes),
-      ratio: Number(state.rawBytes) > 0 && Number.isFinite(Number(state.compressionRatio)) ? `${Number(state.compressionRatio).toFixed(1)}%` : "—",
+      restart: pendingAction === "restart-codex" ? "正在重启…" : state.restartRequired ? "重启 Codex" : "重新启动 Codex",
+      requests: numberFormatter.format(totalRequests()),
+      "raw-bytes": telemetry.formatBytes((Number(state.rawBytes) || 0) + (Number(state.websocketRawBytes) || 0)),
+      "sent-bytes": telemetry.formatBytes((Number(state.sentBytes) || 0) + (Number(state.websocketSentBytes) || 0)),
+      ratio: telemetry.formatRate(
+        (Number(state.rawBytes) || 0) + (Number(state.websocketRawBytes) || 0),
+        (Number(state.sentBytes) || 0) + (Number(state.websocketSentBytes) || 0),
+      ),
       "update-state": formatUpdateState(),
       "update-message": state.updateMessage || "—",
       "update-progress": `${Math.max(0, Math.min(100, Number(state.updateProgress) || 0))}%`,
-      "service-runtime": starting ? "STARTING" : state.serviceHealthy ? "HEALTHY" : "OFFLINE",
-      "config-runtime": ["ACTIVE", "HEALTHY", "MANAGED"].includes(configState) ? "READY" : configState,
-      "verify-runtime": !state.compressionEnabled ? "OFF" : state.compressionVerified ? "VERIFIED" : "WAITING",
-      "websocket-runtime": !state.websocketEnabled
-        ? "DISABLED"
-        : state.websocketVerified
-          ? String(state.websocketState).toUpperCase()
-          : String(state.websocketState || "waiting").toUpperCase(),
-      "observed-state": Number(state.requests) > 0 || Number(state.websocketHandshakes) > 0 ? "OBSERVED / LIVE" : "OBSERVED / WAITING",
-      "stream-state": starting ? "WAITING" : state.serviceHealthy ? (Number(state.requests) > 0 || state.websocketState === "connected" ? "ACTIVE" : "IDLE") : "OFFLINE",
+      "service-runtime": starting ? "正在读取" : state.serviceHealthy ? "正常" : "离线",
+      "config-runtime": starting ? "检查中" : configReady() ? "已接管" : formatConfigState(),
+      "restart-runtime": state.restartRequired ? "需要重启" : observed || state.desktopRestarted ? "已生效" : "待确认",
+      "http-zstd-runtime": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "已验证" : "待验证",
+      "websocket-runtime": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "已验证" : String(state.websocketState).toLowerCase() === "failed" ? "握手失败" : "待验证",
+      "websocket-zstd-runtime": !state.websocketEnabled ? "已关闭" : state.websocketZstdVerified ? "已验证" : "待验证",
+      "service-prerequisite": starting ? "检查中" : state.serviceHealthy ? "正常" : "异常",
+      "config-prerequisite": starting ? "检查中" : configReady() ? "已接管" : formatConfigState(),
+      "restart-prerequisite": state.restartRequired ? "需要重启" : observed || state.desktopRestarted ? "已生效" : "待确认",
+      "http-status": state.serviceHealthy ? "通道可用" : "通道不可用",
+      "http-zstd-status": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "zstd 已验证" : "等待验证",
+      "websocket-handshake-status": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "握手已验证" : "等待握手",
+      "websocket-zstd-status": !state.websocketEnabled ? "已关闭" : state.websocketZstdVerified ? "zstd 已验证" : "等待验证",
+      "activation-summary": activationSummary(),
+      "observed-state": observed ? "OBSERVED / LIVE" : "OBSERVED / WAITING",
+      "stream-state": starting ? "WAITING" : state.serviceHealthy ? (observed ? "ACTIVE" : "IDLE") : "OFFLINE",
     };
     return String(values[key] ?? "");
+  }
+
+  function statusFor(key) {
+    if (key.startsWith("service")) return state.serviceHealthy ? "verified" : String(state.configState).toLowerCase() === "starting" ? "waiting" : "blocked";
+    if (key.startsWith("config")) return configReady() ? "verified" : String(state.configState).toLowerCase() === "starting" ? "waiting" : "blocked";
+    if (key.startsWith("restart")) return state.restartRequired ? "required" : totalRequests() > 0 || state.desktopRestarted ? "verified" : "waiting";
+    if (key.startsWith("http-zstd")) return !state.compressionEnabled ? "disabled" : state.compressionVerified ? "verified" : "waiting";
+    if (key === "http-status") return state.serviceHealthy ? "verified" : "blocked";
+    if (key.startsWith("websocket-zstd")) return !state.websocketEnabled ? "disabled" : state.websocketZstdVerified ? "verified" : "waiting";
+    if (key.startsWith("websocket")) return !state.websocketEnabled ? "disabled" : state.websocketVerified ? "verified" : String(state.websocketState).toLowerCase() === "failed" ? "blocked" : "waiting";
+    return "";
   }
 
   function renderVisibility() {
@@ -205,7 +288,7 @@
       "install-update": ["available", "downloaded"].includes(String(state.updateState).toLowerCase()),
       "update-progress": ["downloading", "installing"].includes(String(state.updateState).toLowerCase()),
     };
-    document.querySelectorAll("[data-visible]").forEach((target) => {
+    all("[data-visible]").forEach((target) => {
       target.hidden = !visible[target.dataset.visible];
     });
   }
@@ -217,11 +300,14 @@
       "toggle-autostart": state.autostartEnabled,
       "toggle-dock": state.dockVisible,
     };
-    document.querySelectorAll("[data-action]").forEach((control) => {
+    all("[data-action]").forEach((control) => {
       const action = control.dataset.action;
-      control.disabled = Boolean(pendingAction);
-      control.dataset.status = pendingAction === action ? "pending" : "idle";
-      control.setAttribute("aria-busy", String(pendingAction === action));
+      const managed = Object.hasOwn(actions, action);
+      if (managed) {
+        control.disabled = Boolean(pendingAction);
+        control.dataset.status = pendingAction === action ? "pending" : "idle";
+        control.setAttribute("aria-busy", String(pendingAction === action));
+      }
       if (Object.hasOwn(pressed, action)) {
         control.dataset.enabled = String(pressed[action]);
         control.setAttribute("aria-pressed", String(pressed[action]));
@@ -229,43 +315,38 @@
     });
   }
 
-  function renderVolumes() {
-    const rawBytes = Number(state.rawBytes) || 0;
-    const sentBytes = Number(state.sentBytes) || 0;
-    const values = { raw: rawBytes > 0 ? 100 : 0, sent: rawBytes > 0 ? Math.min(100, sentBytes / rawBytes * 100) : 0 };
-    document.querySelectorAll("[data-volume]").forEach((bar) => {
-      bar.style.setProperty("--volume", `${values[bar.dataset.volume]}%`);
-    });
-  }
-
   function renderState() {
     document.body.dataset.serviceHealthy = String(Boolean(state.serviceHealthy));
-    document.querySelectorAll("[data-state]").forEach((target) => {
-      target.textContent = formatState(target.dataset.state);
+    all("[data-state]").forEach((target) => {
+      const key = target.dataset.state;
+      target.textContent = formatState(key);
+      const status = statusFor(key);
+      if (status) target.dataset.status = status;
     });
-    document.querySelectorAll("[data-state-progress]").forEach((target) => {
+    all("[data-state-progress]").forEach((target) => {
       target.style.setProperty("--progress", `${Math.max(0, Math.min(100, Number(state.updateProgress) || 0))}%`);
     });
-    document.querySelectorAll('[role="progressbar"]').forEach((target) => {
+    all('[role="progressbar"]').forEach((target) => {
       target.setAttribute("aria-valuenow", String(Math.max(0, Math.min(100, Number(state.updateProgress) || 0))));
     });
-    document.querySelectorAll('[data-state="health-symbol"]').forEach((target) => {
+    all('[data-state="health-symbol"]').forEach((target) => {
       target.setAttribute("aria-label", String(state.configState).toLowerCase() === "starting" ? "正在读取状态" : state.serviceHealthy ? "本地服务正常" : "本地服务异常");
     });
     renderVisibility();
     renderControls();
-    renderVolumes();
+    renderLiveStream();
+    renderStatistics();
   }
 
   function renderTab(options = {}) {
     document.body.dataset.activeTab = state.tab;
-    document.querySelectorAll("[data-tab]").forEach((tab) => {
+    all("[data-tab]").forEach((tab) => {
       const active = tab.dataset.tab === state.tab;
       tab.setAttribute("aria-selected", String(active));
       tab.tabIndex = active ? 0 : -1;
       if (active && options.focus) tab.focus();
     });
-    document.querySelectorAll("[data-panel]").forEach((panel) => {
+    all("[data-panel]").forEach((panel) => {
       panel.hidden = panel.dataset.panel !== state.tab;
     });
   }
@@ -274,19 +355,133 @@
     if (!TABS.includes(tab)) return;
     state.tab = tab;
     renderTab(options);
+    if (tab === "statistics") renderStatistics();
     if (options.updateUrl !== false) updateUrl();
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function syncLiveRequests() {
+    if (streamPaused) return;
+    displayedRequests = (Array.isArray(state.recentRequests) ? state.recentRequests : [])
+      .filter((request) => Number(request.id) > clearedThroughId)
+      .slice(-100);
+  }
+
+  function renderLiveStream() {
+    const body = $("[data-request-stream]");
+    if (body) {
+      body.innerHTML = displayedRequests.map((request) => {
+        const status = Number(request.status) || 0;
+        const fallback = request.result === "fallback";
+        const failed = request.result === "error";
+        const transport = fallback ? `${request.transport} · 回退` : failed ? `${request.transport} · 失败` : request.transport;
+        return `<tr><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback ? " c-transport--fallback" : failed ? " c-transport--error" : ""}">${escapeHtml(transport)}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
+      }).join("");
+    }
+    const empty = $("[data-stream-empty]");
+    if (empty) {
+      empty.hidden = displayedRequests.length > 0;
+      empty.textContent = streamPaused ? "请求流已暂停。" : clearedThroughId > 0 ? "请求流已清空，下一条请求到达时会继续显示。" : "等待第一条真实请求。";
+    }
+    all("[data-live-count]").forEach((target) => {
+      target.textContent = numberFormatter.format(displayedRequests.length);
+    });
+    const streamState = $("[data-live-stream-state]");
+    if (streamState) streamState.classList?.toggle("is-paused", streamPaused);
+    const streamLabel = $("[data-live-stream-label]");
+    if (streamLabel) streamLabel.textContent = streamPaused ? "已暂停" : "实时更新";
+    const toggle = $('[data-action="toggle-stream"]');
+    if (toggle) toggle.setAttribute("aria-pressed", String(streamPaused));
+    const actionLabel = $("[data-live-action-label]");
+    if (actionLabel) actionLabel.textContent = streamPaused ? "继续" : "暂停";
+    const terminal = $(".c-terminal__window");
+    if (terminal && !streamPaused) terminal.scrollTop = terminal.scrollHeight;
+  }
+
+  function renderStatistics() {
+    const range = Number($('[data-filter="range"]')?.value ?? 1_440);
+    const transport = $('[data-filter="transport"]')?.value ?? "all";
+    const result = $('[data-filter="result"]')?.value ?? "all";
+    const chart = telemetry.selectWindow(state.trafficWindows, range);
+    const buckets = chart?.buckets ?? [];
+    const totals = telemetry.summarizeBuckets(buckets, transport, result);
+    const values = {
+      requests: numberFormatter.format(totals.requests),
+      "raw-bytes": telemetry.formatBytes(totals.rawBytes),
+      "sent-bytes": telemetry.formatBytes(totals.sentBytes),
+      "saved-bytes": telemetry.formatBytes(Math.max(0, totals.rawBytes - totals.sentBytes)),
+      "savings-rate": telemetry.formatRate(totals.rawBytes, totals.sentBytes),
+    };
+    all("[data-stat]").forEach((target) => {
+      target.textContent = values[target.dataset.stat] ?? "";
+    });
+
+    const transportLabel = transport === "all" ? "全部方式" : transport === "WS" ? "WebSocket" : "HTTP";
+    const resultLabel = result === "all" ? "全部结果" : result === "success" ? "成功" : result === "fallback" ? "回退" : "失败";
+    const summary = $("[data-stats-summary]");
+    if (summary) summary.textContent = `${RANGE_LABELS[range] ?? RANGE_LABELS[1440]} / ${transportLabel} / ${resultLabel}`;
+    const granularity = $("[data-stat-granularity]");
+    if (granularity) granularity.textContent = telemetry.granularityLabel(chart?.bucketSeconds ?? 3_600);
+
+    const bars = $("[data-stat-bars]");
+    if (bars) {
+      bars.style.setProperty("--chart-bucket-count", String(buckets.length || 1));
+      const bucketValues = buckets.map((bucket) => telemetry.bucketTotals(bucket, transport, result));
+      const maxRequests = Math.max(...bucketValues.map((bucket) => bucket.requests), 1);
+      bars.innerHTML = buckets.map((bucket, index) => {
+        const value = bucketValues[index];
+        const saved = Math.max(0, value.rawBytes - value.sentBytes);
+        const time = `${telemetry.formatChartTime(bucket.startMs, range)}–${telemetry.formatChartTime(bucket.endMs, range)}`;
+        const height = value.requests ? Math.round(12 + value.requests / maxRequests * 88) : 2;
+        const sentShare = value.rawBytes ? Math.round(value.sentBytes / value.rawBytes * 100) : 100;
+        const tooltipId = `chart-tooltip-${index}`;
+        return `<span class="c-bar-slot${value.requests ? "" : " is-empty"}" style="--bar: ${height}%; --sent-share: ${sentShare}%" tabindex="0" role="img" aria-describedby="${tooltipId}" aria-label="${time}，${numberFormatter.format(value.requests)} 个请求，发送 ${telemetry.formatBytes(value.sentBytes)}，节省 ${telemetry.formatBytes(saved)}"><i class="c-bar"></i><span id="${tooltipId}" class="c-bar-tooltip" role="tooltip"><strong>时间</strong><span>${time}</span><strong>请求数</strong><span>${numberFormatter.format(value.requests)}</span><strong>发送</strong><span>${telemetry.formatBytes(value.sentBytes)}</span><strong>节省</strong><span>${telemetry.formatBytes(saved)}</span></span></span>`;
+      }).join("");
+    }
+    const axis = $("[data-stat-axis]");
+    if (axis) {
+      if (buckets.length) {
+        const middle = buckets[Math.floor(buckets.length / 2)].startMs;
+        axis.innerHTML = [buckets[0].startMs, middle, chart.currentPeriodStartMs]
+          .map((timestamp) => `<span>${telemetry.formatChartTime(timestamp, range)}</span>`)
+          .join("");
+      } else axis.innerHTML = "";
+    }
+    const windows = $("[data-stat-windows]");
+    if (windows) {
+      windows.innerHTML = ROLLING_WINDOWS.map((minutes) => {
+        const window = telemetry.selectWindow(state.trafficWindows, minutes);
+        const windowTotals = telemetry.summarizeBuckets(window?.buckets ?? [], transport, result);
+        return `<article class="c-window-card"><header><span>${RANGE_LABELS[minutes]}</span><strong>${numberFormatter.format(windowTotals.requests)} 个请求</strong></header><div><p><span>请求数</span><strong>${numberFormatter.format(windowTotals.requests)}</strong></p><p><span>原始 → 发送</span><strong>${telemetry.formatBytes(windowTotals.rawBytes)} → ${telemetry.formatBytes(windowTotals.sentBytes)}</strong></p><p><span>节省率</span><strong>${telemetry.formatRate(windowTotals.rawBytes, windowTotals.sentBytes)}</strong></p></div></article>`;
+      }).join("");
+    }
+    const empty = $("[data-stat-empty]");
+    if (empty) empty.hidden = totals.requests > 0;
   }
 
   function applyStatus(status) {
     if (status && typeof status === "object") state = { ...state, ...status };
+    syncLiveRequests();
     renderState();
   }
 
   function applyPreviewAction(command, args) {
-    if (command === "set_compression") state.compressionEnabled = args.enabled;
+    if (command === "set_compression") {
+      state.compressionEnabled = args.enabled;
+      state.compressionVerified = false;
+    }
     if (command === "set_websocket") {
       state.websocketEnabled = args.enabled;
       state.websocketVerified = false;
+      state.websocketZstdVerified = false;
       state.websocketState = args.enabled ? "waiting" : "disabled";
       state.restartRequired = true;
     }
@@ -296,12 +491,12 @@
       state.desktopRestarted = true;
       state.restartRequired = false;
     }
-    if (command === "retry_takeover") state.configState = "active";
+    if (command === "retry_takeover") state.configState = "managed";
     if (command === "set_ai_cove_upstream") {
       state.aiCoveUpstream = true;
       state.aiCoveUpstreamFixAvailable = false;
       state.upstream = "https://api.ai-cove.com/v1";
-      state.configState = "active";
+      state.configState = "managed";
       state.serviceHealthy = true;
     }
     if (command === "confirm_non_ai_cove") state.nonAiCoveConfirmed = true;
@@ -319,6 +514,18 @@
   }
 
   async function handleAction(action) {
+    if (action === "toggle-stream") {
+      streamPaused = !streamPaused;
+      if (!streamPaused) syncLiveRequests();
+      renderLiveStream();
+      return;
+    }
+    if (action === "clear-stream") {
+      clearedThroughId = Math.max(clearedThroughId, ...(state.recentRequests ?? []).map((request) => Number(request.id) || 0));
+      displayedRequests = [];
+      renderLiveStream();
+      return;
+    }
     const [command, buildArgs] = actions[action] ?? [];
     if (!command || pendingAction) return;
     const args = buildArgs?.();
@@ -361,8 +568,118 @@
     selectTab(TABS[(currentIndex + keys[event.key] + TABS.length) % TABS.length], { focus: true });
   }
 
+  function bindDotField() {
+    const surface = $(".turbo-panels");
+    const canvas = surface?.querySelector("[data-dot-field]");
+    const context = canvas?.getContext("2d");
+    if (!surface || !canvas || !context) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const finePointer = window.matchMedia("(pointer: fine)");
+    const dots = [];
+    const pointer = { x: 0, y: 0, lastX: 0, lastY: 0, lastTime: 0, engagement: 0, inside: false };
+    let width = 0;
+    let height = 0;
+    let frame = 0;
+
+    function draw() {
+      context.clearRect(0, 0, width, height);
+      const color = context.createLinearGradient(0, 0, width, height);
+      color.addColorStop(0, "rgba(112, 216, 238, 0.26)");
+      color.addColorStop(0.52, "rgba(114, 217, 155, 0.44)");
+      color.addColorStop(1, "rgba(112, 216, 238, 0.18)");
+      context.fillStyle = color;
+      dots.forEach((dot) => {
+        context.beginPath();
+        context.arc(dot.x + dot.dx, dot.y + dot.dy, 1.2, 0, Math.PI * 2);
+        context.fill();
+      });
+    }
+
+    function resize() {
+      const bounds = surface.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) return;
+      width = bounds.width;
+      height = bounds.height;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      dots.length = 0;
+      for (let y = 9; y < height; y += 18) {
+        for (let x = 9; x < width; x += 18) dots.push({ x, y, dx: 0, dy: 0 });
+      }
+      draw();
+      canvas.dataset.dotState = "rest";
+    }
+
+    function animate() {
+      frame = 0;
+      let moving = false;
+      pointer.engagement *= pointer.inside ? 0.9 : 0.78;
+      dots.forEach((dot) => {
+        const x = dot.x - pointer.x;
+        const y = dot.y - pointer.y;
+        const distance = Math.hypot(x, y) || 1;
+        const influence = pointer.inside && distance < 180 ? (1 - distance / 180) ** 2 * pointer.engagement : 0;
+        const targetX = x / distance * 130 * influence;
+        const targetY = y / distance * 130 * influence;
+        dot.dx += (targetX - dot.dx) * 0.18;
+        dot.dy += (targetY - dot.dy) * 0.18;
+        if (Math.abs(targetX - dot.dx) + Math.abs(targetY - dot.dy) > 0.04 || Math.abs(dot.dx) + Math.abs(dot.dy) > 0.05) moving = true;
+      });
+      draw();
+      if (moving || pointer.engagement > 0.02) {
+        canvas.dataset.dotState = pointer.inside && pointer.engagement > 0.08 ? "active" : "settling";
+        frame = window.requestAnimationFrame(animate);
+      } else {
+        pointer.engagement = 0;
+        canvas.dataset.dotState = "rest";
+      }
+    }
+
+    function start() {
+      if (!frame) frame = window.requestAnimationFrame(animate);
+    }
+
+    surface.addEventListener("pointermove", (event) => {
+      if (reduceMotion.matches || !finePointer.matches || width <= 768) return;
+      const bounds = surface.getBoundingClientRect();
+      const now = performance.now();
+      pointer.x = event.clientX - bounds.left;
+      pointer.y = event.clientY - bounds.top;
+      const elapsed = Math.max(16, now - pointer.lastTime);
+      const speed = Math.hypot(pointer.x - pointer.lastX, pointer.y - pointer.lastY) / elapsed;
+      pointer.engagement = Math.max(pointer.engagement, Math.min(1, speed / 0.8));
+      pointer.lastX = pointer.x;
+      pointer.lastY = pointer.y;
+      pointer.lastTime = now;
+      pointer.inside = true;
+      start();
+    });
+    surface.addEventListener("pointerleave", () => {
+      pointer.inside = false;
+      start();
+    });
+    if (window.ResizeObserver) new ResizeObserver(resize).observe(surface);
+    else window.addEventListener("resize", resize, { passive: true });
+    reduceMotion.addEventListener?.("change", () => {
+      pointer.inside = false;
+      pointer.engagement = 0;
+      dots.forEach((dot) => {
+        dot.dx = 0;
+        dot.dy = 0;
+      });
+      draw();
+      canvas.dataset.dotState = "rest";
+    });
+    resize();
+  }
+
   function init() {
     state.tab = readTab();
+    syncLiveRequests();
     document.addEventListener("click", (event) => {
       const action = event.target.closest?.("[data-action]");
       if (action) void handleAction(action.dataset.action);
@@ -373,7 +690,11 @@
       const tab = event.target.closest?.("[data-tab]");
       if (tab) handleTabKeydown(event, tab);
     });
+    document.addEventListener("change", (event) => {
+      if (event.target.matches?.("[data-filter]")) renderStatistics();
+    });
     window.addEventListener("popstate", () => selectTab(readTab(), { updateUrl: false }));
+    bindDotField();
     renderTab();
     renderState();
     updateUrl();

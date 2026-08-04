@@ -25,6 +25,7 @@ pub(in crate::proxy) async fn relay_private(
     upgraded: Upgraded,
     mut upstream: PrivateUpstream,
     metrics: Arc<Metrics>,
+    path: String,
 ) {
     let config = WebSocketConfig::default()
         .max_message_size(Some(PRIVATE_MESSAGE_MAX_BYTES))
@@ -42,11 +43,13 @@ pub(in crate::proxy) async fn relay_private(
                 let message = match client_message {
                     Ok(message) => message,
                     Err(error) => {
-                        close_both(&mut client, &mut upstream, websocket_error_code(&error), "client websocket error").await;
+                        let close_code = websocket_error_code(&error);
+                        metrics.record_websocket_error(&path, close_code);
+                        close_both(&mut client, &mut upstream, close_code, "client websocket error").await;
                         break;
                     }
                 };
-                if !forward_client_message(&mut client, &mut upstream, message, &metrics).await {
+                if !forward_client_message(&mut client, &mut upstream, message, &metrics, &path).await {
                     break;
                 }
             }
@@ -58,11 +61,13 @@ pub(in crate::proxy) async fn relay_private(
                 let message = match upstream_message {
                     Ok(message) => message,
                     Err(error) => {
-                        close_both(&mut client, &mut upstream, websocket_error_code(&error), "upstream websocket error").await;
+                        let close_code = websocket_error_code(&error);
+                        metrics.record_websocket_error(&path, close_code);
+                        close_both(&mut client, &mut upstream, close_code, "upstream websocket error").await;
                         break;
                     }
                 };
-                if !forward_upstream_message(&mut client, &mut upstream, message).await {
+                if !forward_upstream_message(&mut client, &mut upstream, message, &metrics, &path).await {
                     break;
                 }
             }
@@ -75,14 +80,23 @@ async fn forward_client_message(
     upstream: &mut PrivateUpstream,
     message: Message,
     metrics: &Metrics,
+    path: &str,
 ) -> bool {
     match message {
         Message::Text(text) => {
-            forward_application_or_close(client, upstream, text.as_bytes().to_vec(), false, metrics)
-                .await
+            forward_application_or_close(
+                client,
+                upstream,
+                text.as_bytes().to_vec(),
+                false,
+                metrics,
+                path,
+            )
+            .await
         }
         Message::Binary(payload) => {
-            forward_application_or_close(client, upstream, payload.to_vec(), true, metrics).await
+            forward_application_or_close(client, upstream, payload.to_vec(), true, metrics, path)
+                .await
         }
         Message::Ping(_) | Message::Pong(_) => true,
         Message::Close(frame) => {
@@ -90,6 +104,7 @@ async fn forward_client_message(
             false
         }
         Message::Frame(_) => {
+            metrics.record_websocket_error(path, 1002);
             close_both(client, upstream, 1002, "raw websocket frame is invalid").await;
             false
         }
@@ -102,10 +117,12 @@ async fn forward_application_or_close(
     payload: Vec<u8>,
     original_binary: bool,
     metrics: &Metrics,
+    path: &str,
 ) -> bool {
-    match forward_private_application(upstream, payload, original_binary, metrics).await {
+    match forward_private_application(upstream, payload, original_binary, metrics, path).await {
         Ok(()) => true,
         Err(error) => {
+            metrics.record_websocket_error(path, error.close_code);
             close_both(client, upstream, error.close_code, &error.to_string()).await;
             false
         }
@@ -116,22 +133,34 @@ async fn forward_upstream_message(
     client: &mut WebSocketStream<TokioIo<Upgraded>>,
     upstream: &mut PrivateUpstream,
     message: Message,
+    metrics: &Metrics,
+    path: &str,
 ) -> bool {
     match message {
         Message::Binary(envelope) => match decode_private_message_async(envelope).await {
             Ok(decoded) => match decoded_message(decoded) {
-                Ok(message) => client.send(message).await.is_ok(),
+                Ok(message) => {
+                    if client.send(message).await.is_ok() {
+                        true
+                    } else {
+                        metrics.record_websocket_error(path, 1011);
+                        false
+                    }
+                }
                 Err(error) => {
+                    metrics.record_websocket_error(path, error.close_code);
                     close_both(client, upstream, error.close_code, &error.to_string()).await;
                     false
                 }
             },
             Err(error) => {
+                metrics.record_websocket_error(path, error.close_code);
                 close_both(client, upstream, error.close_code, &error.to_string()).await;
                 false
             }
         },
         Message::Text(_) | Message::Frame(_) => {
+            metrics.record_websocket_error(path, 1002);
             close_both(
                 client,
                 upstream,
@@ -154,6 +183,7 @@ async fn forward_private_application(
     payload: Vec<u8>,
     original_binary: bool,
     metrics: &Metrics,
+    path: &str,
 ) -> Result<(), PrivateProtocolError> {
     let raw_len = payload.len();
     let encoded = encode_private_message_async(payload, original_binary).await?;
@@ -165,7 +195,7 @@ async fn forward_private_application(
         .send(Message::Binary(Bytes::from(encoded)))
         .await
         .map_err(|_| PrivateProtocolError::internal("private websocket send failed"))?;
-    metrics.record_websocket_zstd_message(raw_len, sent_len, compressed);
+    metrics.record_websocket_zstd_message(path, raw_len, sent_len, compressed);
     Ok(())
 }
 
@@ -226,20 +256,10 @@ const fn websocket_error_code(error: &tokio_tungstenite::tungstenite::Error) -> 
     match error {
         tokio_tungstenite::tungstenite::Error::Capacity(_) => 1009,
         tokio_tungstenite::tungstenite::Error::Utf8(_) => 1007,
-        _ => 1002,
+        tokio_tungstenite::tungstenite::Error::Protocol(_) => 1002,
+        _ => 1011,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::should_offload_private_encoding;
-    use crate::proxy::MIN_COMPRESSION_INPUT_BYTES;
-
-    #[test]
-    fn private_encoding_offload_decision_changes_at_threshold() {
-        assert!(!should_offload_private_encoding(
-            MIN_COMPRESSION_INPUT_BYTES - 1
-        ));
-        assert!(should_offload_private_encoding(MIN_COMPRESSION_INPUT_BYTES));
-    }
-}
+mod tests;

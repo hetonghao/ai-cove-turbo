@@ -4,7 +4,7 @@ import test from "node:test";
 
 const sourceUrl = new URL("../src/", import.meta.url);
 
-test("桌面壳提供独立 WebSocket 开关与只读运行指标", async () => {
+test("桌面壳按实时、统计、配置三页承载观测与控制", async () => {
   // Given: Turbo 的生产前端入口。
   const html = await readFile(new URL("index.html", sourceUrl), "utf8");
   const css = await readFile(new URL("styles.css", sourceUrl), "utf8");
@@ -12,22 +12,29 @@ test("桌面壳提供独立 WebSocket 开关与只读运行指标", async () => 
 
   // When: 用户打开设置窗口。
   const tabs = html.match(/role="tab"/g) ?? [];
-  const runtimePanel = html.slice(html.indexOf('id="panel-runtime"'));
+  const livePanel = html.slice(html.indexOf('id="panel-live"'), html.indexOf('id="panel-statistics"'));
+  const statisticsPanel = html.slice(html.indexOf('id="panel-statistics"'), html.indexOf('id="panel-config"'));
 
-  // Then: 配置与运行页可访问，WebSocket 只在配置页可切换，运行页保持只读。
-  assert.equal(tabs.length, 2);
+  // Then: 实时、统计和配置页可访问，业务控制仍只出现在配置页。
+  assert.equal(tabs.length, 3);
+  assert.match(html, /data-tab="live"/);
+  assert.match(html, /data-tab="statistics"/);
   assert.match(html, /data-tab="config"/);
-  assert.match(html, /data-tab="runtime"/);
+  assert.match(html, /data-request-stream/);
+  assert.match(html, /data-stat-bars/);
+  assert.match(statisticsPanel, /data-filter="range"/);
+  assert.match(statisticsPanel, /data-filter="transport"/);
+  assert.match(statisticsPanel, /data-filter="result"/);
   assert.match(html, /assets\/turbo-icon\.png/);
   assert.match(html, /data-state="endpoint"/);
   assert.match(html, /data-state="config-message"/);
   assert.match(html, /data-state="provider"/);
   assert.match(html, /data-state="upstream"/);
-  assert.match(html, /data-state="compression-verified"/);
+  assert.match(html, /data-state="http-zstd-runtime"/);
   assert.match(html, /data-action="toggle-websocket"/);
   assert.match(html, /data-state="websocket"/);
-  assert.match(html, /data-state="websocket-status"/);
-  assert.match(html, /data-state="websocket-detail"/);
+  assert.match(html, /data-state="websocket-runtime"/);
+  assert.match(html, /data-state="websocket-zstd-runtime"/);
   assert.match(html, /data-state="websocket-handshakes"/);
   assert.match(html, /data-state="http-fallbacks"/);
   assert.match(html, /data-action="toggle-autostart"/);
@@ -42,7 +49,8 @@ test("桌面壳提供独立 WebSocket 开关与只读运行指标", async () => 
   assert.doesNotMatch(html, /00:09:42|STREAMING/);
   assert.match(`${html}\n${css}\n${app}`, /扩展由上游协商/);
   assert.doesNotMatch(`${html}\n${css}\n${app}`, /permessage-deflate/i);
-  assert.doesNotMatch(runtimePanel, /data-action=/);
+  assert.doesNotMatch(livePanel, /data-action="toggle-(compression|websocket|autostart|dock)"/);
+  assert.doesNotMatch(statisticsPanel, /data-action=/);
   assert.doesNotMatch(css, /\.a-|variant--a|turbo-variant-switcher|app-shell|data-variant/);
 });
 
