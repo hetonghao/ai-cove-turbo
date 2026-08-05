@@ -7,11 +7,11 @@ use axum::{
     http::{HeaderMap, Response, StatusCode, header},
 };
 use rustls::ClientConfig;
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, task::JoinError};
 use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
     tungstenite::{
-        client::IntoClientRequest, handshake::derive_accept_key, protocol::WebSocketConfig,
+        Bytes, client::IntoClientRequest, handshake::derive_accept_key, protocol::WebSocketConfig,
     },
 };
 use url::Url;
@@ -19,17 +19,48 @@ use url::Url;
 mod codec;
 mod relay;
 
-pub(super) use codec::{PRIVATE_ENVELOPE_HEADER_BYTES, PRIVATE_WEBSOCKET_SUBPROTOCOL};
+pub(super) use codec::{
+    DecodedPrivateMessage, EncodedPrivateMessage, PRIVATE_ENVELOPE_HEADER_BYTES,
+    PRIVATE_WEBSOCKET_SUBPROTOCOL,
+};
 #[cfg(test)]
 pub(super) use codec::{decode_private_message, encode_private_message};
-#[cfg(test)]
-pub(super) use relay::encode_private_message_async;
-pub(super) use relay::relay_private;
+pub(super) use relay::relay_private_from_message;
 
 use super::hop_by_hop_headers;
 use codec::{PRIVATE_MESSAGE_MAX_BYTES, PrivateProtocolError};
 
 const PRIVATE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(super) const fn should_offload_private_encoding(payload_len: usize) -> bool {
+    payload_len >= super::MIN_COMPRESSION_INPUT_BYTES
+}
+
+pub(super) async fn encode_private_message_async(
+    payload: Vec<u8>,
+    original_binary: bool,
+) -> Result<EncodedPrivateMessage, PrivateProtocolError> {
+    if should_offload_private_encoding(payload.len()) {
+        return tokio::task::spawn_blocking(move || {
+            codec::encode_private_message_with_metadata(&payload, original_binary)
+        })
+        .await
+        .map_err(join_error)?;
+    }
+    codec::encode_private_message_with_metadata(&payload, original_binary)
+}
+
+pub(super) async fn decode_private_message_async(
+    envelope: Bytes,
+) -> Result<codec::DecodedPrivateMessage, PrivateProtocolError> {
+    tokio::task::spawn_blocking(move || codec::decode_private_message(&envelope))
+        .await
+        .map_err(join_error)?
+}
+
+fn join_error(_: JoinError) -> PrivateProtocolError {
+    PrivateProtocolError::internal("private websocket worker failed")
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct PrivateTlsConfig(Arc<ClientConfig>);

@@ -14,7 +14,7 @@ use axum::{
     Router,
     body::{Body, Bytes, to_bytes},
     extract::{Request as AxumRequest, State},
-    http::{HeaderMap, HeaderName, Method, Response, StatusCode, Version, header},
+    http::{HeaderMap, HeaderName, Method, Response, StatusCode, Uri, Version, header},
     response::IntoResponse,
     routing::get,
 };
@@ -29,12 +29,11 @@ use serde::Serialize;
 use tokio::{io::copy_bidirectional, net::TcpListener, sync::oneshot, task::JoinHandle};
 use url::Url;
 
+mod hybrid;
 mod private_websocket;
 pub(crate) mod traffic;
 
-use private_websocket::{
-    PrivateTlsConfig, client_upgrade_response, connect_private, relay_private,
-};
+use private_websocket::{PrivateTlsConfig, client_upgrade_response};
 
 #[cfg(test)]
 use private_websocket::encode_private_message_async;
@@ -421,6 +420,10 @@ async fn proxy_request(
     if is_websocket_upgrade(request.headers()) {
         return proxy_websocket(state, &mut request).await;
     }
+    proxy_http(state, request).await
+}
+
+async fn proxy_http(state: ProxyState, request: AxumRequest) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().to_owned();
     let raw_body = to_bytes(body, state.max_request_body_bytes).await;
@@ -508,24 +511,8 @@ async fn proxy_websocket(state: ProxyState, request: &mut AxumRequest) -> Respon
                 .record_websocket_error(&path, StatusCode::BAD_REQUEST.as_u16());
             return json_error(StatusCode::BAD_REQUEST, "invalid websocket handshake");
         };
-        if let Some(upstream) =
-            connect_private(&target, request.headers(), &state.private_tls_config).await
-        {
-            let client_upgrade = hyper::upgrade::on(&mut *request);
-            let metrics = Arc::clone(&state.metrics);
-            let path = path.clone();
-            tokio::spawn(async move {
-                let Ok(client) = client_upgrade.await else {
-                    metrics
-                        .record_websocket_error(&path, StatusCode::INTERNAL_SERVER_ERROR.as_u16());
-                    return;
-                };
-                metrics.record_websocket_connected();
-                relay_private(client, upstream, Arc::clone(&metrics), path).await;
-                metrics.record_websocket_closed();
-            });
-            return response;
-        }
+        hybrid::spawn(state, request, target, path);
+        return response;
     }
     let Ok(target_uri) = target.as_str().parse() else {
         state
@@ -534,24 +521,7 @@ async fn proxy_websocket(state: ProxyState, request: &mut AxumRequest) -> Respon
         return json_error(StatusCode::BAD_GATEWAY, "invalid websocket upstream");
     };
     let client_upgrade = hyper::upgrade::on(&mut *request);
-    let mut outbound = axum::http::Request::new(Empty::<Bytes>::new());
-    *outbound.method_mut() = request.method().clone();
-    *outbound.uri_mut() = target_uri;
-    *outbound.version_mut() = Version::HTTP_11;
-    let hop_by_hop = hop_by_hop_headers(request.headers());
-    for (name, value) in request.headers() {
-        if !hop_by_hop.contains(name) && *name != header::HOST && *name != header::CONTENT_LENGTH {
-            outbound.headers_mut().append(name, value.clone());
-        }
-    }
-    outbound.headers_mut().insert(
-        header::CONNECTION,
-        header::HeaderValue::from_static("upgrade"),
-    );
-    outbound.headers_mut().insert(
-        header::UPGRADE,
-        header::HeaderValue::from_static("websocket"),
-    );
+    let outbound = build_websocket_request(request.method().clone(), request.headers(), target_uri);
     let Ok(mut upstream_response) = state.websocket_client.request(outbound).await else {
         state
             .metrics
@@ -609,6 +579,32 @@ fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
     websocket && connection_upgrade
 }
 
+fn build_websocket_request(
+    method: Method,
+    headers: &HeaderMap,
+    target_uri: Uri,
+) -> axum::http::Request<Empty<Bytes>> {
+    let mut outbound = axum::http::Request::new(Empty::<Bytes>::new());
+    *outbound.method_mut() = method;
+    *outbound.uri_mut() = target_uri;
+    *outbound.version_mut() = Version::HTTP_11;
+    let hop_by_hop = hop_by_hop_headers(headers);
+    for (name, value) in headers {
+        if !hop_by_hop.contains(name) && *name != header::HOST && *name != header::CONTENT_LENGTH {
+            outbound.headers_mut().append(name, value.clone());
+        }
+    }
+    outbound.headers_mut().insert(
+        header::CONNECTION,
+        header::HeaderValue::from_static("upgrade"),
+    );
+    outbound.headers_mut().insert(
+        header::UPGRADE,
+        header::HeaderValue::from_static("websocket"),
+    );
+    outbound
+}
+
 fn is_compressible_json(method: &Method, headers: &HeaderMap) -> bool {
     if method != Method::POST || headers.contains_key(header::CONTENT_ENCODING) {
         return false;
@@ -647,6 +643,7 @@ pub(crate) async fn measure_private_encoding(
 ) -> Result<Vec<u8>, String> {
     encode_private_message_async(payload, original_binary)
         .await
+        .map(|encoded| encoded.bytes)
         .map_err(|error| error.to_string())
 }
 
@@ -920,6 +917,9 @@ mod tests {
         let Some((mut websocket, _)) =
             accept_test_websocket(stream, Some(PRIVATE_WEBSOCKET_SUBPROTOCOL)).await
         else {
+            return;
+        };
+        let Some(Ok(WebSocketMessage::Binary(_))) = websocket.next().await else {
             return;
         };
         if start_rx.await.is_err() {
@@ -1590,6 +1590,7 @@ mod tests {
         )
         .into_client_request()?;
         let (mut client, _) = connect_async(request).await?;
+        client.send(WebSocketMessage::Text("legacy".into())).await?;
 
         let close = client.next().await.ok_or("missing protocol close")??;
         let WebSocketMessage::Close(Some(frame)) = close else {
@@ -1602,7 +1603,7 @@ mod tests {
         let event = metrics
             .recent_requests()
             .into_iter()
-            .next()
+            .last()
             .ok_or("private protocol error traffic event missing")?;
         let event = serde_json::to_value(event)?;
         assert_eq!(
@@ -1705,6 +1706,7 @@ mod tests {
             .await?
             .ok_or("missing pong")??;
         assert_eq!(reply, WebSocketMessage::Pong(probe));
+        client.send(WebSocketMessage::Text("legacy".into())).await?;
         start_tx.send(()).map_err(|()| "upstream start failed")?;
         assert_eq!(captured_rx.await?, Bytes::from_static(b"upstream-ping"));
         let unexpected = tokio::time::timeout(Duration::from_millis(250), client.next()).await;

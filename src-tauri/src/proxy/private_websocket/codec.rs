@@ -15,6 +15,11 @@ const ALLOWED_FLAGS: u8 = FLAG_ZSTD_COMPRESSED | FLAG_ORIGINAL_BINARY;
 const ZSTD_LEVEL: i32 = 3;
 const ZSTD_WINDOW_LOG_MAX: u32 = 27;
 
+pub(in crate::proxy) struct EncodedPrivateMessage {
+    pub(in crate::proxy) bytes: Vec<u8>,
+    pub(in crate::proxy) compressed: bool,
+}
+
 #[derive(Debug)]
 pub(in crate::proxy) struct DecodedPrivateMessage {
     pub(in crate::proxy) payload: Vec<u8>,
@@ -109,6 +114,17 @@ pub(in crate::proxy) fn encode_private_message(
     envelope.extend_from_slice(&original_len.to_be_bytes());
     envelope.extend_from_slice(wire_payload);
     Ok(envelope)
+}
+
+pub(in crate::proxy) fn encode_private_message_with_metadata(
+    payload: &[u8],
+    original_binary: bool,
+) -> Result<EncodedPrivateMessage, PrivateProtocolError> {
+    let bytes = encode_private_message(payload, original_binary)?;
+    let compressed = bytes
+        .get(5)
+        .is_some_and(|flags| flags & FLAG_ZSTD_COMPRESSED != 0);
+    Ok(EncodedPrivateMessage { bytes, compressed })
 }
 
 pub(in crate::proxy) fn decode_private_message(
