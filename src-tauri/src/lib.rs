@@ -106,6 +106,7 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("AI Cove Turbo")
+        .title("Turbo")
         .on_menu_event(|app, event| match event.id.as_ref() {
             OPEN_MENU_ID => show_main_window(app),
             QUIT_MENU_ID => quit_after_restore(app),

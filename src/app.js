@@ -7,6 +7,7 @@
   const invoke = window.__TAURI__?.core?.invoke;
   const telemetry = window.TurboTelemetry;
   const numberFormatter = new Intl.NumberFormat("zh-CN");
+  const motion = { pageMs: 180, revealMs: 140, shiftPx: 10, blurPx: 3, easing: "cubic-bezier(0.16, 1, 0.3, 1)" };
   const $ = (selector) => document.querySelector?.(selector) ?? null;
   const all = (selector) => document.querySelectorAll?.(selector) ?? [];
 
@@ -15,6 +16,7 @@
     endpoint: "—",
     configState: "starting",
     configMessage: "正在读取 Turbo 状态",
+    technicalDetail: "",
     provider: "—",
     upstream: "—",
     aiCoveUpstream: true,
@@ -94,7 +96,7 @@
     serviceHealthy: true,
     endpoint: "http://127.0.0.1:44175/v1",
     configState: "managed",
-    configMessage: "Preview：配置已接管",
+    configMessage: "Preview：配置已生效",
     provider: "ai-cove",
     upstream: "https://api.ai-cove.com/v1",
     compressionVerified: true,
@@ -116,6 +118,8 @@
   let streamPaused = false;
   let clearedThroughId = 0;
   let displayedRequests = [];
+  let renderedBarMarkup = "";
+  let activeChartIndex = 0;
 
   const actions = {
     "toggle-compression": ["set_compression", () => ({ enabled: !state.compressionEnabled })],
@@ -147,9 +151,9 @@
 
   function formatConfigState() {
     const labels = {
-      active: "已接管",
-      healthy: "已接管",
-      managed: "已接管",
+      active: "已生效",
+      healthy: "已生效",
+      managed: "已生效",
       starting: "检查中",
       warning: "等待确认",
       blocked: "已阻塞",
@@ -167,19 +171,19 @@
 
   function formatVerification() {
     if (!state.compressionEnabled) return "已关闭";
-    return state.compressionVerified ? "已验证 zstd" : "等待真实请求验证";
+    return state.compressionVerified ? "压缩已验证（zstd）" : "等待真实请求验证";
   }
 
   function formatWebsocketStatus() {
     if (!state.websocketEnabled) return "已关闭";
     const labels = {
-      connected: "已连接",
+      connected: "连接已验证",
       closed: "已验证 · 当前已关闭",
-      failed: "握手失败 · 等待 HTTP 回退",
+      failed: "连接失败 · 已回退 HTTP",
       conflict: "配置被外部修改",
-      waiting: "等待首次握手验证",
+      waiting: "等待首次连接验证",
     };
-    return labels[String(state.websocketState).toLowerCase()] ?? "等待首次握手验证";
+    return labels[String(state.websocketState).toLowerCase()] ?? "等待首次连接验证";
   }
 
   function formatUpdateState() {
@@ -200,7 +204,7 @@
 
   function activationSummary() {
     if (!state.serviceHealthy) return "本地通道尚未就绪";
-    if (!configReady()) return "等待 Turbo 完成配置接管";
+    if (!configReady()) return "等待 Turbo 完成配置";
     if (state.restartRequired) return "需要重启 Codex 才会生效";
     const httpReady = !state.compressionEnabled || state.compressionVerified;
     const websocketReady = !state.websocketEnabled || (state.websocketVerified && state.websocketZstdVerified);
@@ -219,8 +223,7 @@
     const values = {
       "runtime-mode": invoke ? "DESKTOP" : "PREVIEW",
       "service-label": `${invoke ? "AI Cove" : "PREVIEW"} / ${starting ? "正在读取状态" : state.serviceHealthy ? "本地服务正常" : "本地服务异常"}`,
-      "service-title": starting ? "正在读取状态" : state.serviceHealthy ? "Turbo 已接管" : "通道未就绪",
-      "health-symbol": starting ? "…" : state.serviceHealthy ? "✓" : "!",
+      "service-title": starting ? "正在读取状态" : state.serviceHealthy ? "已连接并生效" : "通道未就绪",
       endpoint: state.endpoint || "—",
       "config-state": formatConfigState(),
       "config-message": state.configMessage || "—",
@@ -247,18 +250,18 @@
       "update-message": state.updateMessage || "—",
       "update-progress": `${Math.max(0, Math.min(100, Number(state.updateProgress) || 0))}%`,
       "service-runtime": starting ? "正在读取" : state.serviceHealthy ? "正常" : "离线",
-      "config-runtime": starting ? "检查中" : configReady() ? "已接管" : formatConfigState(),
+      "config-runtime": starting ? "检查中" : configReady() ? "已生效" : formatConfigState(),
       "restart-runtime": state.restartRequired ? "需要重启" : observed || state.desktopRestarted ? "已生效" : "待确认",
       "http-zstd-runtime": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "已验证" : "待验证",
-      "websocket-runtime": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "已验证" : String(state.websocketState).toLowerCase() === "failed" ? "握手失败" : "待验证",
+      "websocket-runtime": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "已验证" : String(state.websocketState).toLowerCase() === "failed" ? "连接失败" : "待验证",
       "websocket-zstd-runtime": !state.websocketEnabled ? "已关闭" : state.websocketZstdVerified ? "已验证" : "待验证",
       "service-prerequisite": starting ? "检查中" : state.serviceHealthy ? "正常" : "异常",
-      "config-prerequisite": starting ? "检查中" : configReady() ? "已接管" : formatConfigState(),
+      "config-prerequisite": starting ? "检查中" : configReady() ? "已生效" : formatConfigState(),
       "restart-prerequisite": state.restartRequired ? "需要重启" : observed || state.desktopRestarted ? "已生效" : "待确认",
       "http-status": state.serviceHealthy ? "通道可用" : "通道不可用",
-      "http-zstd-status": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "zstd 已验证" : "等待验证",
-      "websocket-handshake-status": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "握手已验证" : "等待握手",
-      "websocket-zstd-status": !state.websocketEnabled ? "已关闭" : state.websocketZstdVerified ? "zstd 已验证" : "等待验证",
+      "http-zstd-status": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "压缩已验证" : "等待验证",
+      "websocket-handshake-status": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "连接已验证" : "等待连接",
+      "websocket-zstd-status": !state.websocketEnabled ? "已关闭" : state.websocketZstdVerified ? "压缩已验证" : "等待验证",
       "activation-summary": activationSummary(),
       "observed-state": observed ? "OBSERVED / LIVE" : "OBSERVED / WAITING",
       "stream-state": starting ? "WAITING" : state.serviceHealthy ? (observed ? "ACTIVE" : "IDLE") : "OFFLINE",
@@ -277,6 +280,109 @@
     return "";
   }
 
+  function activationVerifiedCount() {
+    return [
+      statusFor("service-prerequisite") === "verified",
+      statusFor("config-prerequisite") === "verified",
+      statusFor("restart-prerequisite") === "verified",
+      statusFor("http-status") === "verified" && statusFor("http-zstd-status") === "verified",
+      statusFor("websocket-handshake-status") === "verified" && statusFor("websocket-zstd-status") === "verified",
+    ].filter(Boolean).length;
+  }
+
+  function liveRecovery() {
+    const configState = String(state.configState).toLowerCase();
+    if (configState === "starting" && !state.technicalDetail) return null;
+    if (!state.serviceHealthy) {
+      return {
+        title: "本地服务离线",
+        message: "Turbo 无法读取本地通道，请前往配置页检查服务与上游。",
+        action: "open-config",
+        label: "查看配置",
+        detail: state.technicalDetail,
+      };
+    }
+    if (state.restartRequired) {
+      return {
+        title: "Codex 需要重启",
+        message: "配置已写入，重启后会重新验证传输通道。",
+        action: "restart-codex",
+        label: "立即重启",
+        detail: "",
+      };
+    }
+    if (!configReady()) {
+      const retryable = ["blocked", "conflict", "error"].includes(configState)
+        && !state.aiCoveUpstreamFixAvailable;
+      const messages = {
+        blocked: "Turbo 尚未完成配置，请重试后再次验证。",
+        conflict: "Codex 配置已被外部修改，请重新应用 Turbo 配置。",
+        error: "配置没有成功写入，请重试并查看技术详情。",
+        missing: "没有找到 Codex 配置，请先打开 Codex 完成初始化。",
+        warning: "当前上游需要确认，请在配置页完成选择。",
+      };
+      return {
+        title: configState === "conflict" ? "配置发生冲突" : "配置尚未生效",
+        message: messages[configState] ?? "请前往配置页完成检查。",
+        action: retryable ? "retry-takeover" : "open-config",
+        label: retryable ? "重试配置" : "查看配置",
+        detail: state.technicalDetail,
+      };
+    }
+    if (state.websocketEnabled && String(state.websocketState).toLowerCase() === "failed") {
+      return {
+        title: "WebSocket 连接失败",
+        message: "请求已自动回退到 HTTP，可在配置页检查 WebSocket 设置。",
+        action: "open-config",
+        label: "查看配置",
+        detail: state.technicalDetail,
+      };
+    }
+    return null;
+  }
+
+  function reduceMotion() {
+    return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
+  }
+
+  function cancelMotion(target) {
+    target?.getAnimations?.().forEach((animation) => animation.cancel());
+  }
+
+  function playMotion(target, keyframes, duration) {
+    if (!target?.animate || reduceMotion()) return;
+    cancelMotion(target);
+    target.animate(keyframes, { duration, easing: motion.easing });
+  }
+
+  function setConditionalVisibility(target, visible) {
+    const wasHidden = target.hidden;
+    if (!visible) cancelMotion(target);
+    target.hidden = !visible;
+    if (visible && wasHidden) playMotion(target, [{ opacity: 0 }, { opacity: 1 }], motion.revealMs);
+  }
+
+  function renderLiveRecovery() {
+    const container = $("[data-live-recovery]");
+    if (!container) return;
+    const recovery = liveRecovery();
+    setConditionalVisibility(container, Boolean(recovery));
+    if (!recovery) return;
+    const title = $("[data-live-recovery-title]");
+    const message = $("[data-live-recovery-message]");
+    const action = $("[data-live-recovery-action]");
+    const details = $("[data-live-recovery-details]");
+    const detail = $("[data-live-recovery-detail]");
+    if (title) title.textContent = recovery.title;
+    if (message) message.textContent = recovery.message;
+    if (action) {
+      action.dataset.action = recovery.action;
+      action.textContent = recovery.label;
+    }
+    if (details) details.hidden = !recovery.detail;
+    if (detail) detail.textContent = recovery.detail || "";
+  }
+
   function renderVisibility() {
     const configState = String(state.configState).toLowerCase();
     const visible = {
@@ -289,7 +395,7 @@
       "update-progress": ["downloading", "installing"].includes(String(state.updateState).toLowerCase()),
     };
     all("[data-visible]").forEach((target) => {
-      target.hidden = !visible[target.dataset.visible];
+      setConditionalVisibility(target, Boolean(visible[target.dataset.visible]));
     });
   }
 
@@ -308,6 +414,7 @@
         control.dataset.status = pendingAction === action ? "pending" : "idle";
         control.setAttribute("aria-busy", String(pendingAction === action));
       }
+      if (action === "restart-codex") control.dataset.required = String(Boolean(state.restartRequired));
       if (Object.hasOwn(pressed, action)) {
         control.dataset.enabled = String(pressed[action]);
         control.setAttribute("aria-pressed", String(pressed[action]));
@@ -329,10 +436,14 @@
     all('[role="progressbar"]').forEach((target) => {
       target.setAttribute("aria-valuenow", String(Math.max(0, Math.min(100, Number(state.updateProgress) || 0))));
     });
-    all('[data-state="health-symbol"]').forEach((target) => {
-      target.setAttribute("aria-label", String(state.configState).toLowerCase() === "starting" ? "正在读取状态" : state.serviceHealthy ? "本地服务正常" : "本地服务异常");
+    const count = activationVerifiedCount();
+    all("[data-strands]").forEach((strands) => {
+      strands.dataset.count = String(count);
+      strands.setAttribute("aria-label", `${count}/5 项已验证`);
     });
+    window.TurboStrands?.setCount(count);
     renderVisibility();
+    renderLiveRecovery();
     renderControls();
     renderLiveStream();
     renderStatistics();
@@ -346,15 +457,31 @@
       tab.tabIndex = active ? 0 : -1;
       if (active && options.focus) tab.focus();
     });
+    const previousIndex = TABS.indexOf(options.previousTab);
+    const nextIndex = TABS.indexOf(state.tab);
+    const direction = previousIndex < 0 || previousIndex === nextIndex ? 0 : Math.sign(nextIndex - previousIndex);
     all("[data-panel]").forEach((panel) => {
-      panel.hidden = panel.dataset.panel !== state.tab;
+      const active = panel.dataset.panel === state.tab;
+      if (!active) {
+        cancelMotion(panel);
+        panel.hidden = true;
+        return;
+      }
+      panel.hidden = false;
+      if (direction) {
+        playMotion(panel, [
+          { opacity: 0.94, transform: `translate3d(${direction * motion.shiftPx}px, 0, 0)`, filter: `blur(${motion.blurPx}px)` },
+          { opacity: 1, transform: "translate3d(0, 0, 0)", filter: "blur(0)" },
+        ], motion.pageMs);
+      }
     });
   }
 
   function selectTab(tab, options = {}) {
     if (!TABS.includes(tab)) return;
+    const previousTab = state.tab;
     state.tab = tab;
-    renderTab(options);
+    renderTab({ ...options, previousTab });
     if (tab === "statistics") renderStatistics();
     if (options.updateUrl !== false) updateUrl();
   }
@@ -389,7 +516,7 @@
     const empty = $("[data-stream-empty]");
     if (empty) {
       empty.hidden = displayedRequests.length > 0;
-      empty.textContent = streamPaused ? "请求流已暂停。" : clearedThroughId > 0 ? "请求流已清空，下一条请求到达时会继续显示。" : "等待第一条真实请求。";
+      empty.textContent = streamPaused ? "请求流已暂停。" : clearedThroughId > 0 ? "请求流已清空，不影响聚合统计；下一条请求到达时会继续显示。" : "等待第一条真实请求。";
     }
     all("[data-live-count]").forEach((target) => {
       target.textContent = numberFormatter.format(displayedRequests.length);
@@ -406,6 +533,26 @@
     if (terminal && !streamPaused) terminal.scrollTop = terminal.scrollHeight;
   }
 
+  function syncChartTabStops() {
+    const slots = Array.from(all("[data-stat-bars] .c-bar-slot"));
+    if (!slots.length) return;
+    activeChartIndex = Math.max(0, Math.min(activeChartIndex, slots.length - 1));
+    slots.forEach((slot, index) => { slot.tabIndex = index === activeChartIndex ? 0 : -1; });
+  }
+
+  function handleChartKeydown(event, currentSlot) {
+    const slots = Array.from(all("[data-stat-bars] .c-bar-slot"));
+    const currentIndex = slots.indexOf(currentSlot);
+    if (currentIndex < 0) return false;
+    const keys = { ArrowRight: 1, ArrowLeft: -1, Home: -currentIndex, End: slots.length - 1 - currentIndex };
+    if (!Object.hasOwn(keys, event.key)) return false;
+    event.preventDefault();
+    activeChartIndex = (currentIndex + keys[event.key] + slots.length) % slots.length;
+    syncChartTabStops();
+    slots[activeChartIndex].focus();
+    return true;
+  }
+
   function renderStatistics() {
     const range = Number($('[data-filter="range"]')?.value ?? 1_440);
     const transport = $('[data-filter="transport"]')?.value ?? "all";
@@ -413,12 +560,14 @@
     const chart = telemetry.selectWindow(state.trafficWindows, range);
     const buckets = chart?.buckets ?? [];
     const totals = telemetry.summarizeBuckets(buckets, transport, result);
+    const speed = telemetry.estimateSpeed(buckets, transport, result);
     const values = {
       requests: numberFormatter.format(totals.requests),
       "raw-bytes": telemetry.formatBytes(totals.rawBytes),
       "sent-bytes": telemetry.formatBytes(totals.sentBytes),
       "saved-bytes": telemetry.formatBytes(Math.max(0, totals.rawBytes - totals.sentBytes)),
       "savings-rate": telemetry.formatRate(totals.rawBytes, totals.sentBytes),
+      "speed-gain": telemetry.formatSpeedGain(speed),
     };
     all("[data-stat]").forEach((target) => {
       target.textContent = values[target.dataset.stat] ?? "";
@@ -436,15 +585,21 @@
       bars.style.setProperty("--chart-bucket-count", String(buckets.length || 1));
       const bucketValues = buckets.map((bucket) => telemetry.bucketTotals(bucket, transport, result));
       const maxRequests = Math.max(...bucketValues.map((bucket) => bucket.requests), 1);
-      bars.innerHTML = buckets.map((bucket, index) => {
+      const markup = buckets.map((bucket, index) => {
         const value = bucketValues[index];
         const saved = Math.max(0, value.rawBytes - value.sentBytes);
         const time = `${telemetry.formatChartTime(bucket.startMs, range)}–${telemetry.formatChartTime(bucket.endMs, range)}`;
         const height = value.requests ? Math.round(12 + value.requests / maxRequests * 88) : 2;
         const sentShare = value.rawBytes ? Math.round(value.sentBytes / value.rawBytes * 100) : 100;
         const tooltipId = `chart-tooltip-${index}`;
-        return `<span class="c-bar-slot${value.requests ? "" : " is-empty"}" style="--bar: ${height}%; --sent-share: ${sentShare}%" tabindex="0" role="img" aria-describedby="${tooltipId}" aria-label="${time}，${numberFormatter.format(value.requests)} 个请求，发送 ${telemetry.formatBytes(value.sentBytes)}，节省 ${telemetry.formatBytes(saved)}"><i class="c-bar"></i><span id="${tooltipId}" class="c-bar-tooltip" role="tooltip"><strong>时间</strong><span>${time}</span><strong>请求数</strong><span>${numberFormatter.format(value.requests)}</span><strong>发送</strong><span>${telemetry.formatBytes(value.sentBytes)}</span><strong>节省</strong><span>${telemetry.formatBytes(saved)}</span></span></span>`;
+        return `<span class="c-bar-slot${value.requests ? "" : " is-empty"}" style="--bar: ${height}%; --sent-share: ${sentShare}%" tabindex="${index === 0 ? 0 : -1}" role="img" aria-describedby="${tooltipId}" aria-label="${time}，${numberFormatter.format(value.requests)} 个请求，发送 ${telemetry.formatBytes(value.sentBytes)}，节省 ${telemetry.formatBytes(saved)}"><i class="c-bar"></i><span id="${tooltipId}" class="c-bar-tooltip" role="tooltip"><strong>时间</strong><span>${time}</span><strong>请求数</strong><span>${numberFormatter.format(value.requests)}</span><strong>发送</strong><span>${telemetry.formatBytes(value.sentBytes)}</span><strong>节省</strong><span>${telemetry.formatBytes(saved)}</span></span></span>`;
       }).join("");
+      if (renderedBarMarkup !== markup) {
+        bars.innerHTML = markup;
+        renderedBarMarkup = markup;
+        activeChartIndex = Math.min(activeChartIndex, Math.max(0, buckets.length - 1));
+        syncChartTabStops();
+      }
     }
     const axis = $("[data-stat-axis]");
     if (axis) {
@@ -468,12 +623,13 @@
   }
 
   function applyStatus(status) {
-    if (status && typeof status === "object") state = { ...state, ...status };
+    if (status && typeof status === "object") state = { ...state, ...status, technicalDetail: "" };
     syncLiveRequests();
     renderState();
   }
 
   function applyPreviewAction(command, args) {
+    state.technicalDetail = "";
     if (command === "set_compression") {
       state.compressionEnabled = args.enabled;
       state.compressionVerified = false;
@@ -514,6 +670,10 @@
   }
 
   async function handleAction(action) {
+    if (action === "open-config") {
+      selectTab("config", { focus: true });
+      return;
+    }
     if (action === "toggle-stream") {
       streamPaused = !streamPaused;
       if (!streamPaused) syncLiveRequests();
@@ -538,7 +698,8 @@
         applyStatus(status);
       } else applyPreviewAction(command, args);
     } catch (error) {
-      state.configMessage = `操作失败：${error instanceof Error ? error.message : String(error)}`;
+      state.configMessage = "操作未完成，请按提示重试。";
+      state.technicalDetail = error instanceof Error ? error.message : String(error);
     } finally {
       pendingAction = "";
       renderState();
@@ -553,7 +714,8 @@
       if (!pendingAction) applyStatus(status);
     } catch (error) {
       state.serviceHealthy = false;
-      state.configMessage = `状态读取失败：${error instanceof Error ? error.message : String(error)}`;
+      state.configMessage = "无法读取 Turbo 状态，请确认应用仍在运行后重试。";
+      state.technicalDetail = error instanceof Error ? error.message : String(error);
       renderState();
     } finally {
       refreshing = false;
@@ -687,8 +849,17 @@
       if (tab) selectTab(tab.dataset.tab);
     });
     document.addEventListener("keydown", (event) => {
+      const chartSlot = event.target.closest?.(".c-bar-slot");
+      if (chartSlot && handleChartKeydown(event, chartSlot)) return;
       const tab = event.target.closest?.("[data-tab]");
       if (tab) handleTabKeydown(event, tab);
+    });
+    document.addEventListener("focusin", (event) => {
+      const chartSlot = event.target.closest?.(".c-bar-slot");
+      if (!chartSlot) return;
+      const slots = Array.from(all("[data-stat-bars] .c-bar-slot"));
+      const index = slots.indexOf(chartSlot);
+      if (index >= 0) activeChartIndex = index;
     });
     document.addEventListener("change", (event) => {
       if (event.target.matches?.("[data-filter]")) renderStatistics();

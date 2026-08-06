@@ -33,13 +33,9 @@
 
         <section id="panel-live" class="tab-panel variant variant--c" role="tabpanel" aria-labelledby="tab-live" data-panel="live">
           <div class="c-console c-console--live">
-            <header class="c-topbar">
-              <div class="c-product"><span class="c-prompt" aria-hidden="true">//</span><strong>AI COVE TURBO</strong><span class="c-version">v0.1</span></div>
-              <div class="c-topbar__right"><span class="c-live"><i aria-hidden="true"></i> <span data-state="service-runtime">STARTING</span></span><code data-state="runtime-mode">STARTING</code></div>
-            </header>
-
             <div class="c-titlebar">
               <div><p class="c-overline">LIVE / RELIABILITY</p><h1>实时传输</h1><p>每一条完成传输都能看到协议状态、体积变化和实际传输方式。</p></div>
+              <div class="c-titlebar__status" aria-label="运行状态"><span class="c-live"><i aria-hidden="true"></i><span data-state="service-runtime">正在读取</span></span><code data-state="runtime-mode">STARTING</code></div>
             </div>
 
             <div class="c-layout c-layout--live">
@@ -55,16 +51,23 @@
                 </section>
 
                 <section class="c-side-section" aria-labelledby="live-health-title">
-                  <header><span class="c-overline">HEALTH</span><h2 id="live-health-title">实时状态</h2></header>
+                  <header class="c-health-heading"><div><span class="c-overline">HEALTH</span><h2 id="live-health-title">实时状态</h2></div><canvas class="c-health-strands" data-strands data-count="0" role="img" aria-label="0/5 项已验证"></canvas></header>
                   <ul class="c-health-list">
                     <li><span>服务</span><strong class="c-state state-indicator" data-state="service-runtime" data-status="waiting">正在读取</strong></li>
                     <li><span>配置</span><strong class="c-state state-indicator" data-state="config-runtime" data-status="waiting">检查中</strong></li>
-                    <li><span>Codex</span><strong class="c-state state-indicator" data-state="restart-runtime" data-status="waiting">待确认</strong></li>
-                    <li><span>HTTP zstd</span><strong class="c-state state-indicator" data-state="http-zstd-runtime" data-status="waiting">待验证</strong></li>
-                    <li><span>WS 握手</span><strong class="c-state state-indicator" data-state="websocket-runtime" data-status="waiting">待验证</strong></li>
-                    <li><span>WS zstd</span><strong class="c-state state-indicator" data-state="websocket-zstd-runtime" data-status="waiting">待验证</strong></li>
+                    <li><span>Codex</span><span class="c-health-list__value"><strong class="c-state state-indicator" data-state="restart-runtime" data-status="waiting">待确认</strong><button class="c-health-list__action" type="button" data-action="restart-codex" data-required="false">重启</button></span></li>
+                    <li><span>HTTP 压缩</span><strong class="c-state state-indicator" data-state="http-zstd-runtime" data-status="waiting">待验证</strong></li>
+                    <li><span>WebSocket 连接</span><strong class="c-state state-indicator" data-state="websocket-runtime" data-status="waiting">待验证</strong></li>
+                    <li><span>WebSocket 压缩</span><strong class="c-state state-indicator" data-state="websocket-zstd-runtime" data-status="waiting">待验证</strong></li>
                   </ul>
                 </section>
+
+                <aside class="c-recovery" data-live-recovery aria-live="polite" hidden>
+                  <strong data-live-recovery-title>需要处理</strong>
+                  <p data-live-recovery-message>请查看配置并按提示恢复。</p>
+                  <button type="button" data-live-recovery-action data-action="open-config">查看配置</button>
+                  <details data-live-recovery-details hidden><summary>技术详情</summary><code data-live-recovery-detail></code></details>
+                </aside>
               </aside>
 
               <div class="c-main c-main--live">
@@ -84,21 +87,16 @@
                     </table>
                     <p class="c-terminal__empty" data-stream-empty>等待第一条真实请求。</p>
                   </div>
-                  <footer class="c-terminal__footer"><span><i aria-hidden="true"></i>内容与密钥不记录</span><span>当前窗口 <strong data-live-count>0</strong> 条</span><span>最近 100 条 · WS 握手 <strong data-state="websocket-handshakes">0</strong> · HTTP 回退 <strong data-state="http-fallbacks">0</strong></span></footer>
+                  <footer class="c-terminal__footer"><span><i aria-hidden="true"></i>内容与密钥不记录</span><span>当前窗口 <strong data-live-count>0</strong> 条</span><span>最近 100 条 · WS 连接 <strong data-state="websocket-handshakes">0</strong> · HTTP 回退 <strong data-state="http-fallbacks">0</strong></span></footer>
                 </section>
               </div>
             </div>
-            <footer class="c-footer"><span>AI COVE TURBO / LIVE</span><span>NO REQUEST BODY RETAINED</span><span data-state="runtime-mode">STARTING</span></footer>
+            <footer class="c-footer"><span>LIVE / LOCAL TRAFFIC</span><span>NO REQUEST BODY RETAINED</span><span data-state="runtime-mode">STARTING</span></footer>
           </div>
         </section>
 
         <section id="panel-statistics" class="tab-panel variant variant--c" role="tabpanel" aria-labelledby="tab-statistics" data-panel="statistics" hidden>
           <div class="c-console c-console--statistics">
-            <header class="c-topbar">
-              <div class="c-product"><span class="c-prompt" aria-hidden="true">//</span><strong>AI COVE TURBO</strong><span class="c-version">v0.1</span></div>
-              <div class="c-topbar__right"><span class="c-muted">当前进程聚合</span><code>仅内存</code></div>
-            </header>
-
             <div class="c-titlebar c-titlebar--statistics">
               <div><p class="c-overline">STATISTICS / AGGREGATES</p><h1>传输统计</h1><p>只看聚合结果；实时健康状态统一留在“实时”页。</p></div>
               <form class="c-filters" aria-label="统计筛选">
@@ -117,11 +115,11 @@
                     <div class="c-metric"><span>原始大小</span><strong data-stat="raw-bytes">0 B</strong><small>压缩前</small></div>
                     <div class="c-metric"><span>发送大小</span><strong data-stat="sent-bytes">0 B</strong><small>压缩后</small></div>
                     <div class="c-metric"><span>已节省</span><strong data-stat="saved-bytes">0 B</strong><small>流量节省率 <span data-stat="savings-rate">—</span></small></div>
-                    <div class="c-metric c-metric--estimate"><span>速度提升约</span><strong>31.6%</strong><small>占位 · 待基准测试校准</small></div>
                   </div>
+                  <aside class="c-estimate-note" aria-label="基准模型估算"><span>基准模型估算</span><strong data-stat="speed-gain">— / —</strong><small>首字 / 总耗时 · 基于阶段性基准与当前传输构成推算，非当前请求实测</small></aside>
                   <div class="c-graph" role="group" aria-label="筛选时间范围内的原始量、发送量和节省量">
                     <div class="c-graph__head"><span>时间轴 · <b data-stat-granularity>每 1 小时</b></span><span><i class="c-legend c-legend--sent" aria-hidden="true"></i>发送 <i class="c-legend c-legend--saved" aria-hidden="true"></i>节省 · 合计 <b data-stat="saved-bytes">0 B</b></span></div>
-                    <div class="c-bars" data-stat-bars></div>
+                    <div class="c-bars" data-stat-bars role="group" aria-label="时间序列图，使用左右方向键浏览各时间段"></div>
                     <div class="c-axis" data-stat-axis aria-hidden="true"></div>
                   </div>
                 </section>
@@ -133,27 +131,26 @@
                 </section>
               </div>
             </div>
-            <footer class="c-footer"><span>AI COVE TURBO / STATISTICS</span><span>NO REQUEST BODY RETAINED</span><span data-state="runtime-mode">STARTING</span></footer>
+            <footer class="c-footer"><span>STATISTICS / IN-MEMORY</span><span>NO REQUEST BODY RETAINED</span><span data-state="runtime-mode">STARTING</span></footer>
           </div>
         </section>
 
         <section id="panel-config" class="tab-panel variant variant--b" role="tabpanel" aria-labelledby="tab-config" data-panel="config" hidden>
+          <header class="b-version-bar" aria-labelledby="b-version-title">
+            <div class="c-product"><span class="c-prompt" aria-hidden="true">//</span><strong id="b-version-title">AI COVE TURBO</strong><span class="c-prompt">/ SETTING</span><span class="c-version">v0.1.0</span></div>
+            <div class="c-topbar__right">
+              <span class="b-version-bar__status"><strong data-state="update-state">尚未检查</strong><span data-state="update-message" aria-live="polite">尚未检查更新</span></span>
+              <div class="b-version-bar__actions"><button type="button" data-action="check-for-updates">检查更新</button><button class="is-conditional" type="button" data-action="install-update" data-visible="install-update" hidden>安装更新</button></div>
+            </div>
+            <div class="b-progress is-conditional" data-visible="update-progress" role="progressbar" aria-label="更新进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i data-state-progress="update-progress"></i><span data-state="update-progress">0%</span></div>
+          </header>
           <div class="b-stage">
             <article class="b-popover b-popover--wide">
-              <header class="b-header">
-                <a class="b-brand" href="#config-title" aria-label="AI Cove Turbo">
-                  <img class="turbo-icon turbo-icon--popover" src="./assets/turbo-icon.png" width="24" height="24" alt="" />
-                  <span><strong>Turbo</strong><small>AI Cove</small></span>
-                </a>
-                <span class="b-window-label">桌面配置</span>
-              </header>
-
               <div class="b-config-layout">
                 <div class="b-config-column b-config-column--status">
                   <section class="b-status" aria-labelledby="config-title">
-                    <div class="status-orb" aria-hidden="true"><span></span></div>
-                    <div><p class="eyebrow" data-state="service-label">STARTING / 正在读取状态</p><h1 id="config-title" data-state="service-title">通道未就绪</h1><p><code data-state="endpoint">—</code></p></div>
-                    <span class="status-tick" data-state="health-symbol" aria-label="正在读取状态">…</span>
+                    <div class="b-status__copy"><p class="eyebrow" data-state="service-label">STARTING / 正在读取状态</p><h1 id="config-title" data-state="service-title">通道未就绪</h1><p><code data-state="endpoint">—</code></p></div>
+                    <canvas class="b-status-strands" data-strands data-count="0" role="img" aria-label="0/5 项已验证"></canvas>
                   </section>
 
                   <section class="b-activation" aria-labelledby="b-activation-title">
@@ -178,22 +175,15 @@
                 </div>
 
                 <div class="b-config-column b-config-column--controls">
-                  <div class="b-config-heading"><p class="eyebrow">PREFERENCES</p><h2>运行偏好</h2><p>切换后立即写入本地配置；需要重启时会明确提示。</p></div>
+                  <div class="b-config-heading"><p class="eyebrow">PREFERENCES</p><h2>运行偏好</h2><p>切换后立即写入本地配置，可随时切回；需要重启时会明确提示。</p></div>
                   <section class="b-controls" aria-labelledby="b-controls-title">
                     <h2 id="b-controls-title" class="sr-only">快速控制</h2>
-                    <button class="b-control" type="button" data-action="toggle-compression" aria-pressed="true"><span class="b-control__icon" aria-hidden="true">↓</span><span><strong>压缩模式</strong><small>减少请求上行字节</small></span><span class="b-control__state" data-state="compression">开</span><span class="b-switch" aria-hidden="true"><i></i></span></button>
-                    <button class="b-control" type="button" data-action="toggle-websocket" aria-pressed="true"><span class="b-control__icon" aria-hidden="true">↔</span><span><strong>WebSocket</strong><small>连接复用 · 自动协商 zstd</small></span><span class="b-control__state" data-state="websocket">开</span><span class="b-switch" aria-hidden="true"><i></i></span></button>
-                    <button class="b-control" type="button" data-action="toggle-autostart" aria-pressed="true"><span class="b-control__icon" aria-hidden="true">⌁</span><span><strong>开机自启动</strong><small>登录系统后在后台启动 Turbo</small></span><span class="b-control__state" data-state="autostart">开</span><span class="b-switch" aria-hidden="true"><i></i></span></button>
-                    <button class="b-control is-conditional" type="button" data-action="toggle-dock" data-visible="dock" aria-pressed="false" hidden><span class="b-control__icon" aria-hidden="true">□</span><span><strong>显示 Dock 图标</strong><small>关闭后仅保留菜单栏入口</small></span><span class="b-control__state" data-state="dock">关</span><span class="b-switch" aria-hidden="true"><i></i></span></button>
+                    <button class="b-control" type="button" data-action="toggle-compression" aria-pressed="true"><span class="b-control__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8h16M4 16h16M12 3v5m-3-3 3 3 3-3M12 21v-5m-3 3 3-3 3 3" /></svg></span><span><strong>压缩模式</strong><small>减少请求上行字节</small></span><span class="b-control__state" data-state="compression">开</span><span class="b-switch" aria-hidden="true"><i></i></span></button>
+                    <button class="b-control" type="button" data-action="toggle-websocket" aria-pressed="true"><span class="b-control__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4m14-1v2a3 3 0 0 1-3 3H3" /></svg></span><span><strong>WebSocket</strong><small>连接复用 · 自动协商 zstd</small></span><span class="b-control__state" data-state="websocket">开</span><span class="b-switch" aria-hidden="true"><i></i></span></button>
+                    <button class="b-control" type="button" data-action="toggle-autostart" aria-pressed="true"><span class="b-control__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2v10M18.4 6.6a8 8 0 1 1-12.8 0" /></svg></span><span><strong>开机自启动</strong><small>登录系统后在后台启动 Turbo</small></span><span class="b-control__state" data-state="autostart">开</span><span class="b-switch" aria-hidden="true"><i></i></span></button>
+                    <button class="b-control is-conditional" type="button" data-action="toggle-dock" data-visible="dock" aria-pressed="false" hidden><span class="b-control__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 15h18M9 18h.01M12 18h.01M15 18h.01" /></svg></span><span><strong>显示 Dock 图标</strong><small>关闭后仅保留菜单栏入口</small></span><span class="b-control__state" data-state="dock">关</span><span class="b-switch" aria-hidden="true"><i></i></span></button>
                   </section>
                   <p class="b-action-feedback" data-state="config-message" data-tone="neutral" role="status" aria-live="polite">正在读取 Turbo 状态</p>
-
-                  <section class="b-update" aria-labelledby="b-update-title">
-                    <header><h2 id="b-update-title">版本更新</h2><span data-state="update-state">尚未检查</span></header>
-                    <p data-state="update-message" aria-live="polite">尚未检查更新</p>
-                    <div class="b-progress is-conditional" data-visible="update-progress" role="progressbar" aria-label="更新进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i data-state-progress="update-progress"></i><span data-state="update-progress">0%</span></div>
-                    <div class="b-update__actions"><button type="button" data-action="check-for-updates">检查更新</button><button class="is-conditional" type="button" data-action="install-update" data-visible="install-update" hidden>安装更新</button></div>
-                  </section>
                 </div>
               </div>
             </article>
@@ -204,6 +194,7 @@
     </div>
 
     <script src="./telemetry.js"></script>
+    <script src="./strands.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

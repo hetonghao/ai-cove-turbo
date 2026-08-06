@@ -2,6 +2,13 @@
   "use strict";
 
   const numberFormatter = new Intl.NumberFormat("zh-CN");
+  const SPEED_ESTIMATE = Object.freeze({
+    uplinkBitsPerSecond: 10_000_000,
+    baselineFirstTokenMs: 2_100,
+    baselineCompleteMs: 2_700,
+    websocketFirstTokenSavedMs: 560,
+    websocketCompleteSavedMs: 100,
+  });
 
   function formatBytes(value) {
     const bytes = Number(value) || 0;
@@ -22,6 +29,8 @@
 
   function formatClock(timestampMs) {
     return new Intl.DateTimeFormat("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
@@ -70,16 +79,48 @@
     }, { requests: 0, rawBytes: 0, sentBytes: 0 });
   }
 
+  function estimateSpeed(buckets, transport, result) {
+    const totals = (buckets ?? []).flatMap((bucket) => bucket?.series ?? [])
+      .filter((series) => (transport === "all" || series.transport === transport)
+        && (result === "all" || series.result === result)
+        && series.result !== "error")
+      .reduce((estimate, series) => {
+        const requests = Number(series.requests) || 0;
+        return {
+          requests: estimate.requests + requests,
+          savedBytes: estimate.savedBytes + Math.max(0, (Number(series.rawBytes) || 0) - (Number(series.sentBytes) || 0)),
+          websocketRequests: estimate.websocketRequests + (series.transport === "WS" ? requests : 0),
+        };
+      }, { requests: 0, savedBytes: 0, websocketRequests: 0 });
+    if (!totals.requests) return { requests: 0, firstPercent: 0, completePercent: 0 };
+
+    const uploadSavedMs = totals.savedBytes * 8 * 1_000 / SPEED_ESTIMATE.uplinkBitsPerSecond;
+    const firstSavedMs = uploadSavedMs + totals.websocketRequests * SPEED_ESTIMATE.websocketFirstTokenSavedMs;
+    const completeSavedMs = uploadSavedMs + totals.websocketRequests * SPEED_ESTIMATE.websocketCompleteSavedMs;
+    return {
+      requests: totals.requests,
+      firstPercent: Math.min(99, firstSavedMs / (totals.requests * SPEED_ESTIMATE.baselineFirstTokenMs) * 100),
+      completePercent: Math.min(99, completeSavedMs / (totals.requests * SPEED_ESTIMATE.baselineCompleteMs) * 100),
+    };
+  }
+
+  function formatSpeedGain(estimate) {
+    if (!estimate?.requests) return "— / —";
+    return `${estimate.firstPercent.toFixed(1)}% / ${estimate.completePercent.toFixed(1)}%`;
+  }
+
   function selectWindow(windows, minutes) {
     return (windows ?? []).find((window) => Number(window.minutes) === Number(minutes)) ?? null;
   }
 
   window.TurboTelemetry = Object.freeze({
     bucketTotals,
+    estimateSpeed,
     formatBytes,
     formatChartTime,
     formatClock,
     formatRate,
+    formatSpeedGain,
     granularityLabel,
     selectWindow,
     summarizeBuckets,

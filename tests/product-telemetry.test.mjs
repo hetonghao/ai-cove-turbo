@@ -19,12 +19,22 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   // Given: get_app_status 返回成功和失败的 101 请求，以及固定六桶的一分钟窗口。
   const telemetrySource = await readFile(new URL("../src/telemetry.js", import.meta.url), "utf8");
   const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
-  const statElements = ["requests", "raw-bytes", "sent-bytes", "saved-bytes", "savings-rate"]
+  const statElements = ["requests", "raw-bytes", "sent-bytes", "saved-bytes", "savings-rate", "speed-gain"]
     .map((stat) => element({ dataset: { stat } }));
   const requestStream = element();
   const streamEmpty = element();
   const liveCount = element();
   const bars = element();
+  const chartSlots = Array.from({ length: 6 }, (_, index) => element({
+    tabIndex: index === 0 ? 0 : -1,
+    focus() { this.focused = true; },
+  }));
+  let barMarkup = "";
+  let barWrites = 0;
+  Object.defineProperty(bars, "innerHTML", {
+    get() { return barMarkup; },
+    set(value) { barMarkup = value; barWrites += 1; },
+  });
   const axis = element();
   const granularity = element();
   const windows = element();
@@ -75,7 +85,7 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   const document = {
     readyState: "complete",
     body: element(),
-    addEventListener() {},
+    addEventListener(type, handler) { listeners[type] = handler; },
     querySelector(selector) {
       return selectors.get(selector) ?? null;
     },
@@ -84,15 +94,18 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
       if (selector === "[data-panel]") return panels;
       if (selector === "[data-stat]") return statElements;
       if (selector === "[data-live-count]") return [liveCount];
+      if (selector === "[data-stat-bars] .c-bar-slot") return chartSlots;
       return [];
     },
   };
+  const listeners = {};
+  let onTick;
   const window = {
     __TAURI__: { core: { invoke: async () => status } },
     location: { href: "tauri://localhost/?tab=statistics" },
     history: { replaceState() {} },
     addEventListener() {},
-    setInterval() {},
+    setInterval(handler) { onTick = handler; },
   };
   const context = { document, Error, Intl, Math, Number, Object, Set, URL, window };
 
@@ -115,8 +128,55 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   assert.equal(statElements[2].textContent, "150 B");
   assert.equal(statElements[3].textContent, "150 B");
   assert.equal(statElements[4].textContent, "50.0%");
+  assert.equal(statElements[5].textContent, "21.3% / 3.0%");
   assert.equal((bars.innerHTML.match(/class="c-bar-slot/g) ?? []).length, 6);
+  assert.equal(chartSlots.filter((slot) => slot.tabIndex === 0).length, 1);
   assert.match(bars.innerHTML, /class="c-bar-slot" style="--bar: 100%/);
   assert.equal(granularity.textContent, "每 10 秒");
   assert.equal(statEmpty.hidden, true);
+  assert.doesNotMatch(windows.innerHTML, /提速约|基准模型估算/);
+
+  // When: 键盘用户在图表中向右浏览一个时间桶。
+  let prevented = false;
+  listeners.keydown({
+    key: "ArrowRight",
+    preventDefault() { prevented = true; },
+    target: { closest(selector) { return selector === ".c-bar-slot" ? chartSlots[0] : null; } },
+  });
+
+  // Then: 只有新的时间桶进入 Tab 序列，焦点直接跟随。
+  assert.equal(prevented, true);
+  assert.equal(chartSlots[0].tabIndex, -1);
+  assert.equal(chartSlots[1].tabIndex, 0);
+  assert.equal(chartSlots[1].focused, true);
+
+  // When: 下一次轮询返回完全相同的统计桶。
+  const writesAfterFirstStatus = barWrites;
+  await onTick();
+
+  // Then: 柱状图节点不被重建，悬停提示不会按轮询频率闪烁。
+  assert.equal(barWrites, writesAfterFirstStatus);
+});
+
+test("速度估算按压缩字节和已就绪 WebSocket 请求加权", async () => {
+  // Given: 一个长 HTTP 压缩请求和一个长 WebSocket 压缩请求。
+  const source = await readFile(new URL("../src/telemetry.js", import.meta.url), "utf8");
+  const window = {};
+  vm.runInNewContext(source, { Intl, Math, Number, Object, window });
+  const buckets = [{
+    series: [
+      { transport: "HTTP", result: "success", requests: 1, rawBytes: 108_257, sentBytes: 23_403 },
+      { transport: "WS", result: "success", requests: 1, rawBytes: 108_268, sentBytes: 23_421 },
+      { transport: "WS", result: "error", requests: 3, rawBytes: 300, sentBytes: 150 },
+    ],
+  }];
+
+  // When: 汇总当前筛选范围的速度提升。
+  const estimate = window.TurboTelemetry.estimateSpeed(buckets, "all", "all");
+
+  // Then: 错误请求不进入提速分母，WS 请求额外获得连接复用常量。
+  assert.equal(estimate.requests, 2);
+  assert.equal(estimate.firstPercent.toFixed(1), "16.6");
+  assert.equal(estimate.completePercent.toFixed(1), "4.4");
+  assert.equal(window.TurboTelemetry.formatSpeedGain(estimate), "16.6% / 4.4%");
 });
