@@ -25,12 +25,13 @@ pub(super) use codec::{
 };
 #[cfg(test)]
 pub(super) use codec::{decode_private_message, encode_private_message};
-pub(super) use relay::relay_private_from_message;
+pub(super) use relay::{relay_private_from_message, websocket_error_code};
 
 use super::hop_by_hop_headers;
 use codec::{PRIVATE_MESSAGE_MAX_BYTES, PrivateProtocolError};
 
 const PRIVATE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const PRIVATE_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) const fn should_offload_private_encoding(payload_len: usize) -> bool {
     payload_len >= super::MIN_COMPRESSION_INPUT_BYTES
@@ -158,13 +159,13 @@ pub(super) async fn connect_private(
             .headers()
             .contains_key(header::SEC_WEBSOCKET_EXTENSIONS);
     if !accepted {
-        let _ = stream.close(None).await;
+        let _ = tokio::time::timeout(PRIVATE_CLOSE_TIMEOUT, stream.close(None)).await;
         return None;
     }
     Some(stream)
 }
 
-fn is_client_handshake_header(name: &header::HeaderName) -> bool {
+pub(super) fn is_client_handshake_header(name: &header::HeaderName) -> bool {
     *name == header::HOST
         || *name == header::CONNECTION
         || *name == header::UPGRADE

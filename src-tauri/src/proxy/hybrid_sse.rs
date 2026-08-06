@@ -2,14 +2,28 @@ use std::mem;
 
 use serde_json::Value;
 
-pub(super) fn http_request_payload(payload: &[u8]) -> Result<Vec<u8>, String> {
+pub(super) enum HttpFallback {
+    Request(Vec<u8>),
+    WebSocketRequired,
+}
+
+pub(super) fn http_request_payload(payload: &[u8]) -> Result<HttpFallback, String> {
     let mut value: Value = serde_json::from_slice(payload).map_err(|error| error.to_string())?;
     let object = value
         .as_object_mut()
         .ok_or_else(|| "response.create must be a JSON object".to_owned())?;
+    if object
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .is_some_and(|response_id| !response_id.is_empty())
+    {
+        return Ok(HttpFallback::WebSocketRequired);
+    }
     object.remove("type");
     object.insert("stream".to_owned(), Value::Bool(true));
-    serde_json::to_vec(&value).map_err(|error| error.to_string())
+    serde_json::to_vec(&value)
+        .map(HttpFallback::Request)
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Default)]

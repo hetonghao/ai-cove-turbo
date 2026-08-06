@@ -60,7 +60,9 @@ impl Fixture {
             return;
         }
         self.record(|counts| counts.private_messages += 1).await;
-        if matches!(self.config.private, PrivateBehavior::ActiveFailure) {
+        if matches!(self.config.private, PrivateBehavior::ActiveFailure)
+            && self.counts().await.private_messages == 1
+        {
             return;
         }
         let Ok(envelope) = encode_private_message(br#"{"type":"response.completed"}"#, false)
@@ -94,7 +96,12 @@ async fn upgrade_response(
     fixture
         .record(|counts| counts.private_handshakes += 1)
         .await;
-    if matches!(fixture.config.private, PrivateBehavior::Fail) && private {
+    let private_handshakes = fixture.counts().await.private_handshakes;
+    if private
+        && (matches!(fixture.config.private, PrivateBehavior::Fail)
+            || matches!(fixture.config.private, PrivateBehavior::FailOnce)
+                && private_handshakes == 1)
+    {
         let mut response = Response::new(Body::empty());
         *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
         return response;

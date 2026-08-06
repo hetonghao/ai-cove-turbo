@@ -59,6 +59,7 @@ pub(crate) enum ConfigError {
     InsecureUpstream,
     InvalidManagedEndpoint,
     Write(std::io::Error),
+    TrafficWrite(std::io::Error),
     Json(serde_json::Error),
     InvalidManagedState(String),
     FieldOwnershipLost(&'static str),
@@ -84,6 +85,7 @@ impl fmt::Display for ConfigError {
             Self::InsecureUpstream => write!(formatter, "Turbo 只接管 HTTPS 上游"),
             Self::InvalidManagedEndpoint => write!(formatter, "Turbo 本地端点必须是 HTTP 回环地址"),
             Self::Write(error) => write!(formatter, "无法原子更新 Codex 配置：{error}"),
+            Self::TrafficWrite(error) => write!(formatter, "无法持久化 Turbo 流量统计：{error}"),
             Self::Json(error) => write!(formatter, "Turbo 恢复记录无效：{error}"),
             Self::InvalidManagedState(provider) => {
                 write!(formatter, "受管 Provider {provider} 的配置结构已改变")

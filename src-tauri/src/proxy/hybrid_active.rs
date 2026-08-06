@@ -1,5 +1,5 @@
 use futures_util::SinkExt;
-use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
+use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message, error::ProtocolError};
 
 use super::common::{close_client, event_type, send_error};
 use super::{Active, ActiveKind, ClientWebSocket, Session, WorkerCommand, WorkerEvent};
@@ -9,10 +9,7 @@ pub(super) async fn handle_active_client_message(
     active: &Active,
     message: Option<Result<Message, WebSocketError>>,
 ) -> bool {
-    let Some(message) = message else {
-        return false;
-    };
-    let Ok(message) = message else {
+    let Some(Ok(message)) = message else {
         return false;
     };
     match message {
@@ -100,8 +97,6 @@ pub(super) async fn handle_worker_event(
         }
         WorkerEvent::Cancelled => {
             active.take();
-            session.abort_prewarm();
-            session.prewarm_attempted = false;
             let message = serde_json::json!({
                 "type": "response.cancelled",
                 "response": {"status": "cancelled"},
@@ -112,12 +107,14 @@ pub(super) async fn handle_worker_event(
                 .is_ok()
         }
         WorkerEvent::Error { code, message } => {
-            let finished = active.take();
-            if finished
-                .as_ref()
-                .is_some_and(|item| item.kind == ActiveKind::WebSocket)
-            {
-                session.ready = None;
+            let failed_websocket = active
+                .take()
+                .is_some_and(|item| item.kind == ActiveKind::WebSocket);
+            if failed_websocket {
+                session.state.hybrid_pool.discard(&session.pool_scope).await;
+            }
+            if failed_websocket && code == 1011 {
+                return send_error(client, "server_error", message).await;
             }
             let _ = send_error(client, "server_error", message).await;
             let _ = close_client(client, code, message).await;
@@ -133,17 +130,43 @@ pub(super) async fn handle_idle_upstream(
 ) -> bool {
     let Some(message) = message else {
         session.ready.take();
-        session.state.metrics.record_websocket_failure();
+        session.state.metrics.record_websocket_diagnostic(
+            &session.path,
+            1011,
+            crate::proxy::traffic::FailurePhase::HybridIdle,
+            "upstream stream ended",
+        );
         session.state.metrics.record_websocket_closed();
-        let _ = close_client(client, 1011, "idle upstream websocket closed").await;
-        return false;
+        session.state.hybrid_pool.discard(&session.pool_scope).await;
+        return true;
     };
-    let Ok(message) = message else {
-        session.ready.take();
-        session.state.metrics.record_websocket_failure();
-        session.state.metrics.record_websocket_closed();
-        let _ = close_client(client, 1011, "idle upstream websocket failed").await;
-        return false;
+    let message = match message {
+        Ok(message) => message,
+        Err(error) => {
+            session.ready.take();
+            let reason = error.to_string();
+            session.state.metrics.record_websocket_diagnostic(
+                &session.path,
+                super::private_websocket::websocket_error_code(&error),
+                crate::proxy::traffic::FailurePhase::HybridIdle,
+                &reason,
+            );
+            session.state.metrics.record_websocket_closed();
+            let code = super::private_websocket::websocket_error_code(&error);
+            let recoverable = matches!(
+                error,
+                WebSocketError::ConnectionClosed
+                    | WebSocketError::Io(_)
+                    | WebSocketError::Tls(_)
+                    | WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
+            );
+            session.state.hybrid_pool.discard(&session.pool_scope).await;
+            if recoverable {
+                return true;
+            }
+            let _ = close_client(client, code, "idle upstream websocket failed").await;
+            return false;
+        }
     };
     match message {
         Message::Ping(payload) => {
@@ -155,38 +178,80 @@ pub(super) async fn handle_idle_upstream(
         Message::Pong(_) => true,
         Message::Close(frame) => {
             let code = frame.as_ref().map_or(1000, |frame| u16::from(frame.code));
+            let reason = frame
+                .as_ref()
+                .map_or("upstream closed", |frame| frame.reason.as_ref());
             session.ready.take();
+            session.state.metrics.record_websocket_diagnostic(
+                &session.path,
+                code,
+                crate::proxy::traffic::FailurePhase::HybridIdle,
+                reason,
+            );
             session.state.metrics.record_websocket_closed();
-            if code == 1012 {
-                session.state.metrics.record_websocket_failure();
-                session.prewarm_attempted = false;
-                session.force_http = true;
-                true
-            } else {
-                let _ = close_client(client, code, "idle upstream websocket closed").await;
-                false
+            session.state.hybrid_pool.discard(&session.pool_scope).await;
+            if matches!(code, 1011 | 1012) {
+                return true;
             }
+            let _ = close_client(client, code, "idle upstream websocket closed").await;
+            false
         }
         Message::Text(_) | Message::Binary(_) | Message::Frame(_) => {
             session.ready.take();
-            session
-                .state
-                .metrics
-                .record_websocket_error(&session.path, 1002);
+            session.state.metrics.record_websocket_diagnostic(
+                &session.path,
+                1002,
+                crate::proxy::traffic::FailurePhase::HybridIdle,
+                "unexpected idle upstream message",
+            );
             session.state.metrics.record_websocket_closed();
+            session.state.hybrid_pool.discard(&session.pool_scope).await;
             let _ = close_client(client, 1002, "unexpected idle upstream message").await;
             false
         }
     }
 }
 
-pub(super) fn cleanup_session(session: &mut Session, active: &mut Option<Active>) {
+pub(super) async fn handle_idle_keepalive(session: &mut Session) -> bool {
+    let Some(upstream) = session.ready.take() else {
+        return true;
+    };
+    if let Some(upstream) =
+        super::super::hybrid_pool::probe_idle(upstream, super::super::hybrid_pool::PONG_TIMEOUT)
+            .await
+    {
+        session.ready = Some(upstream);
+        return true;
+    }
+    session.state.metrics.record_websocket_diagnostic(
+        &session.path,
+        1011,
+        crate::proxy::traffic::FailurePhase::HybridIdle,
+        "private websocket keepalive failed",
+    );
+    session.state.metrics.record_websocket_closed();
+    session.state.hybrid_pool.discard(&session.pool_scope).await;
+    true
+}
+
+pub(super) async fn cleanup_session(session: &mut Session, active: &mut Option<Active>) {
     if let Some(active) = active.take() {
         active.task.abort();
         if active.kind == ActiveKind::WebSocket {
             session.state.metrics.record_websocket_closed();
+            session.state.hybrid_pool.discard(&session.pool_scope).await;
         }
     }
-    session.abort_prewarm();
-    session.close_ready();
+    if let Some(upstream) = session.ready.take() {
+        session
+            .state
+            .hybrid_pool
+            .checkin(&session.pool_scope, upstream)
+            .await;
+    }
+    session
+        .state
+        .hybrid_pool
+        .unregister(&session.pool_scope)
+        .await;
 }

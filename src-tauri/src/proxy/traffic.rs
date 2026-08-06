@@ -1,25 +1,29 @@
 use std::{
     collections::VecDeque,
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::Path,
     sync::{Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 
 mod window;
 
 const BASE_BUCKET_MS: u64 = 10_000;
-const RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
+const RETENTION_MS: u64 = 25 * 60 * 60 * 1_000;
 const RECENT_REQUEST_LIMIT: usize = 100;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub(crate) enum TrafficTransport {
     Http,
     Ws,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum TrafficResult {
     Success,
@@ -27,7 +31,44 @@ pub(crate) enum TrafficResult {
     Error,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum TrafficRoute {
+    HybridWs,
+    HybridColdStartHttp,
+    HybridRecoveryHttp,
+    DirectHttp,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrafficRouteCounts {
+    pub(crate) hybrid_ws: u64,
+    pub(crate) hybrid_cold_start_http: u64,
+    pub(crate) hybrid_recovery_http: u64,
+    pub(crate) direct_http: u64,
+}
+
+impl TrafficRouteCounts {
+    const fn record(&mut self, route: TrafficRoute) {
+        let counter = match route {
+            TrafficRoute::HybridWs => &mut self.hybrid_ws,
+            TrafficRoute::HybridColdStartHttp => &mut self.hybrid_cold_start_http,
+            TrafficRoute::HybridRecoveryHttp => &mut self.hybrid_recovery_http,
+            TrafficRoute::DirectHttp => &mut self.direct_http,
+        };
+        *counter = counter.saturating_add(1);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum FailurePhase {
+    HybridIdle,
+    HybridActive,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RequestEvent {
     pub(crate) id: u64,
@@ -38,6 +79,12 @@ pub(crate) struct RequestEvent {
     sent_bytes: u64,
     transport: TrafficTransport,
     result: TrafficResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route: Option<TrafficRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure_phase: Option<FailurePhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -49,9 +96,12 @@ pub(crate) struct TrafficRecord<'a> {
     pub(crate) sent_bytes: u64,
     pub(crate) transport: TrafficTransport,
     pub(crate) result: TrafficResult,
+    pub(crate) route: Option<TrafficRoute>,
+    pub(crate) failure_phase: Option<FailurePhase>,
+    pub(crate) failure_reason: Option<&'a str>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TrafficTotals {
     requests: u64,
@@ -107,7 +157,7 @@ pub(crate) struct TrafficWindow {
     pub(crate) buckets: Vec<TrafficBucket>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 struct BaseBucket {
     start_ms: u64,
     totals: [TrafficTotals; 6],
@@ -119,6 +169,32 @@ struct TrafficState {
     next_id: u64,
     recent_requests: VecDeque<RequestEvent>,
     buckets: VecDeque<BaseBucket>,
+    route_counts: TrafficRouteCounts,
+    dirty_from_ms: Option<u64>,
+    window_cache: Option<WindowCache>,
+}
+
+#[derive(Debug)]
+struct WindowCache {
+    period_start_ms: u64,
+    windows: Vec<TrafficWindow>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TrafficSnapshot {
+    pub(crate) recent_requests: Vec<RequestEvent>,
+    pub(crate) windows: Vec<TrafficWindow>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrafficDelta {
+    latest_timestamp_ms: u64,
+    next_id: u64,
+    recent_requests: Vec<RequestEvent>,
+    buckets: Vec<BaseBucket>,
+    #[serde(default)]
+    route_counts: TrafficRouteCounts,
 }
 
 #[derive(Debug, Default)]
@@ -127,6 +203,81 @@ pub(crate) struct TrafficStore {
 }
 
 impl TrafficStore {
+    pub(crate) fn load(path: &Path) -> Self {
+        Self::load_at(path, now_ms())
+    }
+
+    fn load_at(path: &Path, now_ms: u64) -> Self {
+        let mut state = TrafficState::default();
+        for line in fs::read(path)
+            .unwrap_or_default()
+            .split(|byte| *byte == b'\n')
+        {
+            if let Ok(delta) = serde_json::from_slice(line) {
+                state.apply(delta);
+            }
+        }
+        state.trim(now_ms);
+        Self {
+            state: Mutex::new(state),
+        }
+    }
+
+    pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
+        let (dirty_from_ms, delta) = {
+            let mut state = lock(&self.state);
+            let Some(dirty_from_ms) = state.dirty_from_ms.take() else {
+                return Ok(());
+            };
+            (dirty_from_ms, state.delta_from(dirty_from_ms))
+        };
+        let result = (|| {
+            let parent = path
+                .parent()
+                .ok_or_else(|| io::Error::other("traffic path has no parent"))?;
+            fs::create_dir_all(parent)?;
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            file.write_all(b"\n")?;
+            serde_json::to_writer(&mut file, &delta).map_err(io::Error::other)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            lock(&self.state).mark_dirty(dirty_from_ms);
+        }
+        result
+    }
+
+    pub(crate) fn compact(&self, path: &Path) -> io::Result<()> {
+        self.compact_at(path, now_ms())
+    }
+
+    fn compact_at(&self, path: &Path, now_ms: u64) -> io::Result<()> {
+        let (pending_from_ms, delta) = {
+            let mut state = lock(&self.state);
+            state.trim(now_ms);
+            let pending_from_ms = state.dirty_from_ms.take();
+            (pending_from_ms, state.delta_from(0))
+        };
+        let result = (|| {
+            let parent = path
+                .parent()
+                .ok_or_else(|| io::Error::other("traffic path has no parent"))?;
+            fs::create_dir_all(parent)?;
+            let mut temporary = NamedTempFile::new_in(parent)?;
+            serde_json::to_writer(&mut temporary, &delta).map_err(io::Error::other)?;
+            temporary.write_all(b"\n")?;
+            temporary.as_file().sync_all()?;
+            temporary.persist(path).map_err(|error| error.error)?;
+            Ok(())
+        })();
+        if let (Err(_), Some(dirty_from_ms)) = (&result, pending_from_ms) {
+            lock(&self.state).mark_dirty(dirty_from_ms);
+        }
+        result
+    }
+
     pub(crate) fn record(&self, record: TrafficRecord<'_>) {
         let event = RequestEvent {
             id: 0,
@@ -137,6 +288,9 @@ impl TrafficStore {
             sent_bytes: record.sent_bytes,
             transport: record.transport,
             result: record.result,
+            route: record.route,
+            failure_phase: record.failure_phase,
+            failure_reason: record.failure_reason.map(str::to_owned),
         };
         let mut state = lock(&self.state);
         state.next_id = state.next_id.saturating_add(1);
@@ -149,24 +303,41 @@ impl TrafficStore {
         }
 
         let bucket_start = align(record.timestamp_ms, BASE_BUCKET_MS);
-        let bucket_index = state
+        let index = match state
             .buckets
-            .iter()
-            .position(|bucket| bucket.start_ms >= bucket_start);
-        let index = bucket_index.unwrap_or(state.buckets.len());
-        if state
-            .buckets
-            .get(index)
-            .is_none_or(|bucket| bucket.start_ms != bucket_start)
+            .back()
+            .map(|bucket| bucket.start_ms.cmp(&bucket_start))
         {
-            state.buckets.insert(
-                index,
-                BaseBucket {
+            None | Some(std::cmp::Ordering::Less) => {
+                state.buckets.push_back(BaseBucket {
                     start_ms: bucket_start,
                     ..BaseBucket::default()
-                },
-            );
-        }
+                });
+                state.buckets.len().saturating_sub(1)
+            }
+            Some(std::cmp::Ordering::Equal) => state.buckets.len().saturating_sub(1),
+            Some(std::cmp::Ordering::Greater) => {
+                let index = state
+                    .buckets
+                    .iter()
+                    .position(|bucket| bucket.start_ms >= bucket_start)
+                    .unwrap_or(state.buckets.len());
+                if state
+                    .buckets
+                    .get(index)
+                    .is_none_or(|bucket| bucket.start_ms != bucket_start)
+                {
+                    state.buckets.insert(
+                        index,
+                        BaseBucket {
+                            start_ms: bucket_start,
+                            ..BaseBucket::default()
+                        },
+                    );
+                }
+                index
+            }
+        };
         if let Some(totals) = state.buckets.get_mut(index).and_then(|bucket| {
             bucket
                 .totals
@@ -176,28 +347,108 @@ impl TrafficStore {
         }
 
         state.latest_timestamp_ms = state.latest_timestamp_ms.max(record.timestamp_ms);
-        let cutoff = state.latest_timestamp_ms.saturating_sub(RETENTION_MS);
-        while state
+        let latest_timestamp_ms = state.latest_timestamp_ms;
+        state.mark_dirty(bucket_start);
+        state.window_cache = None;
+        state.trim(latest_timestamp_ms);
+    }
+
+    pub(crate) fn record_route(&self, route: TrafficRoute) {
+        let mut state = lock(&self.state);
+        state.route_counts.record(route);
+        state.mark_dirty(align(now_ms(), BASE_BUCKET_MS));
+    }
+
+    pub(crate) fn route_counts(&self) -> TrafficRouteCounts {
+        lock(&self.state).route_counts
+    }
+
+    pub(crate) fn snapshot(&self) -> TrafficSnapshot {
+        self.snapshot_at(now_ms())
+    }
+
+    fn snapshot_at(&self, now_ms: u64) -> TrafficSnapshot {
+        let mut state = lock(&self.state);
+        let period_start_ms = align(now_ms, BASE_BUCKET_MS);
+        let windows = match &state.window_cache {
+            Some(cache) if cache.period_start_ms == period_start_ms => cache.windows.clone(),
+            Some(_) | None => {
+                let windows = window::build_windows(&state.buckets, now_ms);
+                state.window_cache = Some(WindowCache {
+                    period_start_ms,
+                    windows: windows.clone(),
+                });
+                windows
+            }
+        };
+        TrafficSnapshot {
+            recent_requests: state.recent_requests.iter().cloned().collect(),
+            windows,
+        }
+    }
+}
+
+impl TrafficState {
+    fn apply(&mut self, delta: TrafficDelta) {
+        self.latest_timestamp_ms = self.latest_timestamp_ms.max(delta.latest_timestamp_ms);
+        self.next_id = self.next_id.max(delta.next_id);
+        self.recent_requests = delta.recent_requests.into();
+        self.route_counts = delta.route_counts;
+        for bucket in delta.buckets {
+            let index = self
+                .buckets
+                .iter()
+                .position(|current| current.start_ms >= bucket.start_ms)
+                .unwrap_or(self.buckets.len());
+            if let Some(current) = self
+                .buckets
+                .get_mut(index)
+                .filter(|current| current.start_ms == bucket.start_ms)
+            {
+                *current = bucket;
+            } else {
+                self.buckets.insert(index, bucket);
+            }
+        }
+    }
+
+    fn delta_from(&self, start_ms: u64) -> TrafficDelta {
+        TrafficDelta {
+            latest_timestamp_ms: self.latest_timestamp_ms,
+            next_id: self.next_id,
+            recent_requests: self.recent_requests.iter().cloned().collect(),
+            route_counts: self.route_counts,
+            buckets: self
+                .buckets
+                .iter()
+                .filter(|bucket| bucket.start_ms >= start_ms)
+                .copied()
+                .collect(),
+        }
+    }
+
+    fn mark_dirty(&mut self, bucket_start_ms: u64) {
+        self.dirty_from_ms = Some(
+            self.dirty_from_ms
+                .map_or(bucket_start_ms, |current| current.min(bucket_start_ms)),
+        );
+    }
+
+    fn trim(&mut self, now_ms: u64) {
+        self.window_cache = None;
+        let cutoff = now_ms.saturating_sub(RETENTION_MS);
+        self.recent_requests
+            .retain(|request| request.timestamp_ms >= cutoff);
+        while self.recent_requests.len() > RECENT_REQUEST_LIMIT {
+            self.recent_requests.pop_front();
+        }
+        while self
             .buckets
             .front()
             .is_some_and(|bucket| bucket.start_ms + BASE_BUCKET_MS <= cutoff)
         {
-            state.buckets.pop_front();
+            self.buckets.pop_front();
         }
-        drop(state);
-    }
-
-    pub(crate) fn recent_requests(&self) -> Vec<RequestEvent> {
-        lock(&self.state).recent_requests.iter().cloned().collect()
-    }
-
-    pub(crate) fn windows(&self) -> Vec<TrafficWindow> {
-        self.windows_at(now_ms())
-    }
-
-    fn windows_at(&self, now_ms: u64) -> Vec<TrafficWindow> {
-        let state = lock(&self.state);
-        window::build_windows(&state.buckets, now_ms)
     }
 }
 

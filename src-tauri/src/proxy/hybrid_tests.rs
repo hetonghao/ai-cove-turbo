@@ -1,18 +1,9 @@
-use std::future;
-
 use axum::http::{HeaderMap, HeaderValue, Uri, header};
-use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
-    tungstenite::{
-        Message,
-        protocol::{Role, frame::coding::CloseCode},
-    },
-};
+use tokio_tungstenite::tungstenite::{Message, protocol::frame::coding::CloseCode};
 
 use super::{
     flow, http,
-    sse::{SseParser, http_request_payload, is_terminal_event},
+    sse::{HttpFallback, SseParser, http_request_payload, is_terminal_event},
 };
 
 #[test]
@@ -43,8 +34,14 @@ fn recognizes_done_and_terminal_response_events() {
 
 #[test]
 fn converts_response_create_into_streaming_http_payload() -> std::io::Result<()> {
-    let payload = http_request_payload(br#"{"type":"response.create","model":"test","input":[]}"#)
-        .map_err(std::io::Error::other)?;
+    let HttpFallback::Request(payload) =
+        http_request_payload(br#"{"type":"response.create","model":"test","input":[]}"#)
+            .map_err(std::io::Error::other)?
+    else {
+        return Err(std::io::Error::other(
+            "HTTP request unexpectedly requires WS",
+        ));
+    };
     let value: serde_json::Value =
         serde_json::from_slice(&payload).map_err(std::io::Error::other)?;
 
@@ -94,46 +91,18 @@ async fn does_not_forward_done_sentinel_but_forwards_json_terminal() {
 }
 
 #[tokio::test]
-async fn completed_prewarm_wins_over_queued_response_create() -> std::io::Result<()> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
-    let address = listener.local_addr()?;
-    let client_stream = TcpStream::connect(address).await?;
-    let (_server_stream, _) = listener.accept().await?;
-    let upstream =
-        WebSocketStream::from_raw_socket(MaybeTlsStream::Plain(client_stream), Role::Client, None)
-            .await;
-    let selection = flow::select_idle(
-        future::ready(Some(Ok(Message::Text(
-            r#"{"type":"response.create"}"#.into(),
-        )))),
-        future::ready(flow::PrewarmSelection::Ready(Box::new(upstream))),
-        future::pending(),
-        true,
-        false,
-    )
-    .await;
-
-    assert!(matches!(
-        selection,
-        flow::IdleSelection::Prewarm(flow::PrewarmSelection::Ready(_))
-    ));
-    Ok(())
-}
-
-#[tokio::test]
 async fn idle_1012_wins_over_queued_response_create() {
     let selection = flow::select_idle(
-        future::ready(Some(Ok(Message::Text(
+        std::future::ready(Some(Ok(Message::Text(
             r#"{"type":"response.create"}"#.into(),
         )))),
-        future::pending(),
-        future::ready(Some(Ok(Message::Close(Some(
+        std::future::ready(Some(Ok(Message::Close(Some(
             tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: CloseCode::from(1012),
                 reason: "restart".into(),
             },
         ))))),
-        false,
+        std::future::pending(),
         true,
     )
     .await;
@@ -145,6 +114,21 @@ async fn idle_1012_wins_over_queued_response_create() {
         _ => false,
     };
     assert!(selected_idle_restart);
+}
+
+#[tokio::test]
+async fn idle_keepalive_wins_over_queued_response_create() {
+    let selection = flow::select_idle(
+        std::future::ready(Some(Ok(Message::Text(
+            r#"{"type":"response.create"}"#.into(),
+        )))),
+        std::future::pending(),
+        std::future::ready(()),
+        true,
+    )
+    .await;
+
+    assert!(matches!(selection, flow::IdleSelection::Keepalive));
 }
 
 #[test]

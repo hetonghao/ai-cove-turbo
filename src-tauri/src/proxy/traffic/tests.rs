@@ -1,5 +1,9 @@
 use super::*;
 
+use std::{error::Error, fs, io::Write};
+
+use tempfile::tempdir;
+
 fn record(timestamp_ms: u64, raw_bytes: u64) -> TrafficRecord<'static> {
     TrafficRecord {
         timestamp_ms,
@@ -9,6 +13,9 @@ fn record(timestamp_ms: u64, raw_bytes: u64) -> TrafficRecord<'static> {
         sent_bytes: raw_bytes / 2,
         transport: TrafficTransport::Http,
         result: TrafficResult::Success,
+        route: None,
+        failure_phase: None,
+        failure_reason: None,
     }
 }
 
@@ -18,8 +25,13 @@ fn rolling_windows_keep_current_period_on_the_right() {
     store.record(record(21_000, 100));
     store.record(record(71_000, 200));
 
-    let first = store.windows_at(71_000);
-    let minute = first.iter().find(|window| window.minutes == 1).unwrap();
+    let first = store.snapshot_at(71_000);
+    assert_eq!(first.recent_requests.len(), 2);
+    let minute = first
+        .windows
+        .iter()
+        .find(|window| window.minutes == 1)
+        .unwrap();
     assert_eq!(minute.buckets.len(), 6);
     assert_eq!(minute.buckets.first().unwrap().start_ms, 20_000);
     assert_eq!(minute.buckets.last().unwrap().start_ms, 70_000);
@@ -34,8 +46,12 @@ fn rolling_windows_keep_current_period_on_the_right() {
     );
 
     store.record(record(81_000, 300));
-    let second = store.windows_at(81_000);
-    let minute = second.iter().find(|window| window.minutes == 1).unwrap();
+    let second = store.snapshot_at(81_000);
+    let minute = second
+        .windows
+        .iter()
+        .find(|window| window.minutes == 1)
+        .unwrap();
     assert_eq!(minute.buckets.first().unwrap().start_ms, 30_000);
     assert_eq!(minute.buckets.last().unwrap().start_ms, 80_000);
     assert_eq!(
@@ -47,6 +63,14 @@ fn rolling_windows_keep_current_period_on_the_right() {
         2
     );
     assert_eq!(minute.buckets.last().unwrap().requests(), 1);
+
+    let idle = store.snapshot_at(91_000);
+    let minute = idle
+        .windows
+        .iter()
+        .find(|window| window.minutes == 1)
+        .unwrap();
+    assert_eq!(minute.buckets.last().unwrap().start_ms, 90_000);
 }
 
 #[test]
@@ -56,8 +80,150 @@ fn recent_requests_keep_only_the_latest_hundred() {
         store.record(record(index * 1_000, 100));
     }
 
-    let recent = store.recent_requests();
+    let recent = store.snapshot_at(100_000).recent_requests;
     assert_eq!(recent.len(), 100);
     assert_eq!(recent.first().unwrap().id, 2);
     assert_eq!(recent.last().unwrap().id, 101);
+}
+
+#[test]
+fn persisted_traffic_round_trips() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let path = root.path().join("traffic.jsonl");
+    let store = TrafficStore::default();
+    store.record(record(21_000, 100));
+    store.save(&path)?;
+    store.record(record(31_000, 200));
+    store.save(&path)?;
+
+    let restored = TrafficStore::load_at(&path, 31_000);
+
+    let recent = restored.snapshot_at(31_000).recent_requests;
+    assert_eq!(recent.len(), 2);
+    let event = recent.first().unwrap();
+    assert_eq!(event.id, 1);
+    assert_eq!(event.raw_bytes, 100);
+    assert_eq!(lock(&restored.state).buckets.len(), 2);
+    assert_eq!(
+        fs::read_to_string(path)?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .count(),
+        2
+    );
+    Ok(())
+}
+
+#[test]
+fn persisted_traffic_ignores_a_damaged_utf8_tail() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let path = root.path().join("traffic.jsonl");
+    let store = TrafficStore::default();
+    store.record(record(21_000, 100));
+    store.save(&path)?;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)?
+        .write_all(&[0xff])?;
+
+    let restored = TrafficStore::load_at(&path, 21_000);
+
+    assert_eq!(restored.snapshot_at(21_000).recent_requests.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn persisted_route_counts_round_trip() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let path = root.path().join("traffic.jsonl");
+    let store = TrafficStore::default();
+    store.record_route(TrafficRoute::HybridWs);
+    store.record_route(TrafficRoute::HybridColdStartHttp);
+    store.record_route(TrafficRoute::HybridRecoveryHttp);
+    store.record_route(TrafficRoute::DirectHttp);
+    store.save(&path)?;
+
+    let restored = TrafficStore::load_at(&path, 21_000);
+
+    assert_eq!(
+        restored.route_counts(),
+        TrafficRouteCounts {
+            hybrid_ws: 1,
+            hybrid_cold_start_http: 1,
+            hybrid_recovery_http: 1,
+            direct_http: 1,
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn persisted_traffic_keeps_websocket_failure_context() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let path = root.path().join("traffic.jsonl");
+    let delta = serde_json::json!({
+        "latestTimestampMs": 21_000,
+        "nextId": 1,
+        "recentRequests": [{
+            "id": 1,
+            "timestampMs": 21_000,
+            "status": 1012,
+            "path": "/v1/responses",
+            "rawBytes": 0,
+            "sentBytes": 0,
+            "transport": "WS",
+            "result": "error",
+            "failurePhase": "hybridIdle",
+            "failureReason": "restart"
+        }],
+        "buckets": []
+    });
+    fs::write(&path, format!("{delta}\n"))?;
+
+    let restored = TrafficStore::load_at(&path, 21_000);
+    let snapshot = restored.snapshot_at(21_000);
+    let event = serde_json::to_value(
+        snapshot
+            .recent_requests
+            .first()
+            .ok_or("restored websocket failure missing")?,
+    )?;
+
+    assert_eq!(
+        event.get("failurePhase"),
+        Some(&serde_json::json!("hybridIdle"))
+    );
+    assert_eq!(
+        event.get("failureReason"),
+        Some(&serde_json::json!("restart"))
+    );
+    Ok(())
+}
+
+#[test]
+fn hourly_compaction_discards_data_older_than_twenty_five_hours() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let path = root.path().join("traffic.jsonl");
+    let store = TrafficStore::default();
+    store.record(record(10_000, 100));
+    store.save(&path)?;
+    store.compact_at(&path, 10_000 + RETENTION_MS + BASE_BUCKET_MS)?;
+
+    let restored = TrafficStore::load_at(&path, 10_000 + RETENTION_MS + BASE_BUCKET_MS);
+
+    assert!(lock(&restored.state).buckets.is_empty());
+    assert!(
+        restored
+            .snapshot_at(10_000 + RETENTION_MS + BASE_BUCKET_MS)
+            .recent_requests
+            .is_empty()
+    );
+    assert_eq!(
+        fs::read_to_string(path)?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .count(),
+        1
+    );
+    Ok(())
 }

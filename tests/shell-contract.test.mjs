@@ -45,6 +45,10 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.match(html, /data-state="websocket-zstd-runtime"/);
   assert.match(html, /data-state="websocket-handshakes"/);
   assert.match(html, /data-state="http-fallbacks"/);
+  assert.match(livePanel, /data-state="hybrid-ws"/);
+  assert.match(livePanel, /data-state="hybrid-cold-start-http"/);
+  assert.match(livePanel, /data-state="hybrid-recovery-http"/);
+  assert.match(livePanel, /data-state="direct-http"/);
   assert.match(html, /data-action="toggle-autostart"/);
   assert.match(html, /data-action="toggle-dock"/);
   assert.match(html, /data-action="restart-codex"/);

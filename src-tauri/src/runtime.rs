@@ -2,17 +2,18 @@
 
 use std::{
     fs,
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use url::Url;
 
 use crate::{
@@ -29,6 +30,8 @@ use crate::{
 };
 
 const DEFAULT_PORT: u16 = 44_175;
+const TRAFFIC_SAVE_INTERVAL: Duration = Duration::from_secs(30);
+const TRAFFIC_COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimePaths {
@@ -44,8 +47,13 @@ impl RuntimePaths {
     fn preferences_path(&self) -> PathBuf {
         self.data_dir.join("preferences.json")
     }
+
+    fn traffic_path(&self) -> PathBuf {
+        self.data_dir.join("traffic.jsonl")
+    }
 }
 
+// CLIPPY-ALLOW: 各偏好项是独立持久化开关，合并会破坏配置字段语义。
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -71,6 +79,7 @@ impl Default for Preferences {
     }
 }
 
+// CLIPPY-ALLOW: 状态字段直接对应前端契约，拆分会增加跨层映射。
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +103,10 @@ pub(crate) struct AppStatus {
     pub(crate) websocket_sent_bytes: u64,
     pub(crate) websocket_messages: u64,
     pub(crate) http_fallbacks: u64,
+    pub(crate) hybrid_ws: u64,
+    pub(crate) hybrid_cold_start_http: u64,
+    pub(crate) hybrid_recovery_http: u64,
+    pub(crate) direct_http: u64,
     pub(crate) recent_requests: Vec<RequestEvent>,
     pub(crate) traffic_windows: Vec<TrafficWindow>,
     pub(crate) autostart_enabled: bool,
@@ -136,6 +149,10 @@ impl AppStatus {
             websocket_sent_bytes: 0,
             websocket_messages: 0,
             http_fallbacks: 0,
+            hybrid_ws: 0,
+            hybrid_cold_start_http: 0,
+            hybrid_recovery_http: 0,
+            direct_http: 0,
             recent_requests: Vec::new(),
             traffic_windows: Vec::new(),
             autostart_enabled: true,
@@ -164,23 +181,32 @@ pub(crate) struct AppRuntime {
     metrics: Arc<Metrics>,
     managed: Mutex<Option<ManagedConfig>>,
     proxy: AsyncMutex<Option<ProxyHandle>>,
+    traffic_persistence: AsyncMutex<Option<TrafficPersistence>>,
     lifecycle_lock: AsyncMutex<()>,
     shutting_down: AtomicBool,
+}
+
+#[derive(Debug)]
+struct TrafficPersistence {
+    stop: oneshot::Sender<()>,
+    task: tauri::async_runtime::JoinHandle<io::Result<()>>,
 }
 
 impl AppRuntime {
     pub(crate) fn new(paths: RuntimePaths) -> Arc<Self> {
         let preferences = load_preferences(&paths.preferences_path());
         let status = AppStatus::starting(&preferences);
+        let metrics = Arc::new(Metrics::load_traffic(&paths.traffic_path()));
         Arc::new(Self {
             paths,
             compression_enabled: Arc::new(AtomicBool::new(preferences.compression_enabled)),
             websocket_enabled: Arc::new(AtomicBool::new(preferences.websocket_enabled)),
             preferences: Mutex::new(preferences),
             status: RwLock::new(status),
-            metrics: Arc::new(Metrics::default()),
+            metrics,
             managed: Mutex::new(None),
             proxy: AsyncMutex::new(None),
+            traffic_persistence: AsyncMutex::new(None),
             lifecycle_lock: AsyncMutex::new(()),
             shutting_down: AtomicBool::new(false),
         })
@@ -191,6 +217,7 @@ impl AppRuntime {
         if self.shutting_down.load(Ordering::Relaxed) {
             return;
         }
+        self.start_traffic_persistence().await;
         if self.proxy.lock().await.is_some() {
             return;
         }
@@ -303,8 +330,13 @@ impl AppRuntime {
         status.websocket_sent_bytes = metrics.websocket_sent_bytes;
         status.websocket_messages = metrics.websocket_messages;
         status.http_fallbacks = metrics.http_fallbacks;
-        status.recent_requests = self.metrics.recent_requests();
-        status.traffic_windows = self.metrics.traffic_windows();
+        status.hybrid_ws = metrics.hybrid_ws;
+        status.hybrid_cold_start_http = metrics.hybrid_cold_start_http;
+        status.hybrid_recovery_http = metrics.hybrid_recovery_http;
+        status.direct_http = metrics.direct_http;
+        let traffic = self.metrics.traffic_snapshot();
+        status.recent_requests = traffic.recent_requests;
+        status.traffic_windows = traffic.windows;
         if status.websocket_state != "conflict" {
             status.websocket_state = if !status.websocket_enabled {
                 "disabled".to_owned()
@@ -502,8 +534,34 @@ impl AppRuntime {
         if let Some(proxy) = proxy {
             proxy.stop().await;
         }
+        self.stop_traffic_persistence().await?;
         self.update_status(|status| status.service_healthy = false);
         Ok(())
+    }
+
+    async fn start_traffic_persistence(&self) {
+        let mut persistence = self.traffic_persistence.lock().await;
+        if persistence.is_some() {
+            return;
+        }
+        let (stop, stopped) = oneshot::channel();
+        let metrics = Arc::clone(&self.metrics);
+        let path = self.paths.traffic_path();
+        let task = tauri::async_runtime::spawn(persist_traffic(metrics, path, stopped));
+        *persistence = Some(TrafficPersistence { stop, task });
+    }
+
+    async fn stop_traffic_persistence(&self) -> Result<(), ConfigError> {
+        let persistence = self.traffic_persistence.lock().await.take();
+        if let Some(persistence) = persistence {
+            let _ = persistence.stop.send(());
+            if matches!(persistence.task.await, Ok(Ok(()))) {
+                return Ok(());
+            }
+        }
+        persist_traffic_once(Arc::clone(&self.metrics), self.paths.traffic_path(), false)
+            .await
+            .map_err(ConfigError::TrafficWrite)
     }
 
     async fn refresh_ownership(&self) {
@@ -615,6 +673,44 @@ impl AppRuntime {
     fn update_status(&self, update: impl FnOnce(&mut AppStatus)) {
         update(&mut write_lock(&self.status));
     }
+}
+
+async fn persist_traffic(
+    metrics: Arc<Metrics>,
+    path: PathBuf,
+    mut stopped: oneshot::Receiver<()>,
+) -> io::Result<()> {
+    let mut save_interval = tokio::time::interval(TRAFFIC_SAVE_INTERVAL);
+    let mut compact_interval = tokio::time::interval(TRAFFIC_COMPACT_INTERVAL);
+    save_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    compact_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    save_interval.tick().await;
+    compact_interval.tick().await;
+    loop {
+        let compact = tokio::select! {
+            _ = &mut stopped => break,
+            _ = save_interval.tick() => false,
+            _ = compact_interval.tick() => true,
+        };
+        let _ = persist_traffic_once(Arc::clone(&metrics), path.clone(), compact).await;
+    }
+    persist_traffic_once(metrics, path, false).await
+}
+
+async fn persist_traffic_once(
+    metrics: Arc<Metrics>,
+    path: PathBuf,
+    compact: bool,
+) -> io::Result<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if compact {
+            metrics.compact_traffic(&path)
+        } else {
+            metrics.save_traffic(&path)
+        }
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 fn load_preferences(path: &Path) -> Preferences {
@@ -841,6 +937,76 @@ supports_websockets = false
 
         assert!(status.service_healthy);
         assert_eq!(status.config_state, "error");
+        Ok(())
+    }
+
+    #[test]
+    fn traffic_persistence_runs_every_thirty_seconds() {
+        assert_eq!(TRAFFIC_SAVE_INTERVAL, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn traffic_persistence_reports_write_failures() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let blocked_parent = root.path().join("blocked");
+        fs::write(&blocked_parent, b"not a directory")?;
+        let metrics = Arc::new(Metrics::default());
+        metrics.record_test_traffic();
+
+        let result =
+            persist_traffic_once(metrics, blocked_parent.join("traffic.jsonl"), false).await;
+
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn traffic_persistence_retries_after_worker_failure() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: root.path().join("config.toml"),
+            data_dir: root.path().join("data"),
+        });
+        runtime.metrics.record_test_traffic();
+        let (stop, stopped) = oneshot::channel();
+        let task = tauri::async_runtime::spawn(async move {
+            let _ = stopped.await;
+            Err(io::Error::other("worker failed"))
+        });
+        *runtime.traffic_persistence.lock().await = Some(TrafficPersistence { stop, task });
+
+        runtime.stop_traffic_persistence().await?;
+
+        assert!(fs::read_to_string(runtime.paths.traffic_path())?.contains("/test"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_flushes_pending_traffic() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_dir = root.path().join("home/.codex");
+        fs::create_dir_all(&config_dir)?;
+        let config_path = config_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.ai-cove.com/v1"
+supports_websockets = false
+"#,
+        )?;
+        let data_dir = root.path().join("data");
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path,
+            data_dir: data_dir.clone(),
+        });
+        runtime.initialize().await;
+        runtime.metrics.record_test_traffic();
+
+        runtime.shutdown().await?;
+
+        assert!(fs::read_to_string(data_dir.join("traffic.jsonl"))?.contains("/test"));
         Ok(())
     }
 }

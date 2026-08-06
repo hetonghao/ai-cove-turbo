@@ -1,54 +1,38 @@
-use std::future::Future;
+use std::{future::Future, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
+use crate::proxy::{HttpTraffic, traffic::TrafficRoute};
+
 use super::{
-    Active, ClientWebSocket, PrivateWebSocket, Session,
+    Active, ClientWebSocket, Session,
     common::{close_client, event_type, send_error},
     http, legacy,
-    sse::http_request_payload,
+    sse::{HttpFallback, http_request_payload},
     websocket,
 };
 
-pub(super) enum PrewarmSelection {
-    Closed,
-    Failed,
-    Ready(Box<super::PrivateWebSocket>),
-}
-
 pub(super) enum IdleSelection {
     Client(Option<Result<Message, WebSocketError>>),
-    Prewarm(PrewarmSelection),
     Ready(Option<Result<Message, WebSocketError>>),
+    Keepalive,
 }
 
-pub(super) async fn receive_prewarm(
-    receiver: &mut mpsc::Receiver<Option<PrivateWebSocket>>,
-) -> PrewarmSelection {
-    match receiver.recv().await {
-        Some(Some(upstream)) => PrewarmSelection::Ready(Box::new(upstream)),
-        Some(None) => PrewarmSelection::Failed,
-        None => PrewarmSelection::Closed,
-    }
-}
-
-pub(super) async fn select_idle<Client, Prewarm, Ready>(
+pub(super) async fn select_idle<Client, Ready, Keepalive>(
     client: Client,
-    prewarm: Prewarm,
     ready: Ready,
-    prewarm_enabled: bool,
+    keepalive: Keepalive,
     ready_enabled: bool,
 ) -> IdleSelection
 where
     Client: Future<Output = Option<Result<Message, WebSocketError>>>,
-    Prewarm: Future<Output = PrewarmSelection>,
     Ready: Future<Output = Option<Result<Message, WebSocketError>>>,
+    Keepalive: Future<Output = ()>,
 {
     tokio::select! {
         biased;
-        result = prewarm, if prewarm_enabled => IdleSelection::Prewarm(result),
+        () = keepalive, if ready_enabled => IdleSelection::Keepalive,
         result = ready, if ready_enabled => IdleSelection::Ready(result),
         message = client => IdleSelection::Client(message),
     }
@@ -104,20 +88,7 @@ async fn start_response(
         return legacy::start_legacy_response(client, session, payload, original_binary).await;
     }
 
-    if !session.first_response_pending {
-        if let Some(upstream) = session.ready.take().filter(|_| !session.force_http) {
-            *active = Some(websocket::start_websocket_worker(
-                upstream,
-                payload,
-                original_binary,
-                std::sync::Arc::clone(&session.state.metrics),
-                session.path.clone(),
-            ));
-            return true;
-        }
-    }
-
-    let Ok(http_payload) = http_request_payload(&payload) else {
+    let Ok(fallback) = http_request_payload(&payload) else {
         let _ = send_error(
             client,
             "invalid_request",
@@ -126,11 +97,55 @@ async fn start_response(
         .await;
         return true;
     };
-    session.first_response_pending = false;
-    if !session.prewarm_attempted {
-        session.start_prewarm();
+    if session.ready.is_none() {
+        session.ready = session
+            .state
+            .hybrid_pool
+            .checkout(&session.pool_scope)
+            .await;
     }
-    session.force_http = false;
-    *active = Some(http::start_http_worker(session, http_payload));
+    if session.ready.is_none() && matches!(&fallback, HttpFallback::WebSocketRequired) {
+        session.ready = session
+            .state
+            .hybrid_pool
+            .checkout_wait(&session.pool_scope, Duration::from_secs(2))
+            .await;
+    }
+    if let Some(upstream) = session.ready.take() {
+        session
+            .state
+            .metrics
+            .record_request_route(TrafficRoute::HybridWs);
+        *active = Some(websocket::start_websocket_worker(
+            upstream,
+            payload,
+            original_binary,
+            std::sync::Arc::clone(&session.state.metrics),
+            session.path.clone(),
+        ));
+        return true;
+    }
+
+    let traffic = if session
+        .state
+        .hybrid_pool
+        .has_initialized(&session.pool_scope)
+        .await
+    {
+        HttpTraffic::HYBRID_RECOVERY
+    } else {
+        HttpTraffic::HYBRID_COLD_START
+    };
+    let HttpFallback::Request(http_payload) = fallback else {
+        let _ = send_error(
+            client,
+            "upstream_http_error",
+            "续传请求需要 WebSocket v2，正在重新建立连接",
+        )
+        .await;
+        return true;
+    };
+    session.state.metrics.record_request_route(traffic.route);
+    *active = Some(http::start_http_worker(session, http_payload, traffic));
     true
 }

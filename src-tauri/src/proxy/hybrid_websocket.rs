@@ -59,13 +59,7 @@ async fn run_websocket_worker(
     .await
     .is_err()
     {
-        send_worker_error(
-            &events,
-            &context.metrics,
-            1011,
-            "private websocket send failed",
-        )
-        .await;
+        send_worker_error(&events, &context, 1011, "private websocket send failed").await;
         return;
     }
 
@@ -74,22 +68,22 @@ async fn run_websocket_worker(
             biased;
             message = upstream.next() => {
                 let Some(message) = message else {
-                    send_worker_error(&events, &context.metrics, 1011, "private websocket closed while active").await;
+                    send_worker_error(&events, &context, 1011, "private websocket closed while active").await;
                     return;
                 };
                 let Ok(message) = message else {
-                    send_worker_error(&events, &context.metrics, 1011, "private websocket failed while active").await;
+                    send_worker_error(&events, &context, 1011, "private websocket failed while active").await;
                     return;
                 };
                 match message {
                     Message::Binary(envelope) => {
                         let Ok(decoded) = private_websocket::decode_private_message_async(envelope).await else {
-                            send_worker_error(&events, &context.metrics, 1007, "private websocket response is invalid").await;
+                            send_worker_error(&events, &context, 1007, "private websocket response is invalid").await;
                             return;
                         };
                         let terminal = is_terminal_event(&decoded.payload);
                         let Ok(message) = decoded_message(decoded) else {
-                            send_worker_error(&events, &context.metrics, 1007, "private websocket response is not UTF-8").await;
+                            send_worker_error(&events, &context, 1007, "private websocket response is not UTF-8").await;
                             return;
                         };
                         if events.send(WorkerEvent::Message(message)).await.is_err() {
@@ -105,17 +99,17 @@ async fn run_websocket_worker(
                     }
                     Message::Ping(payload) => {
                         if upstream.send(Message::Pong(payload)).await.is_err() {
-                            send_worker_error(&events, &context.metrics, 1011, "private websocket control frame failed").await;
+                            send_worker_error(&events, &context, 1011, "private websocket control frame failed").await;
                             return;
                         }
                     }
                     Message::Pong(_) => {}
                     Message::Close(_) => {
-                        send_worker_error(&events, &context.metrics, 1011, "private websocket closed while active").await;
+                        send_worker_error(&events, &context, 1011, "private websocket closed while active").await;
                         return;
                     }
                     Message::Text(_) | Message::Frame(_) => {
-                        send_worker_error(&events, &context.metrics, 1002, "private application frame must be binary").await;
+                        send_worker_error(&events, &context, 1002, "private application frame must be binary").await;
                         return;
                     }
                 }
@@ -161,7 +155,7 @@ async fn handle_worker_command(
     .await
     .is_err()
     {
-        send_worker_error(events, &context.metrics, 1011, message).await;
+        send_worker_error(events, context, 1011, message).await;
         return false;
     }
     true
@@ -169,12 +163,17 @@ async fn handle_worker_command(
 
 async fn send_worker_error(
     events: &mpsc::Sender<WorkerEvent>,
-    metrics: &Metrics,
+    context: &WorkerContext,
     code: u16,
     message: &'static str,
 ) {
-    metrics.record_websocket_failure();
-    metrics.record_websocket_closed();
+    context.metrics.record_websocket_diagnostic(
+        &context.path,
+        code,
+        crate::proxy::traffic::FailurePhase::HybridActive,
+        message,
+    );
+    context.metrics.record_websocket_closed();
     let _ = events.send(WorkerEvent::Error { code, message }).await;
 }
 
@@ -194,7 +193,13 @@ async fn send_private_application(
         .send(Message::Binary(encoded.bytes.into()))
         .await
         .map_err(|_| ())?;
-    metrics.record_websocket_zstd_message(path, raw_len, sent_len, encoded.compressed);
+    metrics.record_websocket_zstd_message(
+        path,
+        raw_len,
+        sent_len,
+        encoded.compressed,
+        Some(crate::proxy::traffic::TrafficRoute::HybridWs),
+    );
     Ok(())
 }
 

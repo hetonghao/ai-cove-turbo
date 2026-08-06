@@ -198,7 +198,7 @@ async fn forward_private_application(
         .send(Message::Binary(Bytes::from(encoded.bytes)))
         .await
         .map_err(|_| PrivateProtocolError::internal("private websocket send failed"))?;
-    metrics.record_websocket_zstd_message(path, raw_len, sent_len, encoded.compressed);
+    metrics.record_websocket_zstd_message(path, raw_len, sent_len, encoded.compressed, None);
     Ok(())
 }
 
@@ -225,7 +225,9 @@ async fn close_both(
     let _ = upstream.send(Message::Close(Some(frame))).await;
 }
 
-const fn websocket_error_code(error: &tokio_tungstenite::tungstenite::Error) -> u16 {
+pub(in crate::proxy) const fn websocket_error_code(
+    error: &tokio_tungstenite::tungstenite::Error,
+) -> u16 {
     match error {
         tokio_tungstenite::tungstenite::Error::Capacity(_) => 1009,
         tokio_tungstenite::tungstenite::Error::Utf8(_) => 1007,

@@ -11,16 +11,25 @@ use super::{
     common::text_message,
     sse::{SseParser, is_terminal_event},
 };
+use crate::proxy::{HttpTraffic, ProxyState};
 
-pub(super) fn start_http_worker(session: &super::Session, payload: Vec<u8>) -> Active {
+pub(super) fn start_http_worker(
+    session: &super::Session,
+    payload: Vec<u8>,
+    traffic: HttpTraffic,
+) -> Active {
     let (command_tx, command_rx) = mpsc::channel(8);
     let (event_tx, event_rx) = mpsc::channel(8);
-    let state = session.state.clone();
-    let headers = session.client_headers.clone();
-    let uri = session.request_uri.clone();
-    let task = tokio::spawn(run_http_worker(
-        state, headers, uri, payload, command_rx, event_tx,
-    ));
+    let context = WorkerContext {
+        state: session.state.clone(),
+        request: build_http_request(
+            session.client_headers.clone(),
+            session.request_uri.clone(),
+            payload,
+        ),
+        traffic,
+    };
+    let task = tokio::spawn(run_http_worker(context, command_rx, event_tx));
     Active {
         kind: super::ActiveKind::Http,
         commands: command_tx,
@@ -29,16 +38,18 @@ pub(super) fn start_http_worker(session: &super::Session, payload: Vec<u8>) -> A
     }
 }
 
+struct WorkerContext {
+    state: ProxyState,
+    request: AxumRequest,
+    traffic: HttpTraffic,
+}
+
 async fn run_http_worker(
-    state: super::ProxyState,
-    headers: HeaderMap,
-    uri: Uri,
-    payload: Vec<u8>,
+    context: WorkerContext,
     mut commands: mpsc::Receiver<WorkerCommand>,
     events: mpsc::Sender<WorkerEvent>,
 ) {
-    let request = build_http_request(headers, uri, payload);
-    let request_future = super::super::proxy_http(state, request);
+    let request_future = super::super::proxy_http(context.state, context.request, context.traffic);
     tokio::pin!(request_future);
     let response = loop {
         tokio::select! {

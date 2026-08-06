@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{
@@ -17,11 +17,7 @@ pub(super) async fn start_legacy_response(
     payload: Vec<u8>,
     original_binary: bool,
 ) -> bool {
-    if !session.prewarm_attempted {
-        session.start_prewarm();
-    }
-    if let Some(mut upstream) = take_prewarm(session).await {
-        session.state.metrics.record_websocket_connected();
+    if let Some(mut upstream) = take_private(session).await {
         private_websocket::relay_private_from_message(
             client,
             &mut upstream,
@@ -31,6 +27,7 @@ pub(super) async fn start_legacy_response(
         )
         .await;
         session.state.metrics.record_websocket_closed();
+        session.state.hybrid_pool.discard(&session.pool_scope).await;
         return false;
     }
 
@@ -61,15 +58,15 @@ fn legacy_message(payload: Vec<u8>, original_binary: bool) -> Message {
     }
 }
 
-async fn take_prewarm(session: &mut Session) -> Option<PrivateWebSocket> {
+async fn take_private(session: &mut Session) -> Option<PrivateWebSocket> {
     if let Some(upstream) = session.ready.take() {
         return Some(upstream);
     }
-    if session.prewarm_task.is_some() {
-        let result = super::flow::receive_prewarm(&mut session.prewarm_rx).await;
-        session.finish_prewarm(result);
-    }
-    session.ready.take()
+    session
+        .state
+        .hybrid_pool
+        .checkout_wait(&session.pool_scope, Duration::from_secs(2))
+        .await
 }
 
 async fn connect_standard(session: &Session) -> Option<ClientWebSocket> {

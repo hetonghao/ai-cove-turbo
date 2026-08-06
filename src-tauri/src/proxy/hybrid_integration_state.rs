@@ -12,6 +12,7 @@ use url::Url;
 pub(super) enum PrivateBehavior {
     Delay,
     Fail,
+    FailOnce,
     IdleRestart,
     ActiveFailure,
 }

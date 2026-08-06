@@ -3,6 +3,7 @@ use std::{
     fmt,
     io::Cursor,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -30,6 +31,7 @@ use tokio::{io::copy_bidirectional, net::TcpListener, sync::oneshot, task::JoinH
 use url::Url;
 
 mod hybrid;
+mod hybrid_pool;
 mod private_websocket;
 pub(crate) mod traffic;
 
@@ -83,7 +85,6 @@ pub(crate) struct Metrics {
     websocket_messages: AtomicU64,
     websocket_raw_bytes: AtomicU64,
     websocket_sent_bytes: AtomicU64,
-    pending_http_fallbacks: AtomicU64,
     http_fallbacks: AtomicU64,
     traffic: traffic::TrafficStore,
     #[cfg(test)]
@@ -106,10 +107,62 @@ pub(crate) struct MetricsSnapshot {
     pub(crate) websocket_raw_bytes: u64,
     pub(crate) websocket_sent_bytes: u64,
     pub(crate) http_fallbacks: u64,
+    pub(crate) hybrid_ws: u64,
+    pub(crate) hybrid_cold_start_http: u64,
+    pub(crate) hybrid_recovery_http: u64,
+    pub(crate) direct_http: u64,
+}
+
+#[derive(Clone, Copy)]
+struct HttpRequestMetric<'a> {
+    path: &'a str,
+    status: u16,
+    raw_bytes: usize,
+    sent_bytes: usize,
+    compressed: bool,
+    result: traffic::TrafficResult,
+    route: traffic::TrafficRoute,
+}
+
+#[derive(Clone, Copy)]
+struct HttpTraffic {
+    result: traffic::TrafficResult,
+    route: traffic::TrafficRoute,
+}
+
+impl HttpTraffic {
+    const DIRECT: Self = Self {
+        result: traffic::TrafficResult::Success,
+        route: traffic::TrafficRoute::DirectHttp,
+    };
+    const HYBRID_COLD_START: Self = Self {
+        result: traffic::TrafficResult::Success,
+        route: traffic::TrafficRoute::HybridColdStartHttp,
+    };
+    const HYBRID_RECOVERY: Self = Self {
+        result: traffic::TrafficResult::Fallback,
+        route: traffic::TrafficRoute::HybridRecoveryHttp,
+    };
 }
 
 impl Metrics {
+    pub(crate) fn load_traffic(path: &Path) -> Self {
+        Self {
+            traffic: traffic::TrafficStore::load(path),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn save_traffic(&self, path: &Path) -> std::io::Result<()> {
+        self.traffic.save(path)
+    }
+
+    pub(crate) fn compact_traffic(&self, path: &Path) -> std::io::Result<()> {
+        self.traffic.compact(path)
+    }
+
     pub(crate) fn snapshot(&self) -> MetricsSnapshot {
+        let route_counts = self.traffic.route_counts();
         MetricsSnapshot {
             requests: self.requests.load(Ordering::Relaxed),
             raw_bytes: self.raw_bytes.load(Ordering::Relaxed),
@@ -124,49 +177,44 @@ impl Metrics {
             websocket_raw_bytes: self.websocket_raw_bytes.load(Ordering::Relaxed),
             websocket_sent_bytes: self.websocket_sent_bytes.load(Ordering::Relaxed),
             http_fallbacks: self.http_fallbacks.load(Ordering::Relaxed),
+            hybrid_ws: route_counts.hybrid_ws,
+            hybrid_cold_start_http: route_counts.hybrid_cold_start_http,
+            hybrid_recovery_http: route_counts.hybrid_recovery_http,
+            direct_http: route_counts.direct_http,
         }
     }
 
-    fn record_http(
-        &self,
-        path: &str,
-        status: u16,
-        raw_bytes: usize,
-        sent_bytes: usize,
-        compressed: bool,
-    ) {
+    fn record_request_route(&self, route: traffic::TrafficRoute) {
+        self.traffic.record_route(route);
+    }
+
+    fn record_http(&self, record: HttpRequestMetric<'_>) {
         self.requests.fetch_add(1, Ordering::Relaxed);
         self.raw_bytes
-            .fetch_add(raw_bytes as u64, Ordering::Relaxed);
+            .fetch_add(record.raw_bytes as u64, Ordering::Relaxed);
         self.sent_bytes
-            .fetch_add(sent_bytes as u64, Ordering::Relaxed);
-        if compressed {
+            .fetch_add(record.sent_bytes as u64, Ordering::Relaxed);
+        if record.compressed {
             self.compression_verified.store(true, Ordering::Relaxed);
         }
-        // ponytail: 当前按全局“失败 WS -> 下一次 HTTP”近似归因；只有并发客户端归因成为产品需求时才按客户端关联。
-        let fallback = self
-            .pending_http_fallbacks
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
-                (pending > 0).then(|| pending - 1)
-            })
-            .is_ok();
-        if fallback {
+        if record.result == traffic::TrafficResult::Fallback {
             self.http_fallbacks.fetch_add(1, Ordering::Relaxed);
         }
         self.traffic.record(traffic::TrafficRecord {
             timestamp_ms: traffic::now_ms(),
-            status,
-            path,
-            raw_bytes: raw_bytes as u64,
-            sent_bytes: sent_bytes as u64,
+            status: record.status,
+            path: record.path,
+            raw_bytes: record.raw_bytes as u64,
+            sent_bytes: record.sent_bytes as u64,
             transport: traffic::TrafficTransport::Http,
-            result: if status >= 400 {
+            result: if record.status >= 400 {
                 traffic::TrafficResult::Error
-            } else if fallback {
-                traffic::TrafficResult::Fallback
             } else {
-                traffic::TrafficResult::Success
+                record.result
             },
+            route: Some(record.route),
+            failure_phase: None,
+            failure_reason: None,
         });
     }
 
@@ -190,18 +238,50 @@ impl Metrics {
         let _ =
             self.websocket_active
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
-                    (active > 0).then_some(active - 1)
+                    active.checked_sub(1)
                 });
     }
 
     fn record_websocket_failure(&self) {
         self.websocket_failures.fetch_add(1, Ordering::Relaxed);
-        self.pending_http_fallbacks.fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_websocket_error(&self, path: &str, status: u16) {
         self.record_websocket_failure();
-        self.record_websocket_traffic(path, status, 0, 0, traffic::TrafficResult::Error);
+        self.record_websocket_traffic(traffic::TrafficRecord {
+            timestamp_ms: traffic::now_ms(),
+            status,
+            path,
+            raw_bytes: 0,
+            sent_bytes: 0,
+            transport: traffic::TrafficTransport::Ws,
+            result: traffic::TrafficResult::Error,
+            route: None,
+            failure_phase: None,
+            failure_reason: None,
+        });
+    }
+
+    fn record_websocket_diagnostic(
+        &self,
+        path: &str,
+        status: u16,
+        phase: traffic::FailurePhase,
+        reason: &str,
+    ) {
+        self.record_websocket_failure();
+        self.record_websocket_traffic(traffic::TrafficRecord {
+            timestamp_ms: traffic::now_ms(),
+            status,
+            path,
+            raw_bytes: 0,
+            sent_bytes: 0,
+            transport: traffic::TrafficTransport::Ws,
+            result: traffic::TrafficResult::Error,
+            route: Some(traffic::TrafficRoute::HybridWs),
+            failure_phase: Some(phase),
+            failure_reason: Some(reason),
+        });
     }
 
     fn record_websocket_zstd_message(
@@ -210,6 +290,7 @@ impl Metrics {
         raw_bytes: usize,
         sent_bytes: usize,
         compressed: bool,
+        route: Option<traffic::TrafficRoute>,
     ) {
         self.websocket_messages.fetch_add(1, Ordering::Relaxed);
         self.websocket_raw_bytes
@@ -219,42 +300,44 @@ impl Metrics {
         if compressed {
             self.websocket_zstd_verified.store(true, Ordering::Relaxed);
         }
-        self.record_websocket_traffic(
+        self.record_websocket_traffic(traffic::TrafficRecord {
+            timestamp_ms: traffic::now_ms(),
+            status: StatusCode::SWITCHING_PROTOCOLS.as_u16(),
             path,
-            StatusCode::SWITCHING_PROTOCOLS.as_u16(),
-            raw_bytes as u64,
-            sent_bytes as u64,
-            traffic::TrafficResult::Success,
-        );
+            raw_bytes: raw_bytes as u64,
+            sent_bytes: sent_bytes as u64,
+            transport: traffic::TrafficTransport::Ws,
+            result: traffic::TrafficResult::Success,
+            route,
+            failure_phase: None,
+            failure_reason: None,
+        });
     }
 
-    fn record_websocket_traffic(
-        &self,
-        path: &str,
-        status: u16,
-        raw_bytes: u64,
-        sent_bytes: u64,
-        result: traffic::TrafficResult,
-    ) {
-        self.traffic.record(traffic::TrafficRecord {
-            timestamp_ms: traffic::now_ms(),
-            status,
-            path,
-            raw_bytes,
-            sent_bytes,
-            transport: traffic::TrafficTransport::Ws,
-            result,
-        });
+    fn record_websocket_traffic(&self, record: traffic::TrafficRecord<'_>) {
+        self.traffic.record(record);
         #[cfg(test)]
         self.traffic_recorded.notify_one();
     }
 
-    pub(crate) fn recent_requests(&self) -> Vec<traffic::RequestEvent> {
-        self.traffic.recent_requests()
+    pub(crate) fn traffic_snapshot(&self) -> traffic::TrafficSnapshot {
+        self.traffic.snapshot()
     }
 
-    pub(crate) fn traffic_windows(&self) -> Vec<traffic::TrafficWindow> {
-        self.traffic.windows()
+    #[cfg(test)]
+    pub(crate) fn record_test_traffic(&self) {
+        self.traffic.record(traffic::TrafficRecord {
+            timestamp_ms: traffic::now_ms(),
+            status: 200,
+            path: "/test",
+            raw_bytes: 10,
+            sent_bytes: 5,
+            transport: traffic::TrafficTransport::Http,
+            result: traffic::TrafficResult::Success,
+            route: None,
+            failure_phase: None,
+            failure_reason: None,
+        });
     }
 }
 
@@ -310,7 +393,7 @@ struct ProxyState {
     metrics: Arc<Metrics>,
     client: reqwest::Client,
     websocket_client: WebSocketClient,
-    private_tls_config: PrivateTlsConfig,
+    hybrid_pool: hybrid_pool::HybridPool,
     max_request_body_bytes: usize,
 }
 
@@ -332,6 +415,9 @@ pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, Pr
         .with_no_client_auth();
     private_tls_config.resumption =
         rustls::client::Resumption::in_memory_sessions(PRIVATE_TLS_SESSION_CACHE_SIZE);
+    let private_tls_config = PrivateTlsConfig::new(Arc::new(private_tls_config));
+    let hybrid_pool =
+        hybrid_pool::HybridPool::new(private_tls_config.clone(), Arc::clone(&options.metrics));
     let state = ProxyState {
         upstream: options.upstream,
         compression_enabled: options.compression_enabled,
@@ -343,7 +429,7 @@ pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, Pr
             .build()
             .map_err(ProxyError::Client)?,
         websocket_client: Client::builder(TokioExecutor::new()).build(websocket_connector),
-        private_tls_config: PrivateTlsConfig::new(Arc::new(private_tls_config)),
+        hybrid_pool,
         max_request_body_bytes: if options.max_request_body_bytes == 0 {
             DEFAULT_MAX_REQUEST_BODY_BYTES
         } else {
@@ -420,17 +506,30 @@ async fn proxy_request(
     if is_websocket_upgrade(request.headers()) {
         return proxy_websocket(state, &mut request).await;
     }
-    proxy_http(state, request).await
+    state
+        .metrics
+        .record_request_route(HttpTraffic::DIRECT.route);
+    proxy_http(state, request, HttpTraffic::DIRECT).await
 }
 
-async fn proxy_http(state: ProxyState, request: AxumRequest) -> Response<Body> {
+async fn proxy_http(
+    state: ProxyState,
+    request: AxumRequest,
+    traffic: HttpTraffic,
+) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().to_owned();
     let raw_body = to_bytes(body, state.max_request_body_bytes).await;
     let Ok(raw_body) = raw_body else {
-        state
-            .metrics
-            .record_http(&path, StatusCode::PAYLOAD_TOO_LARGE.as_u16(), 0, 0, false);
+        state.metrics.record_http(HttpRequestMetric {
+            path: &path,
+            status: StatusCode::PAYLOAD_TOO_LARGE.as_u16(),
+            raw_bytes: 0,
+            sent_bytes: 0,
+            compressed: false,
+            result: traffic.result,
+            route: traffic.route,
+        });
         return json_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
     };
     let raw_len = raw_body.len();
@@ -441,13 +540,15 @@ async fn proxy_http(state: ProxyState, request: AxumRequest) -> Response<Body> {
             Ok(Some(compressed)) => (compressed, true),
             Ok(None) => (raw_body, false),
             Err(()) => {
-                state.metrics.record_http(
-                    &path,
-                    StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-                    raw_len,
-                    0,
-                    false,
-                );
+                state.metrics.record_http(HttpRequestMetric {
+                    path: &path,
+                    status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    raw_bytes: raw_len,
+                    sent_bytes: 0,
+                    compressed: false,
+                    result: traffic.result,
+                    route: traffic.route,
+                });
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, "compression failed");
             }
         }
@@ -467,19 +568,27 @@ async fn proxy_http(state: ProxyState, request: AxumRequest) -> Response<Body> {
     }
     let sent_len = outbound_body.len();
     let Ok(upstream_response) = upstream_request.body(outbound_body).send().await else {
-        state.metrics.record_http(
-            &path,
-            StatusCode::BAD_GATEWAY.as_u16(),
-            raw_len,
-            sent_len,
-            false,
-        );
+        state.metrics.record_http(HttpRequestMetric {
+            path: &path,
+            status: StatusCode::BAD_GATEWAY.as_u16(),
+            raw_bytes: raw_len,
+            sent_bytes: sent_len,
+            compressed: false,
+            result: traffic.result,
+            route: traffic.route,
+        });
         return json_error(StatusCode::BAD_GATEWAY, "upstream request failed");
     };
     let status = upstream_response.status();
-    state
-        .metrics
-        .record_http(&path, status.as_u16(), raw_len, sent_len, compressed);
+    state.metrics.record_http(HttpRequestMetric {
+        path: &path,
+        status: status.as_u16(),
+        raw_bytes: raw_len,
+        sent_bytes: sent_len,
+        compressed,
+        result: traffic.result,
+        route: traffic.route,
+    });
     let response_headers = upstream_response.headers().clone();
     let response_hop_by_hop = hop_by_hop_headers(&response_headers);
     let stream = upstream_response
@@ -549,13 +658,20 @@ async fn proxy_websocket(state: ProxyState, request: &mut AxumRequest) -> Respon
         let mut client = TokioIo::new(client);
         let mut upstream = TokioIo::new(upstream);
         match copy_bidirectional(&mut client, &mut upstream).await {
-            Ok((client_to_upstream, _)) => metrics.record_websocket_traffic(
-                &path,
-                StatusCode::SWITCHING_PROTOCOLS.as_u16(),
-                client_to_upstream,
-                client_to_upstream,
-                traffic::TrafficResult::Success,
-            ),
+            Ok((client_to_upstream, _)) => {
+                metrics.record_websocket_traffic(traffic::TrafficRecord {
+                    timestamp_ms: traffic::now_ms(),
+                    status: StatusCode::SWITCHING_PROTOCOLS.as_u16(),
+                    path: &path,
+                    raw_bytes: client_to_upstream,
+                    sent_bytes: client_to_upstream,
+                    transport: traffic::TrafficTransport::Ws,
+                    result: traffic::TrafficResult::Success,
+                    route: None,
+                    failure_phase: None,
+                    failure_reason: None,
+                });
+            }
             Err(_) => metrics.record_websocket_error(&path, 1011),
         }
         metrics.record_websocket_closed();
@@ -743,6 +859,26 @@ mod tests {
     type CapturedPrivateMessage = (Vec<u8>, bool, bool);
     type CapturedPrivateMessages = (CapturedPrivateMessage, CapturedPrivateMessage);
 
+    #[test]
+    fn persisted_routes_restore_metrics_snapshot() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("traffic.jsonl");
+        let metrics = Metrics::default();
+        metrics.record_request_route(traffic::TrafficRoute::HybridWs);
+        metrics.record_request_route(traffic::TrafficRoute::HybridColdStartHttp);
+        metrics.record_request_route(traffic::TrafficRoute::HybridRecoveryHttp);
+        metrics.record_request_route(traffic::TrafficRoute::DirectHttp);
+        metrics.save_traffic(&path)?;
+
+        let snapshot = Metrics::load_traffic(&path).snapshot();
+
+        assert_eq!(snapshot.hybrid_ws, 1);
+        assert_eq!(snapshot.hybrid_cold_start_http, 1);
+        assert_eq!(snapshot.hybrid_recovery_http, 1);
+        assert_eq!(snapshot.direct_http, 1);
+        Ok(())
+    }
+
     async fn read_http_head(stream: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
         let mut head = Vec::new();
         let mut byte = [0_u8; 1];
@@ -839,27 +975,28 @@ mod tests {
         private_headers_tx: oneshot::Sender<String>,
         fallback_headers_tx: oneshot::Sender<String>,
     ) {
-        let Ok((private_stream, _)) = listener.accept().await else {
+        let mut private_headers_tx = Some(private_headers_tx);
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let Some((mut websocket, head)) = accept_test_websocket(stream, None).await else {
+                return;
+            };
+            if http_header_value(&head, "Sec-WebSocket-Protocol")
+                == Some(PRIVATE_WEBSOCKET_SUBPROTOCOL)
+            {
+                if let Some(sender) = private_headers_tx.take() {
+                    let _ = sender.send(head);
+                }
+                let _ = websocket.next().await;
+                continue;
+            }
+            let _ = fallback_headers_tx.send(head);
+            if let Some(Ok(message)) = websocket.next().await {
+                let _ = websocket.send(message).await;
+            }
             return;
-        };
-        let Some((mut private, private_head)) = accept_test_websocket(private_stream, None).await
-        else {
-            return;
-        };
-        let _ = private_headers_tx.send(private_head);
-        let _ = private.next().await;
-
-        let Ok((fallback_stream, _)) = listener.accept().await else {
-            return;
-        };
-        let Some((mut fallback, fallback_head)) =
-            accept_test_websocket(fallback_stream, None).await
-        else {
-            return;
-        };
-        let _ = fallback_headers_tx.send(fallback_head);
-        if let Some(Ok(message)) = fallback.next().await {
-            let _ = fallback.send(message).await;
         }
     }
 
@@ -1049,11 +1186,16 @@ mod tests {
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.direct_http, 1);
+        assert_eq!(snapshot.hybrid_ws, 0);
+        assert_eq!(snapshot.hybrid_cold_start_http, 0);
+        assert_eq!(snapshot.hybrid_recovery_http, 0);
         assert_eq!(snapshot.raw_bytes, input.len() as u64);
         assert!(snapshot.sent_bytes < snapshot.raw_bytes);
         assert!(snapshot.compression_verified);
         let event = metrics
-            .recent_requests()
+            .traffic_snapshot()
+            .recent_requests
             .into_iter()
             .next()
             .ok_or("HTTP traffic event missing")?;
@@ -1065,6 +1207,10 @@ mod tests {
         assert_eq!(
             event.get("result").and_then(serde_json::Value::as_str),
             Some("success")
+        );
+        assert_eq!(
+            event.get("route").and_then(serde_json::Value::as_str),
+            Some("directHttp")
         );
 
         proxy.stop().await;
@@ -1102,7 +1248,8 @@ mod tests {
         assert_eq!(snapshot.requests, 1);
         assert!(!snapshot.compression_verified);
         let event = metrics
-            .recent_requests()
+            .traffic_snapshot()
+            .recent_requests
             .into_iter()
             .next()
             .ok_or("failed HTTP traffic event missing")?;
@@ -1307,7 +1454,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert!(captured.lock().await.is_none());
         let event = metrics
-            .recent_requests()
+            .traffic_snapshot()
+            .recent_requests
             .into_iter()
             .next()
             .ok_or("413 traffic event missing")?;
@@ -1601,7 +1749,8 @@ mod tests {
         assert!(!snapshot.websocket_zstd_verified);
         assert_eq!(snapshot.websocket_failures, 1);
         let event = metrics
-            .recent_requests()
+            .traffic_snapshot()
+            .recent_requests
             .into_iter()
             .last()
             .ok_or("private protocol error traffic event missing")?;
@@ -1797,7 +1946,8 @@ mod tests {
         assert_eq!(snapshot.http_fallbacks, 0);
         tokio::time::timeout(Duration::from_secs(1), metrics.traffic_recorded.notified()).await?;
         let event = metrics
-            .recent_requests()
+            .traffic_snapshot()
+            .recent_requests
             .into_iter()
             .next()
             .ok_or("standard websocket traffic event missing")?;
@@ -1821,7 +1971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_off_rejects_upgrade_but_http_fallback_still_uses_zstd()
+    async fn websocket_failure_does_not_mark_unrelated_http_as_fallback()
     -> Result<(), Box<dyn Error>> {
         let captured = CapturedRequest::default();
         let upstream_listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1870,7 +2020,7 @@ mod tests {
             Some("zstd")
         );
         let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.http_fallbacks, 1);
+        assert_eq!(snapshot.http_fallbacks, 0);
         assert!(snapshot.compression_verified);
         assert_eq!(snapshot.websocket_handshakes, 0);
 
