@@ -2,11 +2,13 @@ use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
 use tokio::sync::{Mutex, Notify};
+use tokio::time::Instant;
 use url::Url;
 
 use super::{Metrics, private_websocket};
 use private_websocket::{PrivateTlsConfig, PrivateUpstream};
 
+mod expiration;
 mod maintenance;
 pub(super) use maintenance::probe_idle;
 
@@ -14,7 +16,12 @@ pub(super) use maintenance::probe_idle;
 #[path = "hybrid_pool_tests.rs"]
 mod tests;
 
-const MAX_POOL_CONNECTIONS: usize = 8;
+#[cfg(test)]
+#[path = "hybrid_pool_capacity_tests.rs"]
+mod capacity_tests;
+
+const MAX_POOL_CONNECTIONS: usize = 32;
+const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 pub(super) const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -66,6 +73,7 @@ struct PoolInner {
 #[derive(Default)]
 struct PoolState {
     scopes: HashMap<HybridScope, ScopeState>,
+    dormant: HashMap<HybridScope, Instant>,
 }
 
 struct ScopeState {
@@ -102,6 +110,7 @@ impl HybridPool {
     pub(super) async fn register(&self, scope: &HybridScope, target: Url, headers: HeaderMap) {
         {
             let mut state = self.inner.state.lock().await;
+            state.dormant.remove(scope);
             let entry = state
                 .scopes
                 .entry(scope.clone())
@@ -122,7 +131,7 @@ impl HybridPool {
     }
 
     pub(super) async fn unregister(&self, scope: &HybridScope) {
-        let to_close = {
+        let (to_close, deadline) = {
             let mut state = self.inner.state.lock().await;
             let Some(entry) = state.scopes.get_mut(scope) else {
                 return;
@@ -135,10 +144,18 @@ impl HybridPool {
                 .idle
                 .drain(entry.idle.len().saturating_sub(close_count)..)
                 .collect::<Vec<_>>();
+            let deadline =
+                (entry.active_local == 0).then(|| Instant::now() + IDLE_CONNECTION_TIMEOUT);
+            if let Some(deadline) = deadline {
+                state.dormant.insert(scope.clone(), deadline);
+            }
             drop(state);
-            to_close
+            (to_close, deadline)
         };
         self.close_all(to_close).await;
+        if let Some(deadline) = deadline {
+            self.schedule_dormant_expiration(scope.clone(), deadline);
+        }
     }
 
     pub(super) async fn checkout(&self, scope: &HybridScope) -> Option<PrivateUpstream> {
@@ -185,28 +202,19 @@ impl HybridPool {
             .is_some_and(|entry| entry.initialized)
     }
 
-    pub(super) async fn checkin(&self, scope: &HybridScope, upstream: PrivateUpstream) {
-        let mut upstream = Some(upstream);
-        let keep = {
+    pub(super) async fn release_session_connection(
+        &self,
+        scope: &HybridScope,
+        upstream: Option<PrivateUpstream>,
+    ) {
+        {
             let mut state = self.inner.state.lock().await;
-            let Some(entry) = state.scopes.get_mut(scope) else {
-                return;
-            };
-            entry.leased = entry.leased.saturating_sub(1);
-            let keep = if total_connections(entry) <= desired_connections(entry.active_local) {
-                if let Some(upstream) = upstream.take() {
-                    entry.idle.push(upstream);
-                }
-                true
-            } else {
-                false
-            };
+            if let Some(entry) = state.scopes.get_mut(scope) {
+                entry.leased = entry.leased.saturating_sub(1);
+            }
             drop(state);
-            keep
-        };
-        if keep {
-            self.inner.ready.notify_waiters();
-        } else if let Some(upstream) = upstream {
+        }
+        if let Some(upstream) = upstream {
             self.close_all(vec![upstream]).await;
         }
     }

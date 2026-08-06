@@ -201,5 +201,31 @@ async fn run_session(session: &mut Session, mut client: ClientWebSocket) {
             break;
         }
     }
-    active::cleanup_session(session, &mut active).await;
+    cleanup_session(session, &mut active).await;
+}
+
+async fn cleanup_session(session: &mut Session, active: &mut Option<Active>) {
+    if let Some(active) = active.take() {
+        active.task.abort();
+        if active.kind == ActiveKind::WebSocket {
+            session.state.metrics.record_websocket_closed();
+            session
+                .state
+                .hybrid_pool
+                .release_session_connection(&session.pool_scope, None)
+                .await;
+        }
+    }
+    if let Some(upstream) = session.ready.take() {
+        session
+            .state
+            .hybrid_pool
+            .release_session_connection(&session.pool_scope, Some(upstream))
+            .await;
+    }
+    session
+        .state
+        .hybrid_pool
+        .unregister(&session.pool_scope)
+        .await;
 }
