@@ -1,10 +1,15 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use super::{HybridPool, PoolState};
 
-const RECENT_CLOSED_LIMIT: usize = 12;
+const RECENT_CLOSED_LIMIT: usize = 6;
+const RECENT_CLOSED_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+fn recent_closed_visible(age: Duration) -> bool {
+    age < RECENT_CLOSED_WINDOW
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -266,14 +271,32 @@ impl HybridPool {
         snapshot.recent_closed = state
             .recent_closed
             .iter()
-            .map(|closed| ClosedConnection {
-                id: format!("C{:03}", closed.id),
-                thread_id: closed.thread_id.clone(),
-                reason: closed.reason.clone(),
-                ago_seconds: now.duration_since(closed.closed_at).as_secs(),
-                normal: closed.normal,
+            .filter_map(|closed| {
+                let age = now.duration_since(closed.closed_at);
+                recent_closed_visible(age).then(|| ClosedConnection {
+                    id: format!("C{:03}", closed.id),
+                    thread_id: closed.thread_id.clone(),
+                    reason: closed.reason.clone(),
+                    ago_seconds: age.as_secs(),
+                    normal: closed.normal,
+                })
             })
             .collect();
         snapshot
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{RECENT_CLOSED_LIMIT, RECENT_CLOSED_WINDOW, recent_closed_visible};
+
+    #[test]
+    fn recent_closed_window_is_exactly_five_minutes() {
+        assert_eq!(RECENT_CLOSED_LIMIT, 6);
+        assert_eq!(RECENT_CLOSED_WINDOW, Duration::from_secs(5 * 60));
+        assert!(recent_closed_visible(Duration::from_secs(5 * 60 - 1)));
+        assert!(!recent_closed_visible(Duration::from_secs(5 * 60)));
     }
 }

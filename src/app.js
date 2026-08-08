@@ -4,6 +4,7 @@
   const TABS = ["live", "statistics", "config"];
   const RANGE_LABELS = { 1: "最近 1 分钟", 10: "最近 10 分钟", 60: "最近 1 小时", 1440: "最近 1 天" };
   const ROLLING_WINDOWS = [1, 10, 60, 1440];
+  const RECENT_CLOSED_LIMIT = 6;
   const LIVE_TAIL_THRESHOLD_PX = 24;
   const invoke = window.__TAURI__?.core?.invoke;
   const telemetry = window.TurboTelemetry;
@@ -574,6 +575,7 @@
     const panel = $("[data-connection-panel]");
     if (!panel) return;
     const snapshot = normalizeConnectionSnapshot(connectionSnapshot);
+    const recentClosed = snapshot.recentClosed.slice(0, RECENT_CLOSED_LIMIT);
     const total = $("[data-connection-total]");
     if (total) total.textContent = numberFormatter.format(snapshot.prewarm + snapshot.boundThreads.length);
 
@@ -581,7 +583,7 @@
       prewarm: snapshot.prewarm,
       bound: snapshot.boundThreads.length,
       transitions: snapshot.transitions.length,
-      closed: snapshot.recentClosed.length,
+      closed: recentClosed.length,
     };
     Object.entries(counts).forEach(([group, count]) => {
       const target = $(`[data-connection-count="${group}"]`);
@@ -633,8 +635,8 @@
 
     const closed = $("[data-connection-list=\"closed\"]");
     if (closed) {
-      closed.innerHTML = snapshot.recentClosed.length
-        ? snapshot.recentClosed.map((item) => renderConnectionChip({
+      closed.innerHTML = recentClosed.length
+        ? recentClosed.map((item) => renderConnectionChip({
           status: item.normal ? "closed" : "error",
           name: item.threadId ? shortThreadName(item.threadId) : item.id,
           detail: `${item.reason} · ${formatConnectionAge(item.agoSeconds)}前`,
