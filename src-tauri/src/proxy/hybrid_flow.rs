@@ -7,7 +7,7 @@ use crate::proxy::{HttpTraffic, traffic::TrafficRoute};
 
 use super::{
     Active, ClientWebSocket, Session,
-    common::{close_client, event_type, send_error},
+    common::{close_client, event_type, reject_thread_switch, send_error},
     http, legacy,
     sse::{HttpFallback, http_request_payload},
     websocket,
@@ -88,7 +88,7 @@ async fn start_response(
         return legacy::start_legacy_response(client, session, payload, original_binary).await;
     }
 
-    let Ok(fallback) = http_request_payload(&payload) else {
+    let Ok(prepared) = http_request_payload(&payload) else {
         let _ = send_error(
             client,
             "invalid_request",
@@ -97,6 +97,10 @@ async fn start_response(
         .await;
         return true;
     };
+    if !session.bind_thread_id(prepared.thread_id).await {
+        return reject_thread_switch(client).await;
+    }
+    let fallback = prepared.fallback;
     if session.ready.is_none() {
         session.ready = session
             .state
@@ -113,6 +117,9 @@ async fn start_response(
     }
     if let Some(upstream) = session.ready.take() {
         session
+            .observe_activity(super::ConnectionActivity::Up)
+            .await;
+        session
             .state
             .metrics
             .record_request_route(TrafficRoute::HybridWs);
@@ -122,6 +129,7 @@ async fn start_response(
             original_binary,
             std::sync::Arc::clone(&session.state.metrics),
             session.path.clone(),
+            session.last_terminal_response_id.clone(),
         ));
         return true;
     }
@@ -137,6 +145,9 @@ async fn start_response(
         HttpTraffic::HYBRID_COLD_START
     };
     let HttpFallback::Request(http_payload) = fallback else {
+        session
+            .observe_recovering("续传请求正在等待可用 WebSocket")
+            .await;
         let _ = send_error(
             client,
             "upstream_http_error",

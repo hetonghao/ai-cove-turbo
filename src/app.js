@@ -121,6 +121,17 @@
     compressionRatio: 42.4,
     updateMessage: "Preview：尚未检查更新",
   };
+  const previewConnectionSnapshot = {
+    prewarm: 4,
+    boundThreads: [
+      { id: "S001", threadId: "thread-7c2a91df", activity: "down", idleSeconds: 0, reclaimPolicy: "threadEnd" },
+      { id: "S002", threadId: "thread-3e08a1b4", activity: "idle", idleSeconds: 18, reclaimPolicy: "threadEnd" },
+    ],
+    transitions: [],
+    recentClosed: [
+      { id: "C001", threadId: "thread-older", reason: "Codex 线程结束", agoSeconds: 12, normal: true },
+    ],
+  };
   let state = { ...(invoke ? desktopStatus : previewStatus), tab: "live", nonAiCoveConfirmed: false };
   let pendingAction = "";
   let refreshing = false;
@@ -132,6 +143,14 @@
   let displayedRequests = [];
   let renderedBarMarkup = "";
   let activeChartIndex = 0;
+  let connectionPanelOpen = false;
+  let connectionSnapshot = invoke
+    ? { prewarm: 0, boundThreads: [], transitions: [], recentClosed: [] }
+    : previewConnectionSnapshot;
+  let connectionLoading = false;
+  let connectionRefreshing = false;
+  let connectionHydrated = !invoke;
+  let connectionError = "";
 
   const actions = {
     "toggle-compression": ["set_compression", () => ({ enabled: !state.compressionEnabled })],
@@ -497,6 +516,9 @@
     if (!TABS.includes(tab)) return;
     const previousTab = state.tab;
     state.tab = tab;
+    if (tab !== "live" && connectionPanelOpen) {
+      setConnectionPanelOpen(false, { restoreFocus: false });
+    }
     renderTab({ ...options, previousTab });
     if (tab === "statistics") renderStatistics();
     if (options.updateUrl !== false) updateUrl();
@@ -509,6 +531,172 @@
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#39;");
+  }
+
+  function normalizeConnectionSnapshot(snapshot) {
+    return {
+      prewarm: Math.max(0, Number(snapshot?.prewarm) || 0),
+      boundThreads: Array.isArray(snapshot?.boundThreads) ? snapshot.boundThreads : [],
+      transitions: Array.isArray(snapshot?.transitions) ? snapshot.transitions : [],
+      recentClosed: Array.isArray(snapshot?.recentClosed) ? snapshot.recentClosed : [],
+    };
+  }
+
+  function connectionIcon(status) {
+    return `<i class="c-ws-icon" data-connection-state="${escapeHtml(status)}" aria-hidden="true"></i>`;
+  }
+
+  function shortThreadName(threadId) {
+    const value = String(threadId || "未命名线程").replace(/^thread[-_]/iu, "");
+    return value === "未命名线程" ? value : `线程 ${value.slice(0, 8)}`;
+  }
+
+  function formatConnectionAge(seconds) {
+    const value = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (value < 60) return `${value} 秒`;
+    if (value < 3_600) return `${Math.floor(value / 60)} 分钟`;
+    return `${Math.floor(value / 3_600)} 小时`;
+  }
+
+  function connectionActivityGlyph(activity) {
+    if (activity === "idle") return '<span class="c-connection-idle" aria-hidden="true">zzz</span>';
+    const direction = activity === "up" ? "up" : "down";
+    const path = direction === "up" ? "M6 10V2M3 5l3-3 3 3" : "M6 2v8m3-3-3 3-3-3";
+    return `<svg class="c-connection-activity" data-direction="${direction}" viewBox="0 0 12 12" aria-hidden="true"><path d="${path}" /></svg>`;
+  }
+
+  function renderConnectionChip({ status, name, detail, glyph = "" }) {
+    const label = `${name} · ${detail}`;
+    return `<span class="c-connection-chip" tabindex="0" data-tooltip="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${connectionIcon(status)}<strong>${escapeHtml(name)}</strong>${glyph}</span>`;
+  }
+
+  function renderConnectionInspector() {
+    const panel = $("[data-connection-panel]");
+    if (!panel) return;
+    const snapshot = normalizeConnectionSnapshot(connectionSnapshot);
+    const total = $("[data-connection-total]");
+    if (total) total.textContent = numberFormatter.format(snapshot.prewarm + snapshot.boundThreads.length);
+
+    const counts = {
+      prewarm: snapshot.prewarm,
+      bound: snapshot.boundThreads.length,
+      transitions: snapshot.transitions.length,
+      closed: snapshot.recentClosed.length,
+    };
+    Object.entries(counts).forEach(([group, count]) => {
+      const target = $(`[data-connection-count="${group}"]`);
+      if (target) target.textContent = numberFormatter.format(count);
+    });
+
+    const prewarm = $("[data-connection-list=\"prewarm\"]");
+    if (prewarm) {
+      prewarm.innerHTML = snapshot.prewarm
+        ? Array.from({ length: snapshot.prewarm }, (_, index) => renderConnectionChip({
+          status: "warm",
+          name: `P${String(index + 1).padStart(2, "0")}`,
+          detail: "空白预热 · 容量压力时回收",
+        })).join("")
+        : '<span class="c-connection-empty">暂无可用连接</span>';
+    }
+
+    const bound = $("[data-connection-list=\"bound\"]");
+    if (bound) {
+      bound.innerHTML = snapshot.boundThreads.length
+        ? snapshot.boundThreads.map((item) => {
+          const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
+          const activityLabel = activity === "up"
+            ? "正在发送"
+            : activity === "down"
+              ? "正在接收"
+              : `空闲 ${formatConnectionAge(item.idleSeconds)}`;
+          const reclaim = item.reclaimPolicy === "threadEnd" ? "随线程结束回收" : "按连接策略回收";
+          return renderConnectionChip({
+            status: activity === "idle" ? "bound" : "active",
+            name: shortThreadName(item.threadId),
+            detail: `${activityLabel} · ${reclaim}`,
+            glyph: connectionActivityGlyph(activity),
+          });
+        }).join("")
+        : '<span class="c-connection-empty">暂无绑定线程</span>';
+    }
+
+    const transitions = $("[data-connection-list=\"transitions\"]");
+    if (transitions) {
+      const expanded = new Set(Array.from(transitions.querySelectorAll?.("details[open][data-transition-id]") ?? [], (item) => item.dataset.transitionId));
+      transitions.innerHTML = snapshot.transitions.length
+        ? snapshot.transitions.map((item) => `<details class="c-connection-transition" data-transition-id="${escapeHtml(item.id)}"><summary>${connectionIcon("pending")}<strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.stage)}</span></summary><dl><div><dt>连接</dt><dd>${escapeHtml(item.id)}</dd></div><div><dt>已用时</dt><dd>${formatConnectionAge(item.elapsedSeconds)}</dd></div><div><dt>详情</dt><dd>${escapeHtml(item.detail)}</dd></div></dl></details>`).join("")
+        : '<span class="c-connection-empty">当前没有连接操作</span>';
+      Array.from(transitions.querySelectorAll?.("details[data-transition-id]") ?? []).forEach((item) => {
+        item.open = expanded.has(item.dataset.transitionId);
+      });
+    }
+
+    const closed = $("[data-connection-list=\"closed\"]");
+    if (closed) {
+      closed.innerHTML = snapshot.recentClosed.length
+        ? snapshot.recentClosed.map((item) => renderConnectionChip({
+          status: item.normal ? "closed" : "error",
+          name: item.threadId ? shortThreadName(item.threadId) : item.id,
+          detail: `${item.reason} · ${formatConnectionAge(item.agoSeconds)}前`,
+        })).join("")
+        : '<span class="c-connection-empty">暂无关闭记录</span>';
+    }
+
+    const message = $("[data-connection-message]");
+    if (message) {
+      message.hidden = !connectionLoading && !connectionError;
+      message.textContent = connectionError
+        ? `连接状态读取失败：${connectionError}`
+        : connectionLoading
+          ? "正在读取当前 WebSocket 连接…"
+          : "";
+    }
+  }
+
+  function setConnectionPanelOpen(open, { restoreFocus = true } = {}) {
+    connectionPanelOpen = Boolean(open);
+    const panel = $("[data-connection-panel]");
+    const trigger = $('[data-action="toggle-connections"]');
+    if (trigger) trigger.setAttribute("aria-expanded", String(connectionPanelOpen));
+    if (panel) {
+      panel.hidden = !connectionPanelOpen;
+      if (connectionPanelOpen) {
+        renderConnectionInspector();
+        playMotion(panel, [
+          { opacity: 0.82, transform: "translate3d(8px, -4px, 0)", filter: "blur(3px)" },
+          { opacity: 1, transform: "translate3d(0, 0, 0)", filter: "blur(0)" },
+        ], motion.revealMs);
+        $('[data-action="close-connections"]')?.focus?.();
+      } else {
+        cancelMotion(panel);
+      }
+    }
+    if (!connectionPanelOpen && restoreFocus) trigger?.focus?.();
+  }
+
+  async function refreshConnectionSnapshot() {
+    if (!connectionPanelOpen || connectionRefreshing || document.hidden) return;
+    if (!invoke) {
+      connectionSnapshot = previewConnectionSnapshot;
+      connectionHydrated = true;
+      connectionError = "";
+      renderConnectionInspector();
+      return;
+    }
+    connectionRefreshing = true;
+    connectionLoading = !connectionHydrated;
+    connectionError = "";
+    renderConnectionInspector();
+    try {
+      connectionSnapshot = normalizeConnectionSnapshot(await invoke("get_connection_snapshot"));
+      connectionHydrated = true;
+    } catch (error) {
+      connectionError = error instanceof Error ? error.message : String(error);
+    } finally {
+      connectionLoading = false;
+      connectionRefreshing = false;
+      if (connectionPanelOpen) renderConnectionInspector();
+    }
   }
 
   function syncLiveRequests() {
@@ -708,6 +896,19 @@
   }
 
   async function handleAction(action) {
+    if (action === "toggle-connections") {
+      if (connectionPanelOpen) {
+        setConnectionPanelOpen(false);
+      } else {
+        setConnectionPanelOpen(true);
+        await refreshConnectionSnapshot();
+      }
+      return;
+    }
+    if (action === "close-connections") {
+      setConnectionPanelOpen(false);
+      return;
+    }
     if (action === "open-config") {
       selectTab("config", { focus: true });
       return;
@@ -764,6 +965,7 @@
       renderState();
     } finally {
       refreshing = false;
+      if (connectionPanelOpen) await refreshConnectionSnapshot();
     }
   }
 
@@ -900,6 +1102,10 @@
       if (tab) selectTab(tab.dataset.tab);
     });
     document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && connectionPanelOpen) {
+        setConnectionPanelOpen(false);
+        return;
+      }
       const chartSlot = event.target.closest?.(".c-bar-slot");
       if (chartSlot && handleChartKeydown(event, chartSlot)) return;
       const tab = event.target.closest?.("[data-tab]");
@@ -916,6 +1122,9 @@
       if (event.target.matches?.("[data-filter]")) renderStatistics();
     });
     window.addEventListener("popstate", () => selectTab(readTab(), { updateUrl: false }));
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && invoke) void refreshStatus();
+    });
     bindDotField();
     renderTab();
     renderState();

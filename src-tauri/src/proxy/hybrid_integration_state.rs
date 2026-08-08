@@ -13,8 +13,12 @@ pub(super) enum PrivateBehavior {
     Delay,
     Fail,
     FailOnce,
+    HoldResponse,
+    IdleMessage,
     IdleRestart,
     ActiveFailure,
+    Persistent,
+    TerminalTail,
 }
 
 #[derive(Clone, Copy)]

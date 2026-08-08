@@ -5,8 +5,10 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::{
-    Active, ActiveKind, PrivateWebSocket, WorkerCommand, WorkerEvent, common::text_message,
-    private_websocket, sse::is_terminal_event,
+    Active, ActiveKind, PrivateWebSocket, WorkerCommand, WorkerEvent,
+    common::text_message,
+    private_websocket,
+    sse::{is_terminal_event, success_terminal_response_id},
 };
 use crate::proxy::Metrics;
 
@@ -16,10 +18,15 @@ pub(super) fn start_websocket_worker(
     original_binary: bool,
     metrics: Arc<Metrics>,
     path: String,
+    previous_response_id: Option<String>,
 ) -> Active {
     let (command_tx, command_rx) = mpsc::channel(8);
     let (event_tx, event_rx) = mpsc::channel(8);
-    let context = WorkerContext { metrics, path };
+    let context = WorkerContext {
+        metrics,
+        path,
+        previous_response_id,
+    };
     let task = tokio::spawn(run_websocket_worker(
         context,
         upstream,
@@ -39,6 +46,7 @@ pub(super) fn start_websocket_worker(
 struct WorkerContext {
     metrics: Arc<Metrics>,
     path: String,
+    previous_response_id: Option<String>,
 }
 
 async fn run_websocket_worker(
@@ -82,6 +90,14 @@ async fn run_websocket_worker(
                             return;
                         };
                         let terminal = is_terminal_event(&decoded.payload);
+                        let response_id = terminal
+                            .then(|| success_terminal_response_id(&decoded.payload))
+                            .flatten();
+                        if response_id.is_some()
+                            && response_id.as_ref() == context.previous_response_id.as_ref()
+                        {
+                            continue;
+                        }
                         let Ok(message) = decoded_message(decoded) else {
                             send_worker_error(&events, &context, 1007, "private websocket response is not UTF-8").await;
                             return;
@@ -92,7 +108,10 @@ async fn run_websocket_worker(
                         }
                         if terminal {
                             let _ = events
-                                .send(WorkerEvent::Terminal(Some(Box::new(upstream))))
+                                .send(WorkerEvent::Terminal {
+                                    upstream: Some(Box::new(upstream)),
+                                    response_id,
+                                })
                                 .await;
                             return;
                         }

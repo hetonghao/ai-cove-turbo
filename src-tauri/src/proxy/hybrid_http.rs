@@ -74,7 +74,12 @@ async fn run_http_worker(
         if events.send(WorkerEvent::Message(error)).await.is_err() {
             return;
         }
-        let _ = events.send(WorkerEvent::Terminal(None)).await;
+        let _ = events
+            .send(WorkerEvent::Terminal {
+                upstream: None,
+                response_id: None,
+            })
+            .await;
         return;
     }
 
@@ -156,7 +161,10 @@ pub(super) async fn send_sse_events(
         }
         if terminal {
             events
-                .send(WorkerEvent::Terminal(None))
+                .send(WorkerEvent::Terminal {
+                    upstream: None,
+                    response_id: None,
+                })
                 .await
                 .map_err(|_| ())?;
             return Ok(true);

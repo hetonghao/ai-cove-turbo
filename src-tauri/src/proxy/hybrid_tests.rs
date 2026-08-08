@@ -34,10 +34,9 @@ fn recognizes_done_and_terminal_response_events() {
 
 #[test]
 fn converts_response_create_into_streaming_http_payload() -> std::io::Result<()> {
-    let HttpFallback::Request(payload) =
-        http_request_payload(br#"{"type":"response.create","model":"test","input":[]}"#)
-            .map_err(std::io::Error::other)?
-    else {
+    let prepared = http_request_payload(br#"{"type":"response.create","model":"test","input":[]}"#)
+        .map_err(std::io::Error::other)?;
+    let HttpFallback::Request(payload) = prepared.fallback else {
         return Err(std::io::Error::other(
             "HTTP request unexpectedly requires WS",
         ));
@@ -54,6 +53,22 @@ fn converts_response_create_into_streaming_http_payload() -> std::io::Result<()>
     Ok(())
 }
 
+#[test]
+fn reads_canonical_thread_id_from_response_create() -> std::io::Result<()> {
+    let request = serde_json::json!({
+        "type": "response.create",
+        "client_metadata": {
+            "thread_id": "flat-thread",
+            "x-codex-turn-metadata": r#"{"thread_id":"canonical-thread"}"#,
+        },
+    });
+    let prepared =
+        http_request_payload(request.to_string().as_bytes()).map_err(std::io::Error::other)?;
+
+    assert_eq!(prepared.thread_id.as_deref(), Some("canonical-thread"));
+    Ok(())
+}
+
 #[tokio::test]
 async fn does_not_forward_done_sentinel_but_forwards_json_terminal() {
     let (events, mut received) = tokio::sync::mpsc::channel(4);
@@ -66,7 +81,10 @@ async fn does_not_forward_done_sentinel_but_forwards_json_terminal() {
     );
     assert!(matches!(
         received.recv().await,
-        Some(super::WorkerEvent::Terminal(None))
+        Some(super::WorkerEvent::Terminal {
+            upstream: None,
+            response_id: None,
+        })
     ));
     assert!(received.try_recv().is_err());
 
@@ -86,7 +104,10 @@ async fn does_not_forward_done_sentinel_but_forwards_json_terminal() {
     ));
     assert!(matches!(
         received.recv().await,
-        Some(super::WorkerEvent::Terminal(None))
+        Some(super::WorkerEvent::Terminal {
+            upstream: None,
+            response_id: None,
+        })
     ));
 }
 

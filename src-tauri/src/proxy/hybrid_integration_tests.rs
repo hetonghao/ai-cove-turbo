@@ -18,6 +18,12 @@ type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[path = "hybrid_continuation_tests.rs"]
 mod continuation_tests;
 
+#[path = "hybrid_observability_integration_tests.rs"]
+mod observability_integration_tests;
+
+#[path = "hybrid_session_isolation_tests.rs"]
+mod session_isolation_tests;
+
 async fn start_test_proxy(server: &FixtureServer) -> io::Result<(ProxyHandle, Arc<Metrics>)> {
     let metrics = Arc::new(Metrics::default());
     let proxy = start_proxy(ProxyOptions {
@@ -42,6 +48,14 @@ async fn connect_local_with_authorization(
     proxy: &ProxyHandle,
     authorization: Option<&'static str>,
 ) -> io::Result<(ClientWebSocket, u16)> {
+    connect_local_with_headers(proxy, authorization, None).await
+}
+
+async fn connect_local_with_headers(
+    proxy: &ProxyHandle,
+    authorization: Option<&'static str>,
+    thread_id: Option<&str>,
+) -> io::Result<(ClientWebSocket, u16)> {
     let mut endpoint = Url::parse(proxy.endpoint()).map_err(io::Error::other)?;
     endpoint
         .set_scheme("ws")
@@ -55,6 +69,12 @@ async fn connect_local_with_authorization(
         request.headers_mut().insert(
             header::AUTHORIZATION,
             HeaderValue::from_static(authorization),
+        );
+    }
+    if let Some(thread_id) = thread_id {
+        request.headers_mut().insert(
+            "thread-id",
+            HeaderValue::from_str(thread_id).map_err(io::Error::other)?,
         );
     }
     let (client, response) = connect_async(request).await.map_err(io::Error::other)?;
@@ -78,6 +98,15 @@ async fn send_cancel(client: &mut ClientWebSocket) -> io::Result<()> {
 }
 
 async fn next_event_type(client: &mut ClientWebSocket) -> io::Result<String> {
+    let value = next_event_value(client).await?;
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "event type missing"))
+}
+
+async fn next_event_value(client: &mut ClientWebSocket) -> io::Result<Value> {
     loop {
         let Some(message) = client.next().await else {
             return Err(io::Error::new(
@@ -101,12 +130,7 @@ async fn next_event_type(client: &mut ClientWebSocket) -> io::Result<String> {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "local close"));
             }
         };
-        let value: Value = serde_json::from_slice(&payload).map_err(io::Error::other)?;
-        return value
-            .get("type")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "event type missing"));
+        return serde_json::from_slice(&payload).map_err(io::Error::other);
     }
 }
 
@@ -152,7 +176,7 @@ async fn local_101_stays_responsive_when_pool_prewarm_fails() -> io::Result<()> 
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_private(2).await?;
+    server.fixture.wait_private(7).await?;
     client
         .send(Message::Ping(b"probe".to_vec().into()))
         .await
@@ -194,7 +218,7 @@ async fn delayed_prewarm_keeps_not_ready_turns_http_then_switches_to_ws() -> io:
     server.fixture.wait_http(2).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     assert_eq!(metrics.snapshot().http_fallbacks, 0);
-    assert_counts(server.fixture.counts().await, 2, 0, 2);
+    assert_counts(server.fixture.counts().await, 7, 0, 2);
     for _ in 0..2 {
         server.fixture.release_private();
     }
@@ -203,7 +227,7 @@ async fn delayed_prewarm_keeps_not_ready_turns_http_then_switches_to_ws() -> io:
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts(server.fixture.counts().await, 2, 1, 2);
+    assert_counts(server.fixture.counts().await, 7, 1, 2);
     let snapshot = metrics.snapshot();
     assert_eq!(snapshot.hybrid_ws, 1);
     assert_eq!(snapshot.hybrid_cold_start_http, 2);
@@ -249,7 +273,7 @@ async fn ready_private_websocket_is_reused_by_next_local_connection() -> io::Res
         next_event_type(&mut first_client).await?,
         "response.completed"
     );
-    server.fixture.wait_private(2).await?;
+    server.fixture.wait_private(7).await?;
     for _ in 0..2 {
         server.fixture.release_private();
     }
@@ -269,14 +293,14 @@ async fn ready_private_websocket_is_reused_by_next_local_connection() -> io::Res
 
     let (mut second_client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_private(3).await?;
+    server.fixture.wait_private(8).await?;
     send_create(&mut second_client).await?;
     server.fixture.wait_messages(1).await?;
     assert_eq!(
         next_event_type(&mut second_client).await?,
         "response.completed"
     );
-    assert_counts(server.fixture.counts().await, 3, 1, 1);
+    assert_counts(server.fixture.counts().await, 8, 1, 1);
 
     drop(second_client);
     server.fixture.release_private();
@@ -304,7 +328,7 @@ async fn ready_private_websocket_is_isolated_by_authorization() -> io::Result<()
         next_event_type(&mut first_client).await?,
         "response.completed"
     );
-    server.fixture.wait_private(2).await?;
+    server.fixture.wait_private(7).await?;
     for _ in 0..2 {
         server.fixture.release_private();
     }
@@ -325,13 +349,13 @@ async fn ready_private_websocket_is_isolated_by_authorization() -> io::Result<()
         connect_local_with_authorization(&proxy, Some("Bearer account-b")).await?;
     assert_eq!(status, 101);
     send_create(&mut second_client).await?;
-    server.fixture.wait_private(4).await?;
+    server.fixture.wait_private(14).await?;
     server.fixture.wait_http(2).await?;
     assert_eq!(
         next_event_type(&mut second_client).await?,
         "response.completed"
     );
-    assert_counts(server.fixture.counts().await, 4, 0, 2);
+    assert_counts(server.fixture.counts().await, 14, 0, 2);
 
     drop(second_client);
     for _ in 0..2 {
@@ -343,7 +367,7 @@ async fn ready_private_websocket_is_isolated_by_authorization() -> io::Result<()
 }
 
 #[tokio::test]
-async fn local_connections_prewarm_one_spare_private_websocket() -> io::Result<()> {
+async fn local_connections_keep_dynamic_warm_reserve() -> io::Result<()> {
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::Delay,
         delay_http: false,
@@ -355,12 +379,12 @@ async fn local_connections_prewarm_one_spare_private_websocket() -> io::Result<(
     assert_eq!(first_status, 101);
     assert_eq!(second_status, 101);
 
-    server.fixture.wait_private(3).await?;
-    for _ in 0..3 {
+    server.fixture.wait_private(8).await?;
+    for _ in 0..8 {
         server.fixture.release_private();
     }
-    server.fixture.wait_ready(3).await?;
-    wait_websocket_handshakes(&metrics, 3).await?;
+    server.fixture.wait_ready(8).await?;
+    wait_websocket_handshakes(&metrics, 8).await?;
 
     send_create(&mut first_client).await?;
     send_create(&mut second_client).await?;
@@ -373,7 +397,7 @@ async fn local_connections_prewarm_one_spare_private_websocket() -> io::Result<(
         next_event_type(&mut second_client).await?,
         "response.completed"
     );
-    assert_counts(server.fixture.counts().await, 3, 2, 0);
+    assert_counts(server.fixture.counts().await, 8, 2, 0);
 
     drop(first_client);
     drop(second_client);
@@ -417,6 +441,61 @@ async fn idle_1012_reprewarms_before_next_request() -> io::Result<()> {
         .ok_or_else(|| io::Error::other("hybrid idle failure was not persisted"))?;
     assert_eq!(failure.get("status"), Some(&Value::from(1012)));
     assert_eq!(failure.get("failureReason"), Some(&Value::from("restart")));
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn idle_application_frame_reprewarms_without_closing_client() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::IdleMessage,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    send_create(&mut client).await?;
+    server.fixture.wait_ready(1).await?;
+    server.fixture.wait_http(1).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    send_create(&mut client).await?;
+    server.fixture.wait_messages(1).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    server.fixture.wait_ready(3).await?;
+    client
+        .send(Message::Ping(b"still-alive".to_vec().into()))
+        .await
+        .map_err(io::Error::other)?;
+    let Some(Ok(Message::Pong(_))) = client.next().await else {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "local websocket closed after idle upstream application frame",
+        ));
+    };
+    send_create(&mut client).await?;
+    server.fixture.wait_messages(2).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    let events = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
+        .map_err(io::Error::other)?;
+    let failure = events
+        .as_array()
+        .and_then(|events| {
+            events
+                .iter()
+                .find(|event| event.get("failurePhase") == Some(&Value::from("hybridIdle")))
+        })
+        .ok_or_else(|| io::Error::other("hybrid idle application frame was not persisted"))?;
+    assert_eq!(failure.get("status"), Some(&Value::from(1002)));
+    assert_eq!(
+        failure.get("failureReason"),
+        Some(&Value::from(
+            "空闲上游 WebSocket 收到意外二进制消息；解码=成功；事件=response.output_text.delta；响应ID=缺失"
+        ))
+    );
+    assert!(!failure.to_string().contains("must-not-persist"));
     drop(client);
     proxy.stop().await;
     server.stop().await;
@@ -486,13 +565,13 @@ async fn concurrent_create_cancel_and_client_close_do_not_replay() -> io::Result
     server.fixture.release_http();
     send_create(&mut client).await?;
     server.fixture.wait_http(2).await?;
-    server.fixture.wait_private(2).await?;
+    server.fixture.wait_private(7).await?;
     drop(client);
     server.fixture.release_http();
     for _ in 0..2 {
         server.fixture.release_private();
     }
-    assert_counts(server.fixture.counts().await, 2, 0, 2);
+    assert_counts(server.fixture.counts().await, 7, 0, 2);
     proxy.stop().await;
     server.stop().await;
     Ok(())

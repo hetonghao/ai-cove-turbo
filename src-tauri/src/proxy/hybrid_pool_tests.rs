@@ -30,31 +30,9 @@ async fn idle_private_websocket_remains_available_after_pong() -> io::Result<()>
             .map_err(io::Error::other)
     });
 
-    let metrics = Arc::new(Metrics::default());
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(RootCertStore::empty())
-        .with_no_client_auth();
-    let pool = HybridPool::new(PrivateTlsConfig::new(Arc::new(tls_config)), metrics);
-    let target = Url::parse(&format!("http://{address}/v1/responses")).map_err(io::Error::other)?;
-    let headers = HeaderMap::new();
-    let scope = HybridScope::new(&target, &headers);
-    pool.inner.state.lock().await.scopes.insert(
-        scope.clone(),
-        ScopeState {
-            target,
-            headers,
-            initialized: false,
-            active_local: 0,
-            leased: 0,
-            connecting: 0,
-            probing: 0,
-            idle: vec![client],
-        },
-    );
+    let healthy = probe_idle(client, Duration::from_millis(100)).await;
 
-    pool.maintain_once(&scope, Duration::from_millis(100)).await;
-
-    assert!(pool.checkout(&scope).await.is_some());
+    assert!(healthy.is_some());
     server_task.await.map_err(io::Error::other)??;
     Ok(())
 }
@@ -78,31 +56,9 @@ async fn idle_private_websocket_is_removed_after_pong_timeout() -> io::Result<()
         Ok(())
     });
 
-    let metrics = Arc::new(Metrics::default());
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(RootCertStore::empty())
-        .with_no_client_auth();
-    let pool = HybridPool::new(PrivateTlsConfig::new(Arc::new(tls_config)), metrics);
-    let target = Url::parse(&format!("http://{address}/v1/responses")).map_err(io::Error::other)?;
-    let headers = HeaderMap::new();
-    let scope = HybridScope::new(&target, &headers);
-    pool.inner.state.lock().await.scopes.insert(
-        scope.clone(),
-        ScopeState {
-            target,
-            headers,
-            initialized: false,
-            active_local: 0,
-            leased: 0,
-            connecting: 0,
-            probing: 0,
-            idle: vec![client],
-        },
-    );
+    let healthy = probe_idle(client, Duration::from_millis(20)).await;
 
-    pool.maintain_once(&scope, Duration::from_millis(20)).await;
-
-    assert!(pool.checkout(&scope).await.is_none());
+    assert!(healthy.is_none());
     let _ = release_tx.send(());
     server_task.await.map_err(io::Error::other)??;
     Ok(())
@@ -142,11 +98,12 @@ async fn active_scope_reclaims_dormant_pool_capacity() -> io::Result<()> {
     {
         let mut state = pool.inner.state.lock().await;
         for (index, upstream) in idle.into_iter().enumerate() {
+            let scope = HybridScope {
+                target: format!("dormant-{index}"),
+                headers: Vec::new(),
+            };
             state.scopes.insert(
-                HybridScope {
-                    target: format!("dormant-{index}"),
-                    headers: Vec::new(),
-                },
+                scope,
                 ScopeState {
                     target: target.clone(),
                     headers: HeaderMap::new(),
@@ -181,12 +138,12 @@ async fn active_scope_reclaims_dormant_pool_capacity() -> io::Result<()> {
         .scopes
         .get(&active_scope)
         .ok_or_else(|| io::Error::other("active scope missing"))?;
-    assert_eq!(active.connecting, 2);
+    assert_eq!(active.connecting, 7);
     assert_eq!(
         state.scopes.values().map(total_connections).sum::<usize>(),
         MAX_POOL_CONNECTIONS
     );
-    assert_eq!(state.scopes.len(), MAX_POOL_CONNECTIONS - 1);
+    assert_eq!(state.scopes.len(), MAX_POOL_CONNECTIONS - 6);
     drop(state);
     drop(servers);
     drop(connect_listener);

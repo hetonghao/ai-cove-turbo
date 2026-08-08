@@ -15,7 +15,11 @@ use tokio_tungstenite::{
 };
 use url::Url;
 
-use super::{ProxyState, hybrid_pool::HybridScope, private_websocket};
+use super::{
+    ProxyState,
+    hybrid_pool::{ConnectionActivity, ConnectionObservation, HybridScope},
+    private_websocket,
+};
 
 #[path = "hybrid_active.rs"]
 mod active;
@@ -90,6 +94,7 @@ async fn run_after_upgrade(
         .hybrid_pool
         .register(&pool_scope, target.clone(), client_headers.clone())
         .await;
+    let observation_id = state.hybrid_pool.register_observed_session().await;
     let ready = state.hybrid_pool.checkout(&pool_scope).await;
     let mut session = Session {
         state,
@@ -99,6 +104,10 @@ async fn run_after_upgrade(
         path,
         pool_scope,
         ready,
+        observation_id,
+        observed_activity: None,
+        thread_id: None,
+        last_terminal_response_id: None,
     };
     run_session(&mut session, client).await;
 }
@@ -111,6 +120,89 @@ struct Session {
     path: String,
     pool_scope: HybridScope,
     ready: Option<PrivateWebSocket>,
+    observation_id: u64,
+    observed_activity: Option<ConnectionActivity>,
+    thread_id: Option<String>,
+    last_terminal_response_id: Option<String>,
+}
+
+impl Session {
+    async fn bind_thread_id(&mut self, thread_id: Option<String>) -> bool {
+        match (&self.thread_id, thread_id) {
+            (Some(current), Some(next)) => return current == &next,
+            (None, Some(next)) => {
+                self.thread_id = Some(next);
+            }
+            (Some(_) | None, None) => return true,
+        }
+        let Some(thread_id) = self.thread_id.clone() else {
+            return true;
+        };
+        self.state
+            .hybrid_pool
+            .observe_session(
+                self.observation_id,
+                ConnectionObservation::Bound {
+                    thread_id,
+                    has_connection: self.ready.is_some(),
+                },
+            )
+            .await;
+        self.observed_activity = self.ready.as_ref().map(|_| ConnectionActivity::Idle);
+        true
+    }
+
+    async fn observe_activity(&mut self, activity: ConnectionActivity) {
+        if self.thread_id.is_none() || self.observed_activity == Some(activity) {
+            return;
+        }
+        self.state
+            .hybrid_pool
+            .observe_session(self.observation_id, ConnectionObservation::Active(activity))
+            .await;
+        self.observed_activity = Some(activity);
+    }
+
+    async fn observe_idle(&mut self) {
+        if self.thread_id.is_none() || self.observed_activity == Some(ConnectionActivity::Idle) {
+            return;
+        }
+        self.state
+            .hybrid_pool
+            .observe_session(self.observation_id, ConnectionObservation::Idle)
+            .await;
+        self.observed_activity = Some(ConnectionActivity::Idle);
+    }
+
+    async fn observe_recovering(&mut self, reason: impl Into<String>) {
+        if self.thread_id.is_none() {
+            return;
+        }
+        self.state
+            .hybrid_pool
+            .observe_session(
+                self.observation_id,
+                ConnectionObservation::Recovering {
+                    reason: reason.into(),
+                },
+            )
+            .await;
+        self.observed_activity = None;
+    }
+
+    async fn observe_closed(&mut self) {
+        self.state
+            .hybrid_pool
+            .observe_session(
+                self.observation_id,
+                ConnectionObservation::Closed {
+                    reason: "Codex 线程结束".to_owned(),
+                    normal: true,
+                },
+            )
+            .await;
+        self.observed_activity = None;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,9 +225,15 @@ enum WorkerCommand {
 
 enum WorkerEvent {
     Message(Message),
-    Terminal(Option<Box<PrivateWebSocket>>),
+    Terminal {
+        upstream: Option<Box<PrivateWebSocket>>,
+        response_id: Option<String>,
+    },
     Cancelled,
-    Error { code: u16, message: &'static str },
+    Error {
+        code: u16,
+        message: &'static str,
+    },
 }
 
 enum ActiveSelection {
@@ -160,7 +258,13 @@ async fn run_session(session: &mut Session, mut client: ClientWebSocket) {
             let keep_running = match selection {
                 ActiveSelection::Client(message) => match active.as_mut() {
                     Some(active_ref) => {
-                        active::handle_active_client_message(&mut client, active_ref, message).await
+                        active::handle_active_client_message(
+                            &mut client,
+                            session,
+                            active_ref,
+                            message,
+                        )
+                        .await
                     }
                     None => false,
                 },
@@ -228,4 +332,5 @@ async fn cleanup_session(session: &mut Session, active: &mut Option<Active>) {
         .hybrid_pool
         .unregister(&session.pool_scope)
         .await;
+    session.observe_closed().await;
 }

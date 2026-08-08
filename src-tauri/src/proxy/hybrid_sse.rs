@@ -7,22 +7,54 @@ pub(super) enum HttpFallback {
     WebSocketRequired,
 }
 
-pub(super) fn http_request_payload(payload: &[u8]) -> Result<HttpFallback, String> {
+pub(super) struct PreparedResponseCreate {
+    pub(super) fallback: HttpFallback,
+    pub(super) thread_id: Option<String>,
+}
+
+pub(super) fn http_request_payload(payload: &[u8]) -> Result<PreparedResponseCreate, String> {
     let mut value: Value = serde_json::from_slice(payload).map_err(|error| error.to_string())?;
     let object = value
         .as_object_mut()
         .ok_or_else(|| "response.create must be a JSON object".to_owned())?;
+    let thread_id = object
+        .get("client_metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| {
+            metadata
+                .get("x-codex-turn-metadata")
+                .and_then(Value::as_str)
+                .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+                .and_then(|metadata| {
+                    metadata
+                        .get("thread_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .or_else(|| {
+                    metadata
+                        .get("thread_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+        });
     if object
         .get("previous_response_id")
         .and_then(Value::as_str)
         .is_some_and(|response_id| !response_id.is_empty())
     {
-        return Ok(HttpFallback::WebSocketRequired);
+        return Ok(PreparedResponseCreate {
+            fallback: HttpFallback::WebSocketRequired,
+            thread_id,
+        });
     }
     object.remove("type");
     object.insert("stream".to_owned(), Value::Bool(true));
     serde_json::to_vec(&value)
-        .map(HttpFallback::Request)
+        .map(|payload| PreparedResponseCreate {
+            fallback: HttpFallback::Request(payload),
+            thread_id,
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -90,7 +122,7 @@ impl SseParser {
 }
 
 pub(super) fn is_terminal_event(payload: &[u8]) -> bool {
-    if payload == b"[DONE]" {
+    if payload == b"[DONE]" || is_success_terminal_event(payload) {
         return true;
     }
     serde_json::from_slice::<Value>(payload)
@@ -99,13 +131,65 @@ pub(super) fn is_terminal_event(payload: &[u8]) -> bool {
         .is_some_and(|event_type| {
             matches!(
                 event_type.as_str(),
-                "response.completed"
-                    | "response.done"
-                    | "response.failed"
+                "response.failed"
                     | "response.incomplete"
                     | "response.cancelled"
                     | "response.canceled"
                     | "error"
             )
         })
+}
+
+pub(super) fn is_success_terminal_event(payload: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(payload)
+        .ok()
+        .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+        .is_some_and(|event_type| {
+            matches!(event_type.as_str(), "response.completed" | "response.done")
+        })
+}
+
+pub(super) fn success_terminal_response_id(payload: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(payload).ok()?;
+    if !matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("response.completed" | "response.done")
+    ) {
+        return None;
+    }
+    value
+        .pointer("/response/id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+pub(super) fn idle_event_diagnostic(payload: &[u8], last_response_id: Option<&str>) -> String {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return "空闲上游 WebSocket 收到意外二进制消息；解码=JSON失败；事件=未知；响应ID=未知"
+            .to_owned();
+    };
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|event_type| {
+            !event_type.is_empty()
+                && event_type.len() <= 64
+                && event_type
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+        .unwrap_or("未知");
+    let response_id = value
+        .pointer("/response/id")
+        .or_else(|| value.get("response_id"))
+        .and_then(Value::as_str);
+    let response_id_relation = match (response_id, last_response_id) {
+        (None, _) => "缺失",
+        (Some(_), None) => "无历史终态",
+        (Some(current), Some(previous)) if current == previous => "匹配",
+        (Some(_), Some(_)) => "不匹配",
+    };
+    format!(
+        "空闲上游 WebSocket 收到意外二进制消息；解码=成功；事件={event_type}；响应ID={response_id_relation}"
+    )
 }

@@ -43,3 +43,10 @@ pub(super) async fn close_client(client: &mut ClientWebSocket, code: u16, reason
         .await
         .is_ok()
 }
+
+pub(super) async fn reject_thread_switch(client: &mut ClientWebSocket) -> bool {
+    let message = "同一 WebSocket 不能切换 Codex 会话";
+    let _ = send_error(client, "invalid_request", message).await;
+    let _ = close_client(client, 1002, message).await;
+    false
+}

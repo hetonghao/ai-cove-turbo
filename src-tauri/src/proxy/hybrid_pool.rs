@@ -2,26 +2,43 @@ use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
 use tokio::sync::{Mutex, Notify};
-use tokio::time::Instant;
 use url::Url;
 
 use super::{Metrics, private_websocket};
 use private_websocket::{PrivateTlsConfig, PrivateUpstream};
 
-mod expiration;
 mod maintenance;
-pub(super) use maintenance::probe_idle;
+mod observability;
+mod probe;
+pub(crate) use observability::ConnectionSnapshot;
+use observability::{ClosedRecord, ObservedSession};
+pub(super) use observability::{ConnectionActivity, ConnectionObservation};
+pub(super) use probe::probe_idle;
 
 #[cfg(test)]
 #[path = "hybrid_pool_tests.rs"]
 mod tests;
 
 #[cfg(test)]
+#[path = "hybrid_pool_maintenance_tests.rs"]
+mod maintenance_tests;
+
+#[cfg(test)]
 #[path = "hybrid_pool_capacity_tests.rs"]
 mod capacity_tests;
 
-const MAX_POOL_CONNECTIONS: usize = 32;
-const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+#[path = "hybrid_scope_tests.rs"]
+mod scope_tests;
+
+#[cfg(test)]
+#[path = "hybrid_pool_observability_tests.rs"]
+mod observability_tests;
+
+const MAX_POOL_CONNECTIONS: usize = 100;
+const MAX_PREWARM_CONNECTIONS: usize = 6;
+const MIN_PREWARM_CONNECTIONS: usize = 1;
+const ACTIVE_CONNECTIONS_PER_PREWARM_REDUCTION: usize = 5;
 pub(super) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 pub(super) const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -33,12 +50,9 @@ pub(super) struct HybridScope {
 
 impl HybridScope {
     pub(super) fn new(target: &Url, client_headers: &HeaderMap) -> Self {
-        let hop_by_hop = super::hop_by_hop_headers(client_headers);
-        let mut headers = client_headers
+        let connection_headers = blank_connection_headers(client_headers);
+        let mut headers = connection_headers
             .iter()
-            .filter(|(name, _)| {
-                !hop_by_hop.contains(*name) && !private_websocket::is_client_handshake_header(name)
-            })
             .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
             .collect::<Vec<_>>();
         headers.sort_unstable();
@@ -47,6 +61,29 @@ impl HybridScope {
             headers,
         }
     }
+}
+
+fn blank_connection_headers(client_headers: &HeaderMap) -> HeaderMap {
+    let hop_by_hop = super::hop_by_hop_headers(client_headers);
+    client_headers
+        .iter()
+        .filter(|(name, _)| {
+            !hop_by_hop.contains(*name)
+                && !private_websocket::is_client_handshake_header(name)
+                && !matches!(
+                    name.as_str(),
+                    "session-id"
+                        | "thread-id"
+                        | "x-client-request-id"
+                        | "x-codex-installation-id"
+                        | "x-codex-window-id"
+                        | "x-codex-turn-metadata"
+                        | "x-codex-parent-thread-id"
+                        | "x-openai-subagent"
+                )
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 impl fmt::Debug for HybridScope {
@@ -73,7 +110,10 @@ struct PoolInner {
 #[derive(Default)]
 struct PoolState {
     scopes: HashMap<HybridScope, ScopeState>,
-    dormant: HashMap<HybridScope, Instant>,
+    next_session_id: u64,
+    sessions: HashMap<u64, ObservedSession>,
+    next_closed_id: u64,
+    recent_closed: std::collections::VecDeque<ClosedRecord>,
 }
 
 struct ScopeState {
@@ -108,9 +148,9 @@ impl HybridPool {
     }
 
     pub(super) async fn register(&self, scope: &HybridScope, target: Url, headers: HeaderMap) {
+        let headers = blank_connection_headers(&headers);
         {
             let mut state = self.inner.state.lock().await;
-            state.dormant.remove(scope);
             let entry = state
                 .scopes
                 .entry(scope.clone())
@@ -131,7 +171,7 @@ impl HybridPool {
     }
 
     pub(super) async fn unregister(&self, scope: &HybridScope) {
-        let (to_close, deadline) = {
+        let to_close = {
             let mut state = self.inner.state.lock().await;
             let Some(entry) = state.scopes.get_mut(scope) else {
                 return;
@@ -144,18 +184,10 @@ impl HybridPool {
                 .idle
                 .drain(entry.idle.len().saturating_sub(close_count)..)
                 .collect::<Vec<_>>();
-            let deadline =
-                (entry.active_local == 0).then(|| Instant::now() + IDLE_CONNECTION_TIMEOUT);
-            if let Some(deadline) = deadline {
-                state.dormant.insert(scope.clone(), deadline);
-            }
             drop(state);
-            (to_close, deadline)
+            to_close
         };
         self.close_all(to_close).await;
-        if let Some(deadline) = deadline {
-            self.schedule_dormant_expiration(scope.clone(), deadline);
-        }
     }
 
     pub(super) async fn checkout(&self, scope: &HybridScope) -> Option<PrivateUpstream> {
@@ -233,7 +265,14 @@ impl HybridPool {
 }
 
 const fn desired_connections(active_local: usize) -> usize {
-    let desired = active_local.saturating_add(1);
+    let reduced = MAX_PREWARM_CONNECTIONS
+        .saturating_sub(active_local / ACTIVE_CONNECTIONS_PER_PREWARM_REDUCTION);
+    let reserve = if reduced < MIN_PREWARM_CONNECTIONS {
+        MIN_PREWARM_CONNECTIONS
+    } else {
+        reduced
+    };
+    let desired = active_local.saturating_add(reserve);
     if desired > MAX_POOL_CONNECTIONS {
         MAX_POOL_CONNECTIONS
     } else {

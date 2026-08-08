@@ -1,17 +1,13 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
-use futures_util::{SinkExt, StreamExt, future::join_all};
-use tokio_tungstenite::tungstenite::{Bytes, Message};
 use url::Url;
 
 use super::{
     HybridPool, HybridScope, MAX_POOL_CONNECTIONS, PONG_TIMEOUT, PoolInner, PrivateUpstream,
-    desired_connections, total_connections,
+    desired_connections, probe_idle, total_connections,
 };
 use crate::proxy::private_websocket;
-
-const KEEPALIVE_PAYLOAD: &[u8] = b"turbo-hybrid-pool";
 
 #[derive(Clone)]
 struct ConnectionSpec {
@@ -142,38 +138,37 @@ impl HybridPool {
     }
 
     pub(super) async fn maintain_once(&self, scope: &HybridScope, pong_timeout: Duration) {
-        let idle = {
+        let upstream = {
             let mut state = self.inner.state.lock().await;
             let Some(entry) = state.scopes.get_mut(scope) else {
                 return;
             };
-            let idle = std::mem::take(&mut entry.idle);
-            entry.probing = entry.probing.saturating_add(idle.len());
+            // ponytail: 唯一 reserve 必须保持可领取；仅在监控确认陈旧失败后再做 replace-before-probe。
+            if entry.idle.len() <= 1 {
+                return;
+            }
+            let upstream = entry.idle.remove(0);
+            entry.probing = entry.probing.saturating_add(1);
             drop(state);
-            idle
+            upstream
         };
-        let probed = idle.len();
-        let results = join_all(
-            idle.into_iter()
-                .map(|upstream| probe_idle(upstream, pong_timeout)),
-        )
-        .await;
-        let mut healthy = results.into_iter().flatten().collect::<Vec<_>>();
-        let failed = probed.saturating_sub(healthy.len());
+        let healthy = probe_idle(upstream, pong_timeout).await;
+        let succeeded = healthy.is_some();
         {
             let mut state = self.inner.state.lock().await;
             let Some(entry) = state.scopes.get_mut(scope) else {
                 return;
             };
-            entry.probing = entry.probing.saturating_sub(probed);
-            entry.idle.append(&mut healthy);
+            entry.probing = entry.probing.saturating_sub(1);
+            if let Some(upstream) = healthy {
+                entry.idle.push(upstream);
+            }
             drop(state);
         }
-        for _ in 0..failed {
-            self.inner.metrics.record_websocket_closed();
-        }
-        if failed < probed {
+        if succeeded {
             self.inner.ready.notify_waiters();
+        } else {
+            self.inner.metrics.record_websocket_closed();
         }
         self.refill(scope).await;
     }
@@ -231,40 +226,4 @@ fn spawn_connection(inner: Arc<PoolInner>, scope: HybridScope, spec: ConnectionS
             let _ = tokio::time::timeout(PONG_TIMEOUT, upstream.close(None)).await;
         }
     });
-}
-
-pub(in crate::proxy) async fn probe_idle(
-    mut upstream: PrivateUpstream,
-    pong_timeout: Duration,
-) -> Option<PrivateUpstream> {
-    let payload = Bytes::from_static(KEEPALIVE_PAYLOAD);
-    let healthy = tokio::time::timeout(pong_timeout, async {
-        if upstream.send(Message::Ping(payload.clone())).await.is_err() {
-            return false;
-        }
-        loop {
-            match upstream.next().await {
-                Some(Ok(Message::Pong(received))) if received == payload => return true,
-                Some(Ok(Message::Pong(_))) => {}
-                Some(Ok(Message::Ping(received))) => {
-                    if upstream.send(Message::Pong(received)).await.is_err() {
-                        return false;
-                    }
-                }
-                Some(
-                    Ok(
-                        Message::Close(_)
-                        | Message::Text(_)
-                        | Message::Binary(_)
-                        | Message::Frame(_),
-                    )
-                    | Err(_),
-                )
-                | None => return false,
-            }
-        }
-    })
-    .await
-    .unwrap_or(false);
-    healthy.then_some(upstream)
 }

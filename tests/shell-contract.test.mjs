@@ -136,6 +136,28 @@ test("配置主状态用最多五条 Strands 表达验证进度", async () => {
   assert.equal(configPanel.match(/class="b-control__icon"[^>]*><svg/g)?.length, 4);
 });
 
+test("实时 Strands 打开紧凑的非模态 WebSocket 连接检查器", async () => {
+  const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const css = await readFile(new URL("styles.css", sourceUrl), "utf8");
+  const app = await readFile(new URL("app.js", sourceUrl), "utf8");
+  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const livePanel = html.slice(html.indexOf('id="panel-live"'), html.indexOf('id="panel-statistics"'));
+
+  assert.match(livePanel, /data-action="toggle-connections"[\s\S]*aria-controls="connection-inspector"/);
+  assert.match(livePanel, /id="connection-inspector"[\s\S]*aria-modal="false"/);
+  assert.doesNotMatch(livePanel, /connection-backdrop|aria-modal="true"/);
+
+  const groups = ["prewarm", "bound", "transitions", "closed"]
+    .map((name) => livePanel.indexOf(`data-connection-group="${name}"`));
+  assert.ok(groups.every((index) => index >= 0));
+  assert.deepEqual(groups, [...groups].sort((left, right) => left - right));
+
+  assert.match(css, /\.c-connection-inspector\s*{[\s\S]*position:\s*fixed;[\s\S]*right:/);
+  assert.match(css, /\.c-connection-inspector\s*{[\s\S]*max-height:/);
+  assert.match(app, /get_connection_snapshot/);
+  assert.match(rust, /async fn get_connection_snapshot/);
+});
+
 test("开机自启动保持后台且发布流程收集真实 updater 包", async () => {
   const tauriConfig = JSON.parse(
     await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),

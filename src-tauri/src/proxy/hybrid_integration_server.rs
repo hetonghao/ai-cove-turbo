@@ -53,37 +53,94 @@ impl Fixture {
         &self,
         mut websocket: WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
     ) {
-        let Some(Ok(Message::Binary(payload))) = websocket.next().await else {
-            return;
-        };
-        if decode_private_message(&payload).is_err() {
-            return;
-        }
-        self.record(|counts| counts.private_messages += 1).await;
-        if matches!(self.config.private, PrivateBehavior::ActiveFailure)
-            && self.counts().await.private_messages == 1
-        {
-            return;
-        }
-        let Ok(envelope) = encode_private_message(br#"{"type":"response.completed"}"#, false)
-        else {
-            return;
-        };
-        if websocket
-            .send(Message::Binary(Bytes::from(envelope)))
-            .await
-            .is_err()
-        {
-            return;
-        }
-        if matches!(self.config.private, PrivateBehavior::IdleRestart) {
-            let _ = websocket
-                .send(Message::Close(Some(CloseFrame {
-                    code: CloseCode::from(1012),
-                    reason: "restart".into(),
-                })))
-                .await;
-            self.record(|counts| counts.idle_restarts += 1).await;
+        let mut previous_response_id: Option<String> = None;
+        loop {
+            let Some(Ok(Message::Binary(payload))) = websocket.next().await else {
+                return;
+            };
+            if decode_private_message(&payload).is_err() {
+                return;
+            }
+            self.record(|counts| counts.private_messages += 1).await;
+            if matches!(self.config.private, PrivateBehavior::ActiveFailure)
+                && self.counts().await.private_messages == 1
+            {
+                return;
+            }
+            if matches!(self.config.private, PrivateBehavior::HoldResponse) {
+                self.state.release_private.notified().await;
+            }
+            if matches!(self.config.private, PrivateBehavior::TerminalTail)
+                && let Some(response_id) = previous_response_id.as_deref()
+            {
+                let tail = serde_json::json!({
+                    "type": "response.done",
+                    "response": {"id": response_id},
+                    "timing": {"upstream_ms": 1},
+                    "metadata": {"source": "fixture"},
+                });
+                let Ok(tail) = serde_json::to_vec(&tail)
+                    .map_err(|_| ())
+                    .and_then(|tail| encode_private_message(&tail, false).map_err(|_| ()))
+                else {
+                    return;
+                };
+                if websocket
+                    .send(Message::Binary(Bytes::from(tail)))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let response_index = self.counts().await.private_messages;
+            let response_id = format!("response-{response_index}");
+            let completed = serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": response_id},
+            });
+            let Ok(envelope) = serde_json::to_vec(&completed)
+                .map_err(|_| ())
+                .and_then(|completed| encode_private_message(&completed, false).map_err(|_| ()))
+            else {
+                return;
+            };
+            if websocket
+                .send(Message::Binary(Bytes::from(envelope)))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if matches!(self.config.private, PrivateBehavior::IdleMessage) {
+                let Ok(unexpected) = encode_private_message(
+                    br#"{"type":"response.output_text.delta","secret":"must-not-persist"}"#,
+                    false,
+                ) else {
+                    return;
+                };
+                let _ = websocket
+                    .send(Message::Binary(Bytes::from(unexpected)))
+                    .await;
+            }
+            previous_response_id = Some(response_id);
+            if matches!(self.config.private, PrivateBehavior::IdleRestart) {
+                let _ = websocket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::from(1012),
+                        reason: "restart".into(),
+                    })))
+                    .await;
+                self.record(|counts| counts.idle_restarts += 1).await;
+            }
+            if !matches!(
+                self.config.private,
+                PrivateBehavior::HoldResponse
+                    | PrivateBehavior::Persistent
+                    | PrivateBehavior::TerminalTail
+            ) {
+                return;
+            }
         }
     }
 }

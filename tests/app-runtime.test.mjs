@@ -4,11 +4,13 @@ import test from "node:test";
 import vm from "node:vm";
 
 function element(dataset = {}) {
+  const attributes = new Map();
   return {
+    attributes,
     dataset,
     hidden: false,
     style: { setProperty() {} },
-    setAttribute() {},
+    setAttribute(name, value) { attributes.set(name, String(value)); },
     focus() {},
   };
 }
@@ -270,6 +272,124 @@ test("Strands 数量跟随五项聚合状态转绿", async () => {
   // Then: 只保留其余四条。
   assert.equal(counts.at(-1), 4);
   assert.deepEqual(strands.map((canvas) => canvas.dataset.count), ["4", "4"]);
+});
+
+test("连接检查器只在打开时读取快照并支持 Escape 关闭", async () => {
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  const trigger = element({ action: "toggle-connections" });
+  trigger.focused = false;
+  trigger.focus = () => { trigger.focused = true; };
+  trigger.closest = (selector) => selector === "[data-action]" ? trigger : null;
+  const panel = motionElement({ connectionPanel: "" }, true);
+  const total = element({ connectionTotal: "" });
+  const prewarmCount = element({ connectionCount: "prewarm" });
+  const boundCount = element({ connectionCount: "bound" });
+  const transitionCount = element({ connectionCount: "transitions" });
+  const closedCount = element({ connectionCount: "closed" });
+  const prewarm = element({ connectionList: "prewarm" });
+  const bound = element({ connectionList: "bound" });
+  const transitions = element({ connectionList: "transitions" });
+  let transitionHtml = "";
+  let transitionDetails = [];
+  Object.defineProperty(transitions, "innerHTML", {
+    get() { return transitionHtml; },
+    set(value) {
+      transitionHtml = String(value);
+      transitionDetails = Array.from(
+        transitionHtml.matchAll(/data-transition-id="([^"]+)"/gu),
+        (match) => ({ dataset: { transitionId: match[1] }, open: false }),
+      );
+    },
+  });
+  transitions.querySelectorAll = (selector) => selector === "details[open][data-transition-id]"
+    ? transitionDetails.filter((item) => item.open)
+    : transitionDetails;
+  const closed = element({ connectionList: "closed" });
+  const message = element({ connectionMessage: "" });
+  message.hidden = true;
+  const selectors = new Map([
+    ["[data-connection-panel]", panel],
+    ["[data-connection-total]", total],
+    ['[data-connection-count="prewarm"]', prewarmCount],
+    ['[data-connection-count="bound"]', boundCount],
+    ['[data-connection-count="transitions"]', transitionCount],
+    ['[data-connection-count="closed"]', closedCount],
+    ['[data-connection-list="prewarm"]', prewarm],
+    ['[data-connection-list="bound"]', bound],
+    ['[data-connection-list="transitions"]', transitions],
+    ['[data-connection-list="closed"]', closed],
+    ["[data-connection-message]", message],
+    ['[data-action="toggle-connections"]', trigger],
+  ]);
+  const invoked = [];
+  const snapshot = {
+    prewarm: 2,
+    boundThreads: [
+      { id: "S001", threadId: "thread-9f31a2", activity: "down", idleSeconds: 0, reclaimPolicy: "threadEnd" },
+      { id: "S002", threadId: "thread-a7b44c", activity: "idle", idleSeconds: 18, reclaimPolicy: "threadEnd" },
+    ],
+    transitions: [{ id: "S003", label: "恢复绑定连接", stage: "等待可用连接", detail: "上游关闭", elapsedSeconds: 2 }],
+    recentClosed: [{ id: "C001", threadId: "thread-old", reason: "Codex 线程结束", agoSeconds: 8, normal: true }],
+  };
+  let onClick;
+  let onKeydown;
+  let onTick;
+  const document = {
+    hidden: false,
+    readyState: "complete",
+    body: element(),
+    addEventListener(type, handler) {
+      if (type === "click") onClick = handler;
+      if (type === "keydown") onKeydown = handler;
+    },
+    querySelector(selector) { return selectors.get(selector) ?? null; },
+    querySelectorAll(selector) {
+      if (selector === "[data-action]") return [trigger];
+      return [];
+    },
+  };
+  const window = {
+    __TAURI__: { core: { invoke: async (command) => {
+      invoked.push(command);
+      return command === "get_connection_snapshot"
+        ? snapshot
+        : { serviceHealthy: true, configState: "managed", trafficWindows: [], recentRequests: [] };
+    } } },
+    location: { href: "tauri://localhost/?tab=live" },
+    history: { replaceState() {} },
+    matchMedia: () => ({ matches: false }),
+    addEventListener() {},
+    setInterval(handler) { onTick = handler; },
+  };
+
+  await runApp(source, { document, Error, window, URL, Intl });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(invoked, ["get_app_status"]);
+
+  onClick({ target: trigger });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(panel.hidden, false);
+  assert.equal(trigger.attributes.get("aria-expanded"), "true");
+  assert.equal(invoked.at(-1), "get_connection_snapshot");
+  assert.equal(total.textContent, "4");
+  assert.match(prewarm.innerHTML, /容量压力时回收/);
+  assert.match(bound.innerHTML, /zzz/);
+  assert.match(bound.innerHTML, /随线程结束回收/);
+  assert.match(transitions.innerHTML, /<details/);
+  assert.match(closed.innerHTML, /Codex 线程结束/);
+
+  transitionDetails[0].open = true;
+  await onTick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(invoked.slice(-2), ["get_app_status", "get_connection_snapshot"]);
+  assert.equal(transitionDetails[0].dataset.transitionId, "S003");
+  assert.equal(transitionDetails[0].open, true);
+
+  onKeydown({ key: "Escape", target: { closest: () => null } });
+  assert.equal(panel.hidden, true);
+  assert.equal(trigger.attributes.get("aria-expanded"), "false");
+  assert.equal(trigger.focused, true);
 });
 
 test("非 AI Cove 上游接管后仍持续显示兼容性警告", async () => {

@@ -55,7 +55,7 @@
                 </section>
 
                 <section class="c-side-section" aria-labelledby="live-health-title">
-                  <header class="c-health-heading"><div><span class="c-overline">HEALTH</span><h2 id="live-health-title">实时状态</h2></div><canvas class="c-health-strands" data-strands data-count="0" role="img" aria-label="0/5 项已验证"></canvas></header>
+                  <header class="c-health-heading"><div><span class="c-overline">HEALTH</span><h2 id="live-health-title">实时状态</h2></div><button class="c-health-strands-button" type="button" data-action="toggle-connections" aria-controls="connection-inspector" aria-expanded="false" aria-haspopup="dialog" title="查看当前 WebSocket 连接"><canvas class="c-health-strands" data-strands data-count="0" aria-hidden="true"></canvas><span class="sr-only">查看当前 WebSocket 连接</span></button></header>
                   <ul class="c-health-list">
                     <li><span>服务</span><strong class="c-state state-indicator" data-state="service-runtime" data-status="waiting">正在读取</strong></li>
                     <li><span>配置</span><strong class="c-state state-indicator" data-state="config-runtime" data-status="waiting">检查中</strong></li>
@@ -100,6 +100,21 @@
             </div>
             <footer class="c-footer"><span>LIVE / LOCAL TRAFFIC</span><span>NO REQUEST BODY RETAINED</span><span data-state="runtime-mode">STARTING</span></footer>
           </div>
+
+          <aside id="connection-inspector" class="c-connection-inspector" data-connection-panel role="dialog" aria-modal="false" aria-labelledby="connection-inspector-title" hidden>
+            <header class="c-connection-inspector__header">
+              <div><span class="c-overline">WEBSOCKET / LIVE POOL</span><h2 id="connection-inspector-title">当前连接 <em data-connection-total>0</em></h2></div>
+              <button type="button" data-action="close-connections" aria-label="关闭连接检查器">×</button>
+            </header>
+            <div class="c-connection-legend" aria-label="连接状态图例"><span><i class="c-ws-icon" data-connection-state="warm" aria-hidden="true"></i>空白预热</span><span><i class="c-ws-icon" data-connection-state="active" aria-hidden="true"></i>正在传输</span><span><i class="c-ws-icon" data-connection-state="bound" aria-hidden="true"></i>绑定线程 · 空闲</span></div>
+            <div class="c-connection-groups">
+              <section class="c-connection-group" data-connection-group="prewarm"><header><h3>预热池</h3><span data-connection-count="prewarm">0</span></header><div class="c-connection-chips" data-connection-list="prewarm"><span class="c-connection-empty">暂无可用连接</span></div></section>
+              <section class="c-connection-group" data-connection-group="bound"><header><h3>绑定线程</h3><span data-connection-count="bound">0</span></header><div class="c-connection-chips" data-connection-list="bound"><span class="c-connection-empty">暂无绑定线程</span></div></section>
+              <section class="c-connection-group" data-connection-group="transitions"><header><h3>建立 / 恢复中</h3><span data-connection-count="transitions">0</span></header><div class="c-connection-transitions" data-connection-list="transitions"><span class="c-connection-empty">当前没有连接操作</span></div></section>
+              <section class="c-connection-group" data-connection-group="closed"><header><h3>近期关闭</h3><span data-connection-count="closed">0</span></header><div class="c-connection-chips" data-connection-list="closed"><span class="c-connection-empty">暂无关闭记录</span></div></section>
+            </div>
+            <aside class="c-connection-message" data-connection-message aria-live="polite" hidden></aside>
+          </aside>
         </section>
 
         <section id="panel-statistics" class="tab-panel variant variant--c" role="tabpanel" aria-labelledby="tab-statistics" data-panel="statistics" hidden>

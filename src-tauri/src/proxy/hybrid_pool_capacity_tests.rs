@@ -7,8 +7,21 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::protocol::
 use super::*;
 
 #[test]
-fn twenty_local_sessions_keep_one_warm_spare() {
-    assert_eq!(desired_connections(20), 21);
+fn warm_reserve_decreases_with_active_sessions() {
+    assert_eq!(desired_connections(0), 6);
+    assert_eq!(desired_connections(4), 10);
+    assert_eq!(desired_connections(5), 10);
+    assert_eq!(desired_connections(10), 14);
+    assert_eq!(desired_connections(15), 18);
+    assert_eq!(desired_connections(20), 22);
+    assert_eq!(desired_connections(25), 26);
+    assert_eq!(desired_connections(30), 31);
+}
+
+#[test]
+fn warm_spare_yields_at_one_hundred_connection_ceiling() {
+    assert_eq!(desired_connections(99), 100);
+    assert_eq!(desired_connections(100), 100);
 }
 
 #[tokio::test]
@@ -62,15 +75,24 @@ async fn released_session_connection_is_not_returned_to_blank_pool() -> io::Resu
 }
 
 #[tokio::test]
-async fn dormant_scope_is_removed_after_idle_deadline() -> io::Result<()> {
+async fn inactive_scope_keeps_full_warm_reserve() -> io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let address = listener.local_addr()?;
-    let client_stream = TcpStream::connect(address).await?;
-    let (server_stream, _) = listener.accept().await?;
-    let client =
-        WebSocketStream::from_raw_socket(MaybeTlsStream::Plain(client_stream), Role::Client, None)
-            .await;
-    let _server = WebSocketStream::from_raw_socket(server_stream, Role::Server, None).await;
+    let mut clients = Vec::new();
+    let mut servers = Vec::new();
+    for _ in 0..6 {
+        let client_stream = TcpStream::connect(address).await?;
+        let (server_stream, _) = listener.accept().await?;
+        clients.push(
+            WebSocketStream::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            )
+            .await,
+        );
+        servers.push(WebSocketStream::from_raw_socket(server_stream, Role::Server, None).await);
+    }
     let metrics = Arc::new(Metrics::default());
     let tls_config = rustls::ClientConfig::builder()
         .with_root_certificates(RootCertStore::empty())
@@ -90,60 +112,20 @@ async fn dormant_scope_is_removed_after_idle_deadline() -> io::Result<()> {
                 leased: 0,
                 connecting: 0,
                 probing: 0,
-                idle: vec![client],
+                idle: clients,
             },
         );
     }
     pool.unregister(&scope).await;
-    let deadline = *pool
-        .inner
-        .state
-        .lock()
-        .await
-        .dormant
-        .get(&scope)
-        .ok_or_else(|| io::Error::other("dormant deadline missing"))?;
-
-    pool.expire_dormant(&scope, deadline).await;
-
-    assert!(!pool.inner.state.lock().await.scopes.contains_key(&scope));
-    Ok(())
-}
-
-#[tokio::test]
-async fn stale_deadline_keeps_reactivated_scope() -> io::Result<()> {
-    let metrics = Arc::new(Metrics::default());
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(RootCertStore::empty())
-        .with_no_client_auth();
-    let pool = HybridPool::new(PrivateTlsConfig::new(Arc::new(tls_config)), metrics);
-    let target = Url::parse("http://127.0.0.1:9/v1/responses").map_err(io::Error::other)?;
-    let scope = HybridScope::new(&target, &HeaderMap::new());
-    let deadline = tokio::time::Instant::now();
-    {
-        let mut state = pool.inner.state.lock().await;
-        state.scopes.insert(
-            scope.clone(),
-            ScopeState {
-                target,
-                headers: HeaderMap::new(),
-                initialized: true,
-                active_local: 1,
-                leased: 1,
-                connecting: 0,
-                probing: 0,
-                idle: Vec::new(),
-            },
-        );
-        state.dormant.insert(scope.clone(), deadline);
-    }
-
-    pool.expire_dormant(&scope, deadline).await;
 
     let state = pool.inner.state.lock().await;
-    assert!(state.scopes.contains_key(&scope));
-    assert!(!state.dormant.contains_key(&scope));
+    let entry = state
+        .scopes
+        .get(&scope)
+        .ok_or_else(|| io::Error::other("inactive scope missing"))?;
+    assert_eq!(entry.idle.len(), 6);
     drop(state);
+    drop(servers);
     Ok(())
 }
 

@@ -21,6 +21,7 @@ use std::{
     time::Duration,
 };
 
+use proxy::ConnectionSnapshot;
 use runtime::{AppRuntime, AppStatus, RuntimePaths};
 use tauri::{
     AppHandle, Manager, RunEvent, State, WindowEvent,
@@ -49,6 +50,7 @@ pub fn run() -> tauri::Result<()> {
         .plugin(updater.build())
         .invoke_handler(tauri::generate_handler![
             get_app_status,
+            get_connection_snapshot,
             set_compression,
             set_websocket,
             set_autostart,
@@ -181,6 +183,13 @@ fn quit_after_restore(app: &AppHandle) {
 #[tauri::command]
 async fn get_app_status(runtime: State<'_, Arc<AppRuntime>>) -> Result<AppStatus, String> {
     Ok(runtime.status().await)
+}
+
+#[tauri::command]
+async fn get_connection_snapshot(
+    runtime: State<'_, Arc<AppRuntime>>,
+) -> Result<ConnectionSnapshot, String> {
+    Ok(runtime.connection_snapshot().await)
 }
 
 #[tauri::command]

@@ -35,6 +35,7 @@ mod hybrid_pool;
 mod private_websocket;
 pub(crate) mod traffic;
 
+pub(crate) use hybrid_pool::ConnectionSnapshot;
 use private_websocket::{PrivateTlsConfig, client_upgrade_response};
 
 #[cfg(test)]
@@ -344,6 +345,7 @@ impl Metrics {
 #[derive(Debug)]
 pub(crate) struct ProxyHandle {
     endpoint: String,
+    hybrid_pool: hybrid_pool::HybridPool,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
 }
@@ -351,6 +353,10 @@ pub(crate) struct ProxyHandle {
 impl ProxyHandle {
     pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    pub(crate) async fn connection_snapshot(&self) -> ConnectionSnapshot {
+        self.hybrid_pool.connection_snapshot().await
     }
 
     pub(crate) async fn stop(mut self) {
@@ -429,7 +435,7 @@ pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, Pr
             .build()
             .map_err(ProxyError::Client)?,
         websocket_client: Client::builder(TokioExecutor::new()).build(websocket_connector),
-        hybrid_pool,
+        hybrid_pool: hybrid_pool.clone(),
         max_request_body_bytes: if options.max_request_body_bytes == 0 {
             DEFAULT_MAX_REQUEST_BODY_BYTES
         } else {
@@ -468,6 +474,7 @@ pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, Pr
 
     Ok(ProxyHandle {
         endpoint,
+        hybrid_pool,
         shutdown: Some(shutdown_tx),
         task,
     })

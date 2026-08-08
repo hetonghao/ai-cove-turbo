@@ -24,7 +24,7 @@ use crate::{
         set_managed_websocket, take_over,
     },
     proxy::{
-        Metrics, ProxyHandle, ProxyOptions, start_proxy,
+        ConnectionSnapshot, Metrics, ProxyHandle, ProxyOptions, start_proxy,
         traffic::{RequestEvent, TrafficWindow},
     },
 };
@@ -364,6 +364,14 @@ impl AppRuntime {
             status.config_message = "已观察到 Codex 请求经过 Turbo".to_owned();
         }
         status
+    }
+
+    pub(crate) async fn connection_snapshot(&self) -> ConnectionSnapshot {
+        let proxy = self.proxy.lock().await;
+        match proxy.as_ref() {
+            Some(proxy) => proxy.connection_snapshot().await,
+            None => ConnectionSnapshot::default(),
+        }
     }
 
     pub(crate) fn set_compression(&self, enabled: bool) {
