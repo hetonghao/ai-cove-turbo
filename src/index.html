@@ -84,12 +84,15 @@
                       <button type="button" data-action="clear-stream">清空</button>
                     </div>
                   </header>
-                  <div class="c-terminal__window" role="region" aria-label="实时请求列表" tabindex="0">
-                    <table class="c-terminal-table">
-                      <thead><tr><th scope="col">时间</th><th scope="col">状态</th><th scope="col">请求</th><th scope="col">原始 → 发送</th><th scope="col">传输方式</th><th scope="col">节省率</th></tr></thead>
-                      <tbody data-request-stream></tbody>
-                    </table>
-                    <p class="c-terminal__empty" data-stream-empty>等待第一条真实请求。</p>
+                  <div class="c-terminal__body">
+                    <div class="c-terminal__window" role="region" aria-label="实时请求列表" tabindex="0">
+                      <table class="c-terminal-table">
+                        <thead><tr><th scope="col">时间</th><th scope="col">状态</th><th scope="col">请求</th><th scope="col">原始 → 发送</th><th scope="col">传输方式</th><th scope="col">节省率</th></tr></thead>
+                        <tbody data-request-stream></tbody>
+                      </table>
+                      <p class="c-terminal__empty" data-stream-empty>等待第一条真实请求。</p>
+                    </div>
+                    <button class="c-terminal__follow" type="button" data-action="follow-live" data-live-follow hidden><span aria-hidden="true">↓</span><span data-live-follow-label aria-live="polite">回到最新</span></button>
                   </div>
                   <footer class="c-terminal__footer"><span><i aria-hidden="true"></i>内容与密钥不记录</span><span>当前窗口 <strong data-live-count>0</strong> 条</span><span>最近 100 条 · WS 连接 <strong data-state="websocket-handshakes">0</strong> · HTTP 回退 <strong data-state="http-fallbacks">0</strong></span></footer>
                 </section>

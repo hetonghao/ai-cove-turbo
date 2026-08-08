@@ -38,6 +38,80 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
+async function liveTailHarness() {
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  let status = {
+    serviceHealthy: true,
+    configState: "managed",
+    recentRequests: [
+      { id: 1, timestampMs: 1_000, status: 200, path: "/v1/responses", rawBytes: 100, sentBytes: 60, transport: "HTTP", result: "success" },
+    ],
+    trafficWindows: [],
+  };
+  const requestStream = element();
+  requestStream.innerHTML = "";
+  requestStream.insertAdjacentHTML = (_position, value) => { requestStream.innerHTML += value; };
+  let onScroll;
+  const terminal = {
+    scrollHeight: 300,
+    scrollTop: 0,
+    clientHeight: 100,
+    addEventListener(type, handler) {
+      if (type === "scroll") onScroll = handler;
+    },
+  };
+  const follow = element({ action: "follow-live", liveFollow: "" });
+  follow.hidden = true;
+  follow.closest = (selector) => selector === "[data-action]" ? follow : null;
+  const followLabel = element({ liveFollowLabel: "" });
+  const selectors = new Map([
+    ["[data-request-stream]", requestStream],
+    [".c-terminal__window", terminal],
+    ["[data-live-follow]", follow],
+    ["[data-live-follow-label]", followLabel],
+  ]);
+  let onClick;
+  let onTick;
+  const document = {
+    hidden: false,
+    readyState: "complete",
+    body: element(),
+    addEventListener(type, handler) {
+      if (type === "click") onClick = handler;
+    },
+    querySelector(selector) { return selectors.get(selector) ?? null; },
+    querySelectorAll() { return []; },
+  };
+  const window = {
+    __TAURI__: { core: { invoke: async () => status } },
+    location: { href: "tauri://localhost/?tab=live" },
+    history: { replaceState() {} },
+    addEventListener() {},
+    setInterval(handler) { onTick = handler; },
+  };
+
+  await runApp(source, { document, window, URL, Intl });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  return {
+    follow,
+    followLabel,
+    terminal,
+    async click(action) {
+      const control = action === "follow-live" ? follow : element({ action });
+      control.closest = (selector) => selector === "[data-action]" ? control : null;
+      onClick({ target: control });
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+    scrollTo(scrollTop) {
+      terminal.scrollTop = scrollTop;
+      onScroll();
+    },
+    setRequests(recentRequests) { status = { ...status, recentRequests }; },
+    tick: () => onTick(),
+  };
+}
+
 test("Tauri 首帧在真实状态返回前保持未验证", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const states = [
@@ -388,4 +462,58 @@ test("条件区域从隐藏变为可见时播放轻量反馈", async () => {
     Array.from(installUpdate.animations[0].keyframes, (frame) => frame.opacity),
     [0, 1],
   );
+});
+
+test("相同状态轮询不改变实时终端的滚动位置", async () => {
+  const live = await liveTailHarness();
+  assert.equal(live.terminal.scrollTop, live.terminal.scrollHeight);
+
+  live.scrollTo(176);
+  await live.tick();
+  assert.equal(live.terminal.scrollTop, 176);
+  assert.equal(live.follow.hidden, true);
+
+  live.scrollTo(175);
+  await live.tick();
+  assert.equal(live.terminal.scrollTop, 175);
+  assert.equal(live.follow.hidden, false);
+});
+
+test("上滚后继续追加请求并提供回到最新操作", async () => {
+  const live = await liveTailHarness();
+  live.scrollTo(80);
+  assert.equal(live.follow.hidden, false);
+  assert.equal(live.followLabel.textContent, "回到最新");
+
+  live.setRequests([
+    { id: 1, timestampMs: 1_000, status: 200, path: "/v1/responses", rawBytes: 100, sentBytes: 60, transport: "HTTP", result: "success" },
+    { id: 2, timestampMs: 2_000, status: 200, path: "/v1/responses", rawBytes: 120, sentBytes: 60, transport: "WS", result: "success" },
+  ]);
+  await live.tick();
+
+  assert.equal(live.terminal.scrollTop, 80);
+  assert.equal(live.followLabel.textContent, "1 条新请求");
+  await live.click("follow-live");
+  assert.equal(live.terminal.scrollTop, live.terminal.scrollHeight);
+  assert.equal(live.follow.hidden, true);
+  assert.equal(live.followLabel.textContent, "回到最新");
+});
+
+test("手动滚到底部或清空终端会恢复跟随", async () => {
+  const live = await liveTailHarness();
+  live.scrollTo(80);
+  live.scrollTo(live.terminal.scrollHeight - live.terminal.clientHeight);
+  assert.equal(live.follow.hidden, true);
+
+  live.scrollTo(80);
+  await live.click("clear-stream");
+  assert.equal(live.follow.hidden, true);
+  assert.equal(live.followLabel.textContent, "回到最新");
+});
+
+test("实时终端提供可访问的回到最新操作", async () => {
+  const html = await readFile(new URL("../src/index.html", import.meta.url), "utf8");
+
+  assert.match(html, /data-action="follow-live"[^>]*data-live-follow[^>]*hidden/);
+  assert.match(html, /data-live-follow-label[^>]*aria-live="polite"[^>]*>回到最新</);
 });

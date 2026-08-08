@@ -4,6 +4,7 @@
   const TABS = ["live", "statistics", "config"];
   const RANGE_LABELS = { 1: "最近 1 分钟", 10: "最近 10 分钟", 60: "最近 1 小时", 1440: "最近 1 天" };
   const ROLLING_WINDOWS = [1, 10, 60, 1440];
+  const LIVE_TAIL_THRESHOLD_PX = 24;
   const invoke = window.__TAURI__?.core?.invoke;
   const telemetry = window.TurboTelemetry;
   const numberFormatter = new Intl.NumberFormat("zh-CN");
@@ -124,6 +125,9 @@
   let pendingAction = "";
   let refreshing = false;
   let streamPaused = false;
+  let liveTailFollowing = true;
+  let unseenLiveRequests = 0;
+  let liveStreamChanged = true;
   let clearedThroughId = 0;
   let displayedRequests = [];
   let renderedBarMarkup = "";
@@ -509,9 +513,29 @@
 
   function syncLiveRequests() {
     if (streamPaused) return;
-    displayedRequests = (Array.isArray(state.recentRequests) ? state.recentRequests : [])
+    const nextRequests = (Array.isArray(state.recentRequests) ? state.recentRequests : [])
       .filter((request) => Number(request.id) > clearedThroughId)
       .slice(-100);
+    const currentIds = new Set(displayedRequests.map((request) => String(request.id)));
+    const nextIds = nextRequests.map((request) => String(request.id));
+    liveStreamChanged ||= nextIds.length !== displayedRequests.length || nextIds.some((id, index) => id !== String(displayedRequests[index]?.id));
+    if (!liveTailFollowing) unseenLiveRequests += nextIds.filter((id) => !currentIds.has(id)).length;
+    displayedRequests = nextRequests;
+  }
+
+  function renderLiveFollow() {
+    const control = $("[data-live-follow]");
+    if (control) control.hidden = liveTailFollowing;
+    const label = $("[data-live-follow-label]");
+    if (label) label.textContent = unseenLiveRequests ? `${numberFormatter.format(unseenLiveRequests)} 条新请求` : "回到最新";
+  }
+
+  function followLiveTail() {
+    liveTailFollowing = true;
+    unseenLiveRequests = 0;
+    const terminal = $(".c-terminal__window");
+    if (terminal) terminal.scrollTop = terminal.scrollHeight;
+    renderLiveFollow();
   }
 
   function renderLiveStream() {
@@ -542,7 +566,9 @@
     const actionLabel = $("[data-live-action-label]");
     if (actionLabel) actionLabel.textContent = streamPaused ? "继续" : "暂停";
     const terminal = $(".c-terminal__window");
-    if (terminal && !streamPaused) terminal.scrollTop = terminal.scrollHeight;
+    if (terminal && !streamPaused && liveTailFollowing && liveStreamChanged) terminal.scrollTop = terminal.scrollHeight;
+    liveStreamChanged = false;
+    renderLiveFollow();
   }
 
   function syncChartTabStops() {
@@ -686,6 +712,10 @@
       selectTab("config", { focus: true });
       return;
     }
+    if (action === "follow-live") {
+      followLiveTail();
+      return;
+    }
     if (action === "toggle-stream") {
       streamPaused = !streamPaused;
       if (!streamPaused) syncLiveRequests();
@@ -695,6 +725,9 @@
     if (action === "clear-stream") {
       clearedThroughId = Math.max(clearedThroughId, ...(state.recentRequests ?? []).map((request) => Number(request.id) || 0));
       displayedRequests = [];
+      liveTailFollowing = true;
+      unseenLiveRequests = 0;
+      liveStreamChanged = true;
       renderLiveStream();
       return;
     }
@@ -854,6 +887,12 @@
   function init() {
     state.tab = readTab();
     syncLiveRequests();
+    const terminal = $(".c-terminal__window");
+    terminal?.addEventListener("scroll", () => {
+      liveTailFollowing = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight <= LIVE_TAIL_THRESHOLD_PX;
+      if (liveTailFollowing) unseenLiveRequests = 0;
+      renderLiveFollow();
+    }, { passive: true });
     document.addEventListener("click", (event) => {
       const action = event.target.closest?.("[data-action]");
       if (action) void handleAction(action.dataset.action);
