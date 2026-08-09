@@ -47,19 +47,20 @@
                     <div><dt>UPSTREAM</dt><dd><code data-state="upstream">—</code></dd></div>
                     <div><dt>PROVIDER</dt><dd><code data-state="provider">—</code></dd></div>
                     <div><dt>CONFIG</dt><dd><span class="c-state state-indicator" data-state="config-prerequisite" data-status="waiting">检查中</span></dd></div>
-                    <div><dt>HYBRID WS</dt><dd><strong data-state="hybrid-ws">0</strong></dd></div>
-                    <div><dt>冷启动 HTTP</dt><dd><strong data-state="hybrid-cold-start-http">0</strong></dd></div>
-                    <div><dt>恢复 HTTP</dt><dd><strong data-state="hybrid-recovery-http">0</strong></dd></div>
-                    <div><dt>普通 HTTP</dt><dd><strong data-state="direct-http">0</strong></dd></div>
                   </dl>
+                  <ul class="c-route-metrics" aria-label="按传输路径统计">
+                    <li><span>Hybrid <small>WS</small></span><strong data-state="hybrid-ws">0</strong></li>
+                    <li><span>首轮 <small>HTTP</small></span><strong data-state="hybrid-cold-start-http">0</strong></li>
+                    <li><span>回退 <small>HTTP</small></span><strong data-state="hybrid-recovery-http">0</strong></li>
+                    <li><span>压缩 <small>HTTP</small></span><strong data-state="direct-http">0</strong></li>
+                  </ul>
                 </section>
 
                 <section class="c-side-section" aria-labelledby="live-health-title">
                   <header class="c-health-heading"><div><span class="c-overline">HEALTH</span><h2 id="live-health-title">实时状态</h2></div><button class="c-health-strands-button" type="button" data-action="toggle-connections" aria-controls="connection-inspector" aria-expanded="false" aria-haspopup="dialog" title="查看当前 WebSocket 连接"><canvas class="c-health-strands" data-strands data-count="0" aria-hidden="true"></canvas><span class="sr-only">查看当前 WebSocket 连接</span></button></header>
                   <ul class="c-health-list">
                     <li><span>服务</span><strong class="c-state state-indicator" data-state="service-runtime" data-status="waiting">正在读取</strong></li>
-                    <li><span>配置</span><strong class="c-state state-indicator" data-state="config-runtime" data-status="waiting">检查中</strong></li>
-                    <li><span>Codex</span><span class="c-health-list__value"><strong class="c-state state-indicator" data-state="restart-runtime" data-status="waiting">待确认</strong><button class="c-health-list__action" type="button" data-action="restart-codex" data-required="false">重启</button></span></li>
+                    <li><span>Codex</span><span class="c-health-list__value"><strong class="c-state state-indicator" data-state="restart-runtime" data-status="waiting">待确认</strong><button class="c-health-list__action" type="button" data-action="restart-codex" data-required="false" data-restart-hint>重启</button></span></li>
                     <li><span>HTTP 压缩</span><strong class="c-state state-indicator" data-state="http-zstd-runtime" data-status="waiting">待验证</strong></li>
                     <li><span>WebSocket 连接</span><strong class="c-state state-indicator" data-state="websocket-runtime" data-status="waiting">待验证</strong></li>
                     <li><span>WebSocket 压缩</span><strong class="c-state state-indicator" data-state="websocket-zstd-runtime" data-status="waiting">待验证</strong></li>
@@ -106,12 +107,12 @@
               <div><span class="c-overline">WEBSOCKET / LIVE POOL</span><h2 id="connection-inspector-title">当前连接 <em data-connection-total>0</em></h2></div>
               <button type="button" data-action="close-connections" aria-label="关闭连接检查器">×</button>
             </header>
-            <div class="c-connection-legend" aria-label="连接状态图例"><span><i class="c-ws-icon" data-connection-state="warm" aria-hidden="true"></i>空白预热</span><span><i class="c-ws-icon" data-connection-state="active" aria-hidden="true"></i>正在传输</span><span><i class="c-ws-icon" data-connection-state="bound" aria-hidden="true"></i>绑定线程 · 空闲</span></div>
+            <div class="c-connection-legend" aria-label="连接状态图例"><span><i class="c-ws-icon" data-connection-state="warm" aria-hidden="true"></i>空白预热</span><span><i class="c-ws-icon" data-connection-state="active" aria-hidden="true"></i>正在传输</span><span><i class="c-ws-icon" data-connection-state="bound" aria-hidden="true"></i>绑定会话 · 空闲</span></div>
             <div class="c-connection-groups">
               <section class="c-connection-group" data-connection-group="prewarm"><header><div class="c-connection-group__title"><h3>预热池</h3><span class="c-connection-group__hint" tabindex="0" role="note" data-tooltip="可立即用于新线程、尚未绑定的空白连接。" aria-label="预热池说明：可立即用于新线程、尚未绑定的空白连接。">!</span></div><span data-connection-count="prewarm">0</span></header><div class="c-connection-chips" data-connection-list="prewarm"><span class="c-connection-empty">暂无可用连接</span></div></section>
-              <section class="c-connection-group" data-connection-group="bound"><header><div class="c-connection-group__title"><h3>绑定线程</h3><span class="c-connection-group__hint" tabindex="0" role="note" data-tooltip="已绑定 Codex 线程；箭头表示传输中，zzz 表示空闲。" aria-label="绑定线程说明：已绑定 Codex 线程；箭头表示传输中，zzz 表示空闲。">!</span></div><span data-connection-count="bound">0</span></header><div class="c-connection-chips" data-connection-list="bound"><span class="c-connection-empty">暂无绑定线程</span></div></section>
+              <section class="c-connection-group" data-connection-group="bound"><header><div class="c-connection-group__title"><h3>绑定会话</h3><span class="c-connection-group__hint" tabindex="0" role="note" data-tooltip="同一 Codex 线程归为一个会话；箭头表示传输中，Zzz 表示空闲。" aria-label="绑定会话说明：同一 Codex 线程归为一个会话；箭头表示传输中，Zzz 表示空闲。">!</span></div><span data-connection-count="bound">0</span></header><div class="c-connection-sessions" data-connection-list="bound"><span class="c-connection-empty">暂无绑定会话</span></div></section>
               <section class="c-connection-group" data-connection-group="transitions"><header><div class="c-connection-group__title"><h3>建立 / 恢复中</h3><span class="c-connection-group__hint" tabindex="0" role="note" data-tooltip="正在建立新连接，或在断开后恢复绑定。" aria-label="建立或恢复说明：正在建立新连接，或在断开后恢复绑定。">!</span></div><span data-connection-count="transitions">0</span></header><div class="c-connection-transitions" data-connection-list="transitions"><span class="c-connection-empty">当前没有连接操作</span></div></section>
-              <section class="c-connection-group" data-connection-group="closed"><header><div class="c-connection-group__title"><h3>近期关闭</h3><span class="c-connection-group__hint" tabindex="0" role="note" data-tooltip="最近 5 分钟内关闭的连接，最多显示 6 条。" aria-label="近期关闭说明：最近 5 分钟内关闭的连接，最多显示 6 条。">!</span></div><span data-connection-count="closed">0</span></header><div class="c-connection-chips" data-connection-list="closed"><span class="c-connection-empty">暂无关闭记录</span></div></section>
+              <section class="c-connection-group" data-connection-group="closed"><header><div class="c-connection-group__title"><h3>近期关闭</h3><span class="c-connection-group__hint" tabindex="0" role="note" data-tooltip="最近 5 分钟内关闭的连接，最多显示 8 条。" aria-label="近期关闭说明：最近 5 分钟内关闭的连接，最多显示 8 条。">!</span></div><span data-connection-count="closed">0</span></header><div class="c-connection-sessions" data-connection-list="closed"><span class="c-connection-empty">暂无关闭记录</span></div></section>
             </div>
             <aside class="c-connection-message" data-connection-message aria-live="polite" hidden></aside>
           </aside>
@@ -120,7 +121,7 @@
         <section id="panel-statistics" class="tab-panel variant variant--c" role="tabpanel" aria-labelledby="tab-statistics" data-panel="statistics" hidden>
           <div class="c-console c-console--statistics">
             <div class="c-titlebar c-titlebar--statistics">
-              <div><p class="c-overline">STATISTICS / AGGREGATES</p><h1>传输统计</h1><p>只看聚合结果；实时健康状态统一留在“实时”页。</p></div>
+              <div><p class="c-overline">STATISTICS / AGGREGATES</p><h1>传输统计</h1><p>汇总请求趋势、传输体积与节省效果，快速了解 Turbo 的运行表现。</p></div>
               <form class="c-filters" aria-label="统计筛选">
                 <label><span>时间范围</span><select data-filter="range"><option value="1">最近 1 分钟</option><option value="10">最近 10 分钟</option><option value="60">最近 1 小时</option><option value="1440" selected>最近 1 天</option></select></label>
                 <label><span>传输方式</span><select data-filter="transport"><option value="all" selected>全部方式</option><option value="HTTP">HTTP</option><option value="WS">WebSocket</option></select></label>
@@ -217,6 +218,7 @@
 
     <script src="./telemetry.js"></script>
     <script src="./strands.js"></script>
+    <script src="./connection-dom.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

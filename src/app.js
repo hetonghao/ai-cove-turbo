@@ -3,11 +3,18 @@
 
   const TABS = ["live", "statistics", "config"];
   const RANGE_LABELS = { 1: "最近 1 分钟", 10: "最近 10 分钟", 60: "最近 1 小时", 1440: "最近 1 天" };
+  const REQUEST_ROUTE_LABELS = {
+    hybridWs: "Hybrid WS",
+    hybridColdStartHttp: "首轮 HTTP",
+    hybridRecoveryHttp: "回退 HTTP",
+    directHttp: "压缩 HTTP",
+  };
   const ROLLING_WINDOWS = [1, 10, 60, 1440];
-  const RECENT_CLOSED_LIMIT = 6;
+  const RECENT_CLOSED_LIMIT = 8;
   const LIVE_TAIL_THRESHOLD_PX = 24;
   const invoke = window.__TAURI__?.core?.invoke;
   const telemetry = window.TurboTelemetry;
+  const connectionDom = window.TurboConnectionDOM;
   const numberFormatter = new Intl.NumberFormat("zh-CN");
   const motion = { pageMs: 180, revealMs: 140, shiftPx: 10, blurPx: 3, easing: "cubic-bezier(0.16, 1, 0.3, 1)" };
   const $ = (selector) => document.querySelector?.(selector) ?? null;
@@ -57,11 +64,11 @@
   function buildPreviewTelemetry() {
     const now = Date.now();
     const samples = [
-      { id: 1, ageSeconds: 3, status: 200, path: "/v1/responses", rawBytes: 186_420, sentBytes: 82_110, transport: "WS", result: "success" },
-      { id: 2, ageSeconds: 11, status: 200, path: "/v1/responses", rawBytes: 94_280, sentBytes: 51_360, transport: "HTTP", result: "success" },
-      { id: 3, ageSeconds: 48, status: 201, path: "/v1/files", rawBytes: 128_610, sentBytes: 67_240, transport: "HTTP", result: "success" },
-      { id: 4, ageSeconds: 210, status: 200, path: "/v1/responses", rawBytes: 121_000, sentBytes: 116_000, transport: "HTTP", result: "fallback" },
-      { id: 5, ageSeconds: 1_080, status: 200, path: "/v1/responses", rawBytes: 212_000, sentBytes: 104_000, transport: "WS", result: "success" },
+      { id: 1, ageSeconds: 3, status: 200, path: "/v1/responses", rawBytes: 186_420, sentBytes: 82_110, transport: "WS", result: "success", route: "hybridWs" },
+      { id: 2, ageSeconds: 11, status: 200, path: "/v1/responses", rawBytes: 94_280, sentBytes: 51_360, transport: "HTTP", result: "success", route: "hybridColdStartHttp" },
+      { id: 3, ageSeconds: 48, status: 201, path: "/v1/files", rawBytes: 128_610, sentBytes: 67_240, transport: "HTTP", result: "success", route: "directHttp" },
+      { id: 4, ageSeconds: 210, status: 200, path: "/v1/responses", rawBytes: 121_000, sentBytes: 116_000, transport: "HTTP", result: "fallback", route: "hybridRecoveryHttp" },
+      { id: 5, ageSeconds: 1_080, status: 200, path: "/v1/responses", rawBytes: 212_000, sentBytes: 104_000, transport: "WS", result: "success", route: "hybridWs" },
       { id: 6, ageSeconds: 10_800, status: 200, path: "/v1/responses", rawBytes: 246_000, sentBytes: 119_000, transport: "HTTP", result: "success" },
       { id: 7, ageSeconds: 43_200, status: 200, path: "/v1/responses", rawBytes: 152_000, sentBytes: 143_000, transport: "HTTP", result: "fallback" },
       { id: 8, ageSeconds: 82_800, status: 200, path: "/v1/responses", rawBytes: 178_000, sentBytes: 82_000, transport: "WS", result: "success" },
@@ -123,14 +130,15 @@
     updateMessage: "Preview：尚未检查更新",
   };
   const previewConnectionSnapshot = {
+    currentConnections: 6,
     prewarm: 4,
     boundThreads: [
       { id: "S001", threadId: "thread-7c2a91df", activity: "down", idleSeconds: 0, reclaimPolicy: "threadEnd" },
-      { id: "S002", threadId: "thread-3e08a1b4", activity: "idle", idleSeconds: 18, reclaimPolicy: "threadEnd" },
+      { id: "S002", threadId: "thread-7c2a91df", activity: "idle", idleSeconds: 18, reclaimPolicy: "threadEnd" },
     ],
-    transitions: [],
+    transitions: [{ id: "S003", threadId: "thread-7c2a91df", connectionId: "S003", label: "恢复绑定连接", stage: "等待可用连接", detail: "上游连接关闭", elapsedSeconds: 2 }],
     recentClosed: [
-      { id: "C001", threadId: "thread-older", reason: "Codex 线程结束", agoSeconds: 12, normal: true },
+      { id: "C001", threadId: "thread-7c2a91df", connectionId: "S003", reason: "上游连接关闭", agoSeconds: 12, normal: false },
     ],
   };
   let state = { ...(invoke ? desktopStatus : previewStatus), tab: "live", nonAiCoveConfirmed: false };
@@ -142,16 +150,22 @@
   let liveStreamChanged = true;
   let clearedThroughId = 0;
   let displayedRequests = [];
+  let renderedRequestIds = [];
+  let liveStreamHydrated = false;
+  let statusHydrated = !invoke;
   let renderedBarMarkup = "";
   let activeChartIndex = 0;
   let connectionPanelOpen = false;
   let connectionSnapshot = invoke
-    ? { prewarm: 0, boundThreads: [], transitions: [], recentClosed: [] }
+    ? { currentConnections: 0, prewarm: 0, boundThreads: [], transitions: [], recentClosed: [] }
     : previewConnectionSnapshot;
   let connectionLoading = false;
   let connectionRefreshing = false;
   let connectionHydrated = !invoke;
   let connectionError = "";
+  const sessionNumbers = new Map();
+  const connectionNumbers = new Map();
+  const pinnedSessionIds = new Set();
 
   const actions = {
     "toggle-compression": ["set_compression", () => ({ enabled: !state.compressionEnabled })],
@@ -286,7 +300,6 @@
       "update-message": state.updateMessage || "—",
       "update-progress": `${Math.max(0, Math.min(100, Number(state.updateProgress) || 0))}%`,
       "service-runtime": starting ? "正在读取" : state.serviceHealthy ? "正常" : "离线",
-      "config-runtime": starting ? "检查中" : configReady() ? "已生效" : formatConfigState(),
       "restart-runtime": state.restartRequired ? "需要重启" : observed || state.desktopRestarted ? "已生效" : "待确认",
       "http-zstd-runtime": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "已验证" : "待验证",
       "websocket-runtime": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "已验证" : String(state.websocketState).toLowerCase() === "failed" ? "连接失败" : "待验证",
@@ -336,15 +349,6 @@
         action: "open-config",
         label: "查看配置",
         detail: state.technicalDetail,
-      };
-    }
-    if (state.restartRequired) {
-      return {
-        title: "Codex 需要重启",
-        message: "配置已写入，重启后会重新验证传输通道。",
-        action: "restart-codex",
-        label: "立即重启",
-        detail: "",
       };
     }
     if (!configReady()) {
@@ -450,7 +454,13 @@
         control.dataset.status = pendingAction === action ? "pending" : "idle";
         control.setAttribute("aria-busy", String(pendingAction === action));
       }
-      if (action === "restart-codex") control.dataset.required = String(Boolean(state.restartRequired));
+      if (action === "restart-codex") {
+        control.dataset.required = String(Boolean(state.restartRequired));
+        if (Object.hasOwn(control.dataset, "restartHint")) {
+          control.setAttribute("title", "配置已写入，重启后会重新验证传输通道。");
+          control.setAttribute("aria-label", "重启 Codex：配置已写入，重启后会重新验证传输通道。");
+        }
+      }
       if (Object.hasOwn(pressed, action)) {
         control.dataset.enabled = String(pressed[action]);
         control.setAttribute("aria-pressed", String(pressed[action]));
@@ -458,7 +468,7 @@
     });
   }
 
-  function renderState() {
+  function renderState(options = {}) {
     document.body.dataset.serviceHealthy = String(Boolean(state.serviceHealthy));
     all("[data-state]").forEach((target) => {
       const key = target.dataset.state;
@@ -481,8 +491,8 @@
     renderVisibility();
     renderLiveRecovery();
     renderControls();
-    renderLiveStream();
-    renderStatistics();
+    if (state.tab === "live" && statusHydrated) renderLiveStream(options);
+    if (state.tab === "statistics") renderStatistics();
   }
 
   function renderTab(options = {}) {
@@ -521,6 +531,7 @@
       setConnectionPanelOpen(false, { restoreFocus: false });
     }
     renderTab({ ...options, previousTab });
+    if (tab === "live") renderLiveStream({ animateNew: false });
     if (tab === "statistics") renderStatistics();
     if (options.updateUrl !== false) updateUrl();
   }
@@ -535,9 +546,15 @@
   }
 
   function normalizeConnectionSnapshot(snapshot) {
+    const prewarm = Math.max(0, Number(snapshot?.prewarm) || 0);
+    const boundThreads = Array.isArray(snapshot?.boundThreads) ? snapshot.boundThreads : [];
+    const currentConnections = Number(snapshot?.currentConnections);
     return {
-      prewarm: Math.max(0, Number(snapshot?.prewarm) || 0),
-      boundThreads: Array.isArray(snapshot?.boundThreads) ? snapshot.boundThreads : [],
+      currentConnections: Number.isFinite(currentConnections)
+        ? Math.max(0, currentConnections)
+        : prewarm + boundThreads.length,
+      prewarm,
+      boundThreads,
       transitions: Array.isArray(snapshot?.transitions) ? snapshot.transitions : [],
       recentClosed: Array.isArray(snapshot?.recentClosed) ? snapshot.recentClosed : [],
     };
@@ -547,9 +564,81 @@
     return `<i class="c-ws-icon" data-connection-state="${escapeHtml(status)}" aria-hidden="true"></i>`;
   }
 
-  function shortThreadName(threadId) {
-    const value = String(threadId || "未命名线程").replace(/^thread[-_]/iu, "");
-    return value === "未命名线程" ? value : `线程 ${value.slice(0, 8)}`;
+  function sessionIcon(status) {
+    return `<svg class="c-session-icon" data-connection-state="${escapeHtml(status)}" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 1.75h8a2 2 0 0 1 2 2v4.5a2 2 0 0 1-2 2H7l-3.25 2v-2H3a2 2 0 0 1-2-2v-4.5a2 2 0 0 1 2-2Z" /></svg>`;
+  }
+
+  function connectionThreadId(item) {
+    return String(item?.threadId || "").trim();
+  }
+
+  function observedConnectionId(item) {
+    return String(item?.connectionId || item?.id || "").trim();
+  }
+
+  function reconcileConnectionNumbers(snapshot, recentClosed) {
+    const items = [...snapshot.boundThreads, ...snapshot.transitions, ...recentClosed];
+    const visibleThreadIds = [];
+    const visibleThreads = new Set();
+    items.forEach((item) => {
+      const threadId = connectionThreadId(item);
+      if (!threadId || visibleThreads.has(threadId)) return;
+      visibleThreads.add(threadId);
+      visibleThreadIds.push(threadId);
+    });
+
+    Array.from(sessionNumbers.keys()).forEach((threadId) => {
+      if (visibleThreads.has(threadId)) return;
+      sessionNumbers.delete(threadId);
+      connectionNumbers.delete(threadId);
+      pinnedSessionIds.delete(threadId);
+    });
+
+    const usedSessionNumbers = new Set(sessionNumbers.values());
+    visibleThreadIds.forEach((threadId) => {
+      if (sessionNumbers.has(threadId)) return;
+      let number = 1;
+      while (usedSessionNumbers.has(number)) number += 1;
+      sessionNumbers.set(threadId, number);
+      usedSessionNumbers.add(number);
+    });
+
+    items.forEach((item) => {
+      const threadId = connectionThreadId(item);
+      const connectionId = observedConnectionId(item);
+      if (!threadId || !connectionId) return;
+      let numbers = connectionNumbers.get(threadId);
+      if (!numbers) {
+        numbers = { next: 1, byId: new Map() };
+        connectionNumbers.set(threadId, numbers);
+      }
+      if (!numbers.byId.has(connectionId)) {
+        numbers.byId.set(connectionId, numbers.next);
+        numbers.next += 1;
+      }
+    });
+  }
+
+  function sessionName(threadId) {
+    return `会话 ${String(sessionNumbers.get(threadId) || 0).padStart(2, "0")}`;
+  }
+
+  function connectionName(threadId, connectionId) {
+    const number = connectionNumbers.get(threadId)?.byId.get(connectionId) || 0;
+    return `连接 ${String(number).padStart(2, "0")}`;
+  }
+
+  function groupConnectionsByThread(items) {
+    const groups = new Map();
+    items.forEach((item) => {
+      const threadId = connectionThreadId(item);
+      if (!threadId) return;
+      if (!groups.has(threadId)) groups.set(threadId, { threadId, items: [] });
+      groups.get(threadId).items.push(item);
+    });
+    return Array.from(groups.values()).sort(
+      (left, right) => sessionNumbers.get(left.threadId) - sessionNumbers.get(right.threadId),
+    );
   }
 
   function formatConnectionAge(seconds) {
@@ -560,15 +649,123 @@
   }
 
   function connectionActivityGlyph(activity) {
-    if (activity === "idle") return '<span class="c-connection-idle" aria-hidden="true">zzz</span>';
+    if (activity === "idle") return '<svg class="c-connection-idle" viewBox="0 0 18 14" data-direction="up-right" aria-hidden="true"><path d="M.75 10.5h3l-3 2.5h3" /><path d="M5 5.75h4.25L5 9.25h4.25" /><path d="M10.5.75h6l-6 5h6" /></svg>';
     const direction = activity === "up" ? "up" : "down";
     const path = direction === "up" ? "M6 10V2M3 5l3-3 3 3" : "M6 2v8m3-3-3 3-3-3";
     return `<svg class="c-connection-activity" data-direction="${direction}" viewBox="0 0 12 12" aria-hidden="true"><path d="${path}" /></svg>`;
   }
 
-  function renderConnectionChip({ status, name, detail, glyph = "" }) {
-    const label = `${name} · ${detail}`;
-    return `<span class="c-connection-chip" tabindex="0" data-tooltip="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${connectionIcon(status)}<strong>${escapeHtml(name)}</strong>${glyph}</span>`;
+  function renderHoverDetail(title, details) {
+    const rows = details.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+    return `<span class="c-hover-card" aria-hidden="true"><strong>${escapeHtml(title)}</strong><dl>${rows}</dl></span>`;
+  }
+
+  function renderConnectionChip({ status, name, details, glyph = "", connectionId = "", eventId = "" }) {
+    const label = `${name}，${details.map(([key, value]) => `${key} ${value}`).join("，")}`;
+    const connectionAttribute = connectionId ? ` data-connection-id="${escapeHtml(connectionId)}"` : "";
+    const eventAttribute = eventId ? ` data-connection-event-id="${escapeHtml(eventId)}"` : "";
+    const key = eventId ? `event:${eventId}` : connectionId ? `connection:${connectionId}` : `prewarm:${name}`;
+    return `<span class="c-connection-chip" tabindex="0" data-connection-key="${escapeHtml(key)}"${connectionAttribute}${eventAttribute} aria-label="${escapeHtml(label)}">${connectionIcon(status)}<strong>${escapeHtml(name)}</strong>${glyph}${renderHoverDetail(name, details)}</span>`;
+  }
+
+  function renderBoundSession(group) {
+    const items = [...group.items].sort((left, right) => {
+      const leftNumber = connectionNumbers.get(group.threadId)?.byId.get(observedConnectionId(left)) || 0;
+      const rightNumber = connectionNumbers.get(group.threadId)?.byId.get(observedConnectionId(right)) || 0;
+      return leftNumber - rightNumber;
+    });
+    const counts = items.reduce((result, item) => {
+      const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
+      result[activity] += 1;
+      return result;
+    }, { up: 0, down: 0, idle: 0 });
+    const name = sessionName(group.threadId);
+    const metrics = ["up", "down", "idle"].map((activity) => counts[activity]
+      ? `<span class="c-connection-session__metric" data-connection-key="metric:${activity}">${connectionActivityGlyph(activity)}<b>${counts[activity]}</b></span>`
+      : "").join("");
+    const details = items.map((item) => {
+      const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
+      const activityLabel = activity === "up"
+        ? "正在发送"
+        : activity === "down"
+          ? "正在接收"
+          : `空闲 ${formatConnectionAge(item.idleSeconds)}`;
+      const reclaim = item.reclaimPolicy === "threadEnd" ? "随线程结束回收" : "按连接策略回收";
+      const connectionId = observedConnectionId(item);
+      return renderConnectionChip({
+        status: activity === "idle" ? "bound" : "active",
+        name: connectionName(group.threadId, connectionId),
+        details: [
+          ["状态", activityLabel],
+          ["所属会话", name],
+          ["连接 ID", connectionId],
+          ["线程 ID", group.threadId],
+          ["回收", reclaim],
+        ],
+        glyph: connectionActivityGlyph(activity),
+        connectionId,
+      });
+    }).join("");
+    const sessionDetails = [
+      ["连接", `${items.length} 条`],
+      ["传输", `发送 ${counts.up} · 接收 ${counts.down} · 空闲 ${counts.idle}`],
+    ];
+    const pinned = pinnedSessionIds.has(group.threadId);
+    const pinLabel = pinned ? `取消固定 ${name}` : `固定展开 ${name}`;
+    const pin = `<button type="button" class="c-session-pin" data-action="pin-session" data-thread-id="${escapeHtml(group.threadId)}" aria-pressed="${pinned}" aria-label="${pinLabel}" title="${pinLabel}"><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M5 1.5h4M6 1.5v3L4 7.5v1h6v-1L8 4.5v-3M7 8.5v4" /></svg></button>`;
+    const summary = `${name}，${items.length} 条连接，发送 ${counts.up}，接收 ${counts.down}，空闲 ${counts.idle}`;
+    return `<div class="c-connection-session c-connection-session--bound${pinned ? " is-pinned" : ""}" role="group" data-connection-key="bound:${escapeHtml(group.threadId)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(counts.up || counts.down ? "active" : "bound")}<strong>${name}</strong><span>×${items.length}</span>${metrics}${pin}${renderHoverDetail(name, sessionDetails)}</div><div class="c-connection-session__connections">${details}</div></div>`;
+  }
+
+  function renderClosedSession(group, released) {
+    const name = sessionName(group.threadId);
+    const events = group.items.map((item) => {
+      const connectionId = observedConnectionId(item);
+      return renderConnectionChip({
+        status: item.normal ? "closed" : "error",
+        name: connectionName(group.threadId, connectionId),
+        details: [
+          ["结果", item.normal ? "正常关闭" : "异常关闭"],
+          ["原因", item.reason],
+          ["关闭于", `${formatConnectionAge(item.agoSeconds)}前`],
+          ["所属会话", name],
+          ["连接 ID", connectionId],
+          ["线程 ID", group.threadId],
+        ],
+        connectionId,
+        eventId: item.id,
+      });
+    }).join("");
+    const abnormalCount = group.items.filter((item) => !item.normal).length;
+    const sessionState = released ? "已释放" : "仍在绑定";
+    const sessionDetails = [
+      ["会话状态", sessionState],
+      ["关闭记录", `${group.items.length} 条`],
+      ["异常", `${abnormalCount} 条`],
+    ];
+    const summary = `${name}，${sessionState}，${group.items.length} 条近期关闭记录，异常 ${abnormalCount}`;
+    return `<div class="c-connection-session c-connection-session--closed" role="group" data-connection-key="closed:${escapeHtml(group.threadId)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(released ? "error" : "active")}<strong>${name}</strong><span>×${group.items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><div class="c-connection-session__connections">${events}</div></div>`;
+  }
+
+  function renderTransitionDetails(item, identityDetail) {
+    return `<dl><div><dt>操作</dt><dd>${escapeHtml(item.label)}</dd></div><div><dt>身份</dt><dd>${escapeHtml(identityDetail)}</dd></div><div><dt>已用时</dt><dd>${formatConnectionAge(item.elapsedSeconds)}</dd></div><div><dt>详情</dt><dd>${escapeHtml(item.detail)}</dd></div></dl>`;
+  }
+
+  function renderTransitionItem(item, threadId) {
+    const connectionId = observedConnectionId(item);
+    const identity = connectionName(threadId, connectionId);
+    const attributes = ` data-thread-id="${escapeHtml(threadId)}" data-connection-id="${escapeHtml(connectionId)}"`;
+    return `<div class="c-connection-transition__item" data-connection-key="transition-item:${escapeHtml(item.id)}"${attributes}><header>${connectionIcon("pending")}<strong>${escapeHtml(identity)}</strong><span>${escapeHtml(item.stage)}</span></header>${renderTransitionDetails(item, `${threadId} · ${connectionId}`)}</div>`;
+  }
+
+  function renderTransitionSession(group) {
+    const name = sessionName(group.threadId);
+    const summary = `${name}，${group.items.length} 条连接正在建立或恢复`;
+    return `<details class="c-connection-transition c-connection-transition--session" data-connection-key="transition-session:${escapeHtml(group.threadId)}" data-transition-id="session:${escapeHtml(group.threadId)}" data-thread-id="${escapeHtml(group.threadId)}"><summary aria-label="${escapeHtml(summary)}">${sessionIcon("pending")}<strong>${name}</strong><span>×${group.items.length}</span></summary><div class="c-connection-transition__items">${group.items.map((item) => renderTransitionItem(item, group.threadId)).join("")}</div></details>`;
+  }
+
+  function renderPoolTransition(item) {
+    return `<details class="c-connection-transition" data-connection-key="transition:${escapeHtml(item.id)}" data-transition-id="${escapeHtml(item.id)}"><summary>${connectionIcon("pending")}<strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.stage)}</span></summary>${renderTransitionDetails(item, item.id)}</details>`;
   }
 
   function renderConnectionInspector() {
@@ -576,8 +773,9 @@
     if (!panel) return;
     const snapshot = normalizeConnectionSnapshot(connectionSnapshot);
     const recentClosed = snapshot.recentClosed.slice(0, RECENT_CLOSED_LIMIT);
+    reconcileConnectionNumbers(snapshot, recentClosed);
     const total = $("[data-connection-total]");
-    if (total) total.textContent = numberFormatter.format(snapshot.prewarm + snapshot.boundThreads.length);
+    if (total) total.textContent = numberFormatter.format(snapshot.currentConnections);
 
     const counts = {
       prewarm: snapshot.prewarm,
@@ -592,42 +790,34 @@
 
     const prewarm = $("[data-connection-list=\"prewarm\"]");
     if (prewarm) {
-      prewarm.innerHTML = snapshot.prewarm
+      connectionDom.reconcileList(prewarm, snapshot.prewarm
         ? Array.from({ length: snapshot.prewarm }, (_, index) => renderConnectionChip({
           status: "warm",
           name: `P${String(index + 1).padStart(2, "0")}`,
-          detail: "空白预热 · 容量压力时回收",
+          details: [
+            ["状态", "空白预热"],
+            ["回收", "容量压力时回收"],
+          ],
         })).join("")
-        : '<span class="c-connection-empty">暂无可用连接</span>';
+        : '<span class="c-connection-empty">暂无可用连接</span>');
     }
 
     const bound = $("[data-connection-list=\"bound\"]");
     if (bound) {
-      bound.innerHTML = snapshot.boundThreads.length
-        ? snapshot.boundThreads.map((item) => {
-          const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
-          const activityLabel = activity === "up"
-            ? "正在发送"
-            : activity === "down"
-              ? "正在接收"
-              : `空闲 ${formatConnectionAge(item.idleSeconds)}`;
-          const reclaim = item.reclaimPolicy === "threadEnd" ? "随线程结束回收" : "按连接策略回收";
-          return renderConnectionChip({
-            status: activity === "idle" ? "bound" : "active",
-            name: shortThreadName(item.threadId),
-            detail: `${activityLabel} · ${reclaim}`,
-            glyph: connectionActivityGlyph(activity),
-          });
-        }).join("")
-        : '<span class="c-connection-empty">暂无绑定线程</span>';
+      connectionDom.reconcileList(bound, snapshot.boundThreads.length
+        ? groupConnectionsByThread(snapshot.boundThreads).map(renderBoundSession).join("")
+        : '<span class="c-connection-empty">暂无绑定会话</span>');
     }
 
     const transitions = $("[data-connection-list=\"transitions\"]");
     if (transitions) {
       const expanded = new Set(Array.from(transitions.querySelectorAll?.("details[open][data-transition-id]") ?? [], (item) => item.dataset.transitionId));
-      transitions.innerHTML = snapshot.transitions.length
-        ? snapshot.transitions.map((item) => `<details class="c-connection-transition" data-transition-id="${escapeHtml(item.id)}"><summary>${connectionIcon("pending")}<strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.stage)}</span></summary><dl><div><dt>连接</dt><dd>${escapeHtml(item.id)}</dd></div><div><dt>已用时</dt><dd>${formatConnectionAge(item.elapsedSeconds)}</dd></div><div><dt>详情</dt><dd>${escapeHtml(item.detail)}</dd></div></dl></details>`).join("")
-        : '<span class="c-connection-empty">当前没有连接操作</span>';
+      connectionDom.reconcileList(transitions, snapshot.transitions.length
+        ? [
+          ...groupConnectionsByThread(snapshot.transitions).map(renderTransitionSession),
+          ...snapshot.transitions.filter((item) => !connectionThreadId(item)).map(renderPoolTransition),
+        ].join("")
+        : '<span class="c-connection-empty">当前没有连接操作</span>');
       Array.from(transitions.querySelectorAll?.("details[data-transition-id]") ?? []).forEach((item) => {
         item.open = expanded.has(item.dataset.transitionId);
       });
@@ -635,13 +825,14 @@
 
     const closed = $("[data-connection-list=\"closed\"]");
     if (closed) {
-      closed.innerHTML = recentClosed.length
-        ? recentClosed.map((item) => renderConnectionChip({
-          status: item.normal ? "closed" : "error",
-          name: item.threadId ? shortThreadName(item.threadId) : item.id,
-          detail: `${item.reason} · ${formatConnectionAge(item.agoSeconds)}前`,
-        })).join("")
-        : '<span class="c-connection-empty">暂无关闭记录</span>';
+      const retainedThreadIds = new Set(
+        [...snapshot.boundThreads, ...snapshot.transitions].map(connectionThreadId).filter(Boolean),
+      );
+      connectionDom.reconcileList(closed, recentClosed.length
+        ? groupConnectionsByThread(recentClosed)
+          .map((group) => renderClosedSession(group, !retainedThreadIds.has(group.threadId)))
+          .join("")
+        : '<span class="c-connection-empty">暂无关闭记录</span>');
     }
 
     const message = $("[data-connection-message]");
@@ -713,6 +904,17 @@
     displayedRequests = nextRequests;
   }
 
+  function renderRequestRow(request, isNew = false) {
+    const status = Number(request.status) || 0;
+    const fallback = request.result === "fallback";
+    const recovering = request.failurePhase === "hybridIdle";
+    const failed = request.result === "error" && !recovering;
+    const route = REQUEST_ROUTE_LABELS[request.route];
+    const transport = recovering ? `${route ?? request.transport} · 连接恢复` : failed ? `${route ?? request.transport} · 失败` : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
+    const detail = recovering && request.failureReason ? ` title="${escapeHtml(request.failureReason)}"` : "";
+    return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}"${detail}>${escapeHtml(transport)}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
+  }
+
   function renderLiveFollow() {
     const control = $("[data-live-follow]");
     if (control) control.hidden = liveTailFollowing;
@@ -728,16 +930,33 @@
     renderLiveFollow();
   }
 
-  function renderLiveStream() {
+  function renderLiveStream({ animateNew = true } = {}) {
     const body = $("[data-request-stream]");
     if (body) {
-      body.innerHTML = displayedRequests.map((request) => {
-        const status = Number(request.status) || 0;
-        const fallback = request.result === "fallback";
-        const failed = request.result === "error";
-        const transport = fallback ? `${request.transport} · 回退` : failed ? `${request.transport} · 失败` : request.transport;
-        return `<tr><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback ? " c-transport--fallback" : failed ? " c-transport--error" : ""}">${escapeHtml(transport)}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
-      }).join("");
+      const nextIds = displayedRequests.map((request) => String(request.id));
+      if (!liveStreamHydrated) {
+        body.innerHTML = displayedRequests.map((request) => renderRequestRow(request)).join("");
+        liveStreamHydrated = true;
+        renderedRequestIds = nextIds;
+      } else if (nextIds.length !== renderedRequestIds.length || nextIds.some((id, index) => id !== renderedRequestIds[index])) {
+        let overlap = Math.min(renderedRequestIds.length, nextIds.length);
+        while (overlap && renderedRequestIds.slice(-overlap).some((id, index) => id !== nextIds[index])) overlap -= 1;
+        const newRequests = displayedRequests.slice(overlap);
+        if (!overlap && renderedRequestIds.length) {
+          body.innerHTML = displayedRequests.map((request) => renderRequestRow(request)).join("");
+        } else {
+          const removed = renderedRequestIds.length - overlap;
+          for (let index = 0; index < removed; index += 1) body.firstElementChild?.remove();
+          if (newRequests.length) body.insertAdjacentHTML("beforeend", newRequests.map((request) => renderRequestRow(request, animateNew)).join(""));
+          if (animateNew && newRequests.length) {
+            const latest = newRequests.at(-1);
+            const rawBytes = Math.max(0, Number(latest.rawBytes) || 0);
+            const savedBytes = Math.max(0, rawBytes - (Number(latest.sentBytes) || 0));
+            window.TurboStrands?.pulse(rawBytes ? savedBytes / rawBytes : 0);
+          }
+        }
+        renderedRequestIds = nextIds;
+      }
     }
     const empty = $("[data-stream-empty]");
     if (empty) {
@@ -850,10 +1069,10 @@
     if (empty) empty.hidden = totals.requests > 0;
   }
 
-  function applyStatus(status) {
+  function applyStatus(status, options = {}) {
     if (status && typeof status === "object") state = { ...state, ...status, technicalDetail: "" };
     syncLiveRequests();
-    renderState();
+    renderState(options);
   }
 
   function applyPreviewAction(command, args) {
@@ -897,7 +1116,21 @@
     renderState();
   }
 
-  async function handleAction(action) {
+  async function handleAction(action, control) {
+    if (action === "pin-session") {
+      const threadId = String(control?.dataset.threadId || "");
+      if (!threadId) return;
+      const pinned = !pinnedSessionIds.has(threadId);
+      if (pinned) pinnedSessionIds.add(threadId);
+      else pinnedSessionIds.delete(threadId);
+      const name = sessionName(threadId);
+      const label = pinned ? `取消固定 ${name}` : `固定展开 ${name}`;
+      control.setAttribute("aria-pressed", String(pinned));
+      control.setAttribute("aria-label", label);
+      control.setAttribute("title", label);
+      control.closest?.(".c-connection-session")?.classList?.toggle("is-pinned", pinned);
+      return;
+    }
     if (action === "toggle-connections") {
       if (connectionPanelOpen) {
         setConnectionPanelOpen(false);
@@ -922,7 +1155,7 @@
     if (action === "toggle-stream") {
       streamPaused = !streamPaused;
       if (!streamPaused) syncLiveRequests();
-      renderLiveStream();
+      renderLiveStream({ animateNew: false });
       return;
     }
     if (action === "clear-stream") {
@@ -955,12 +1188,17 @@
   }
 
   async function refreshStatus() {
-    if (!invoke || pendingAction || refreshing) return;
+    if (!invoke || pendingAction || refreshing || document.hidden) return;
     refreshing = true;
     try {
       const status = await invoke("get_app_status");
-      if (!pendingAction) applyStatus(status);
+      if (!pendingAction) {
+        const animateNew = statusHydrated;
+        statusHydrated = true;
+        applyStatus(status, { animateNew });
+      }
     } catch (error) {
+      statusHydrated = true;
       state.serviceHealthy = false;
       state.configMessage = "无法读取 Turbo 状态，请确认应用仍在运行后重试。";
       state.technicalDetail = error instanceof Error ? error.message : String(error);
@@ -1099,7 +1337,7 @@
     }, { passive: true });
     document.addEventListener("click", (event) => {
       const action = event.target.closest?.("[data-action]");
-      if (action) void handleAction(action.dataset.action);
+      if (action) void handleAction(action.dataset.action, action);
       const tab = event.target.closest?.("[data-tab]");
       if (tab) selectTab(tab.dataset.tab);
     });

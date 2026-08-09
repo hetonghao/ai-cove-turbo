@@ -69,11 +69,40 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.doesNotMatch(livePanel, /data-action="toggle-(compression|websocket|autostart|dock)"/);
   assert.doesNotMatch(statisticsPanel, /data-action=/);
   assert.match(livePanel, /data-live-recovery/);
+  assert.match(livePanel, /data-restart-hint/);
   assert.match(app, /handleChartKeydown/);
   assert.doesNotMatch(livePanel, /c-topbar|AI COVE TURBO/);
   assert.doesNotMatch(statisticsPanel, /c-topbar|AI COVE TURBO/);
   assert.doesNotMatch(configPanel, /b-header|turbo-icon--popover/);
   assert.doesNotMatch(css, /\.a-|variant--a|turbo-variant-switcher|app-shell|data-variant/);
+});
+
+test("实时页把同类路径计数收进一行并仅在需要时显示侧栏滚动条", async () => {
+  // Given: 默认桌面窗口中的实时页侧栏。
+  const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const css = await readFile(new URL("styles.css", sourceUrl), "utf8");
+  const livePanel = html.slice(html.indexOf('id="panel-live"'), html.indexOf('id="panel-statistics"'));
+  const metrics = livePanel.slice(livePanel.indexOf('class="c-route-metrics"'), livePanel.indexOf("</ul>", livePanel.indexOf('class="c-route-metrics"')));
+
+  // When: 四类路由计数与健康状态同时展示。
+  // Then: 路由计数横向合并，默认高度不预留滚动条轨道。
+  assert.equal(metrics.match(/data-state=/g)?.length, 4);
+  assert.match(metrics, />Hybrid <small>WS<\/small>/);
+  assert.match(metrics, />首轮 <small>HTTP<\/small>/);
+  assert.match(metrics, />回退 <small>HTTP<\/small>/);
+  assert.match(metrics, />压缩 <small>HTTP<\/small>/);
+  assert.match(css, /\.c-route-metrics\s*{[\s\S]*?grid-template-columns:\s*repeat\(4,/);
+  assert.match(css, /\.c-sidebar--live\s*{[\s\S]*?scrollbar-gutter:\s*auto;/);
+});
+
+test("实时页只保留一处配置生效状态", async () => {
+  const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const app = await readFile(new URL("app.js", sourceUrl), "utf8");
+  const livePanel = html.slice(html.indexOf('id="panel-live"'), html.indexOf('id="panel-statistics"'));
+
+  assert.match(livePanel, /data-state="config-prerequisite"/);
+  assert.doesNotMatch(livePanel, /data-state="config-runtime"/);
+  assert.doesNotMatch(app, /"config-runtime"/);
 });
 
 test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
@@ -138,7 +167,6 @@ test("配置主状态用最多五条 Strands 表达验证进度", async () => {
 
 test("实时 Strands 打开紧凑的非模态 WebSocket 连接检查器", async () => {
   const html = await readFile(new URL("index.html", sourceUrl), "utf8");
-  const css = await readFile(new URL("styles.css", sourceUrl), "utf8");
   const app = await readFile(new URL("app.js", sourceUrl), "utf8");
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   const livePanel = html.slice(html.indexOf('id="panel-live"'), html.indexOf('id="panel-statistics"'));
@@ -154,29 +182,13 @@ test("实时 Strands 打开紧凑的非模态 WebSocket 连接检查器", async 
   assert.equal(livePanel.match(/class="c-connection-group__hint"/g)?.length, 4);
   assert.equal(livePanel.match(/class="c-connection-group__hint"[^>]*role="note"/g)?.length, 4);
   assert.match(livePanel, /可立即用于新线程、尚未绑定的空白连接。/);
-  assert.match(livePanel, /已绑定 Codex 线程；箭头表示传输中，zzz 表示空闲。/);
+  assert.match(livePanel, /同一 Codex 线程归为一个会话；箭头表示传输中，Zzz 表示空闲。/);
   assert.match(livePanel, /正在建立新连接，或在断开后恢复绑定。/);
-  assert.match(livePanel, /最近 5 分钟内关闭的连接，最多显示 6 条。/);
+  assert.match(livePanel, /最近 5 分钟内关闭的连接，最多显示 8 条。/);
 
-  assert.match(css, /\.c-connection-inspector\s*{[\s\S]*position:\s*fixed;[\s\S]*right:/);
-  assert.match(css, /\.c-connection-inspector\s*{[^}]*max-height:\s*calc\(100dvh - var\(--turbo-shell-height\) - 36px\);[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/s);
-  assert.match(css, /\.c-connection-chips\s*{[^}]*position:\s*relative;/s);
-  assert.match(css, /\.c-connection-chip\s*{[^}]*position:\s*static;/s);
-  assert.match(css, /\.c-connection-chip::after\s*{[^}]*bottom:\s*calc\(100% \+ 7px\);[^}]*max-width:\s*min\(280px, 100%\);/s);
-  assert.match(css, /\.c-connection-group__hint::after,\s*\.c-connection-chip::after\s*{[^}]*overflow-wrap:\s*anywhere;/s);
-  assert.match(css, /\.c-connection-transition dl\s*{[^}]*grid-template-columns:\s*minmax\(0, 0\.75fr\) minmax\(0, 1fr\) minmax\(0, 1\.4fr\);/s);
-  assert.match(css, /\.c-connection-transition dd\s*{[^}]*overflow-wrap:\s*anywhere;[^}]*white-space:\s*normal;/s);
-  assert.match(css, /\.c-connection-group__hint::after\s*{[^}]*content:\s*attr\(data-tooltip\);/s);
-  assert.match(css, /\.c-connection-group\[data-connection-group="bound"\] \.c-ws-icon\[data-connection-state="active"\]::after\s*{[^}]*animation:\s*c-connection-active-pulse/s);
-  assert.match(css, /\.c-connection-group\[data-connection-group="bound"\] \.c-ws-icon\[data-connection-state="bound"\]::after\s*{[^}]*animation:\s*c-connection-bound-breathe/s);
-  assert.match(css, /\.c-connection-group\[data-connection-group="transitions"\] \.c-ws-icon\[data-connection-state="pending"\]\s*{[^}]*animation:\s*c-connection-spin/s);
-  assert.match(css, /\.c-connection-group\[data-connection-group="bound"\] \.c-connection-activity\[data-direction="up"\]\s*{[^}]*color:\s*var\(--turbo-success\);[^}]*animation:\s*c-connection-flow-up/s);
-  assert.match(css, /\.c-connection-group\[data-connection-group="bound"\] \.c-connection-activity\[data-direction="down"\]\s*{[^}]*animation:\s*c-connection-flow-down/s);
-  assert.match(css, /\.c-connection-group\[data-connection-group="bound"\] \.c-connection-idle\s*{[^}]*animation:\s*c-connection-idle-breathe/s);
-  assert.match(css, /\.c-connection-group__hint:hover,[\s\S]*?border-color:\s*var\(--turbo-accent-line\);/);
-  assert.doesNotMatch(css, /\.c-ws-icon\[data-connection-state="(?:warm|closed|error)"\][^{]*{[^}]*animation:/s);
-  assert.match(app, /const RECENT_CLOSED_LIMIT = 6;/);
+  assert.match(app, /const RECENT_CLOSED_LIMIT = 8;/);
   assert.match(app, /const recentClosed = snapshot\.recentClosed\.slice\(0, RECENT_CLOSED_LIMIT\);/);
+  assert.match(html, /<script src="\.\/connection-dom\.js"><\/script>/);
   assert.match(app, /get_connection_snapshot/);
   assert.match(rust, /async fn get_connection_snapshot/);
 });
@@ -192,6 +204,8 @@ test("开机自启动保持后台且发布流程收集真实 updater 包", async
   );
 
   assert.equal(tauriConfig.app.windows[0].visible, false);
+  assert.equal(tauriConfig.app.windows[0].minWidth, 360);
+  assert.equal(tauriConfig.app.windows[0].minHeight, tauriConfig.app.windows[0].height);
   assert.match(rust, /args_os\(\)[\s\S]*--background/);
   assert.match(workflow, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD/);
   assert.match(workflow, /test -n "\$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"/);
@@ -199,13 +213,18 @@ test("开机自启动保持后台且发布流程收集真实 updater 包", async
   assert.match(workflow, /\.exe\.zip\.sig/);
 });
 
-test("macOS 状态栏始终显示 Turbo 标识", async () => {
+test("macOS 状态栏使用紧凑的 Turbo 模板剪影", async () => {
   // Given: Turbo 使用原生托盘承载后台入口。
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 
   // When: 应用创建右上角状态栏项目。
   const traySetup = rust.slice(rust.indexOf("fn install_tray"), rust.indexOf("fn initialize_desktop_preferences"));
 
-  // Then: 除图标外还提供固定短标题，避免状态栏项目不可见。
-  assert.match(traySetup, /\.title\("Turbo"\)/);
+  // Then: 使用稳定 ID 和系统模板剪影；完整应用图标只留给非 macOS。
+  assert.match(rust, /const TRAY_ID: &str = "ai-cove-turbo"/);
+  assert.match(traySetup, /TrayIconBuilder::with_id\(TRAY_ID\)/);
+  assert.match(traySetup, /include_bytes!\(\s*"\.\.\/icons\/tray-template\.png"\s*\)/);
+  assert.match(traySetup, /#\[cfg\(target_os = "macos"\)\][\s\S]*\.icon_as_template\(true\)/);
+  assert.doesNotMatch(traySetup, /\.title\("T"\)/);
+  assert.match(traySetup, /#\[cfg\(not\(target_os = "macos"\)\)\][\s\S]*default_window_icon\(\)/);
 });
