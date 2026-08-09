@@ -15,7 +15,7 @@
         "width": 1180,
         "height": 800,
         "minWidth": 360,
-        "minHeight": 620,
+        "minHeight": 800,
         "center": true,
         "resizable": true,
         "visible": false
