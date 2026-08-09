@@ -11,6 +11,7 @@
   };
   const ROLLING_WINDOWS = [1, 10, 60, 1440];
   const RECENT_CLOSED_LIMIT = 8;
+  const CONNECTION_DENSITIES = ["full", "compact", "state-only"];
   const LIVE_TAIL_THRESHOLD_PX = 24;
   const invoke = window.__TAURI__?.core?.invoke;
   const telemetry = window.TurboTelemetry;
@@ -169,6 +170,7 @@
   const connectionNumbers = new Map();
   const sessionTitles = new Map();
   const sessionTitleRequests = new Set();
+  const closedSessionLayouts = new Map();
 
   const actions = {
     "toggle-compression": ["set_compression", () => ({ enabled: !state.compressionEnabled })],
@@ -646,9 +648,13 @@
     });
   }
 
-  function connectionName(threadId, connectionId) {
+  function connectionShortName(threadId, connectionId) {
     const number = connectionNumbers.get(threadId)?.byId.get(connectionId) || 0;
-    return `连接 ${String(number).padStart(2, "0")}`;
+    return String(number).padStart(2, "0");
+  }
+
+  function connectionName(threadId, connectionId) {
+    return `连接 ${connectionShortName(threadId, connectionId)}`;
   }
 
   function groupConnectionsByThread(items) {
@@ -675,6 +681,11 @@
     return group.items.some((item) => ["up", "down"].includes(item.activity)) ? "active" : "bound";
   }
 
+  function connectionDensity(count) {
+    if (count <= 1) return "full";
+    return count === 2 ? "compact" : "state-only";
+  }
+
   function formatConnectionAge(seconds) {
     const value = Math.max(0, Math.floor(Number(seconds) || 0));
     if (value < 60) return `${value} 秒`;
@@ -694,12 +705,13 @@
     return `<span class="c-hover-card" aria-hidden="true"><strong>${escapeHtml(title)}</strong><dl>${rows}</dl></span>`;
   }
 
-  function renderConnectionChip({ status, name, details, glyph = "", connectionId = "", eventId = "" }) {
+  function renderConnectionChip({ status, name, details, glyph = "", connectionId = "", eventId = "", shortName = "" }) {
     const label = `${name}，${details.map(([key, value]) => `${key} ${value}`).join("，")}`;
     const connectionAttribute = connectionId ? ` data-connection-id="${escapeHtml(connectionId)}"` : "";
     const eventAttribute = eventId ? ` data-connection-event-id="${escapeHtml(eventId)}"` : "";
     const key = eventId ? `event:${eventId}` : connectionId ? `connection:${connectionId}` : `prewarm:${name}`;
-    return `<span class="c-connection-chip" tabindex="0" data-connection-key="${escapeHtml(key)}"${connectionAttribute}${eventAttribute} aria-label="${escapeHtml(label)}">${connectionIcon(status)}<strong>${escapeHtml(name)}</strong>${glyph}${renderHoverDetail(name, details)}</span>`;
+    const shortNameAttribute = shortName ? ` data-short-name="${escapeHtml(shortName)}"` : "";
+    return `<span class="c-connection-chip" tabindex="0" data-connection-key="${escapeHtml(key)}"${connectionAttribute}${eventAttribute} aria-label="${escapeHtml(label)}">${connectionIcon(status)}<strong${shortNameAttribute}>${escapeHtml(name)}</strong>${glyph}${renderHoverDetail(name, details)}</span>`;
   }
 
   function renderBoundSession(group) {
@@ -731,6 +743,7 @@
         ],
         glyph: connectionActivityGlyph(activity),
         connectionId,
+        shortName: connectionShortName(group.threadId, connectionId),
       });
     }).join("");
     const sessionDetails = [
@@ -740,7 +753,7 @@
       ["传输", `发送 ${counts.up} · 接收 ${counts.down} · 空闲 ${counts.idle}`],
     ];
     const summary = `${name}，${items.length} 条连接，发送 ${counts.up}，接收 ${counts.down}，空闲 ${counts.idle}`;
-    return `<div class="c-connection-session c-connection-session--bound" role="group" data-connection-key="bound:${escapeHtml(group.threadId)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(boundSessionStatus(group))}<strong>${name}</strong><span class="c-connection-session__count">×${items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><span class="c-connection-session__separator" aria-hidden="true"></span><div class="c-connection-session__connections">${details}</div></div>`;
+    return `<div class="c-connection-session c-connection-session--bound" role="group" data-connection-key="bound:${escapeHtml(group.threadId)}" data-density="${connectionDensity(items.length)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(boundSessionStatus(group))}<strong>${name}</strong><span class="c-connection-session__count">×${items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><span class="c-connection-session__separator" aria-hidden="true"></span><div class="c-connection-session__connections">${details}</div></div>`;
   }
 
   function renderClosedSession(group, status) {
@@ -761,6 +774,7 @@
         ],
         connectionId,
         eventId: item.id,
+        shortName: connectionShortName(group.threadId, connectionId),
       });
     }).join("");
     const abnormalCount = items.filter((item) => !item.normal).length;
@@ -773,7 +787,50 @@
       ["异常", `${abnormalCount} 条`],
     ];
     const summary = `${name}，${sessionState}，${items.length} 条近期关闭记录，异常 ${abnormalCount}`;
-    return `<div class="c-connection-session c-connection-session--closed" role="group" data-connection-key="closed:${escapeHtml(group.threadId)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(status)}<strong>${name}</strong><span class="c-connection-session__count">×${items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><span class="c-connection-session__separator" aria-hidden="true"></span><div class="c-connection-session__connections">${events}</div></div>`;
+    const density = closedSessionLayouts.get(group.threadId)?.density || "full";
+    return `<div class="c-connection-session c-connection-session--closed" role="group" data-connection-key="closed:${escapeHtml(group.threadId)}" data-auto-density data-density="${density}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(status)}<strong>${name}</strong><span class="c-connection-session__count">×${items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><span class="c-connection-session__separator" aria-hidden="true"></span><div class="c-connection-session__connections">${events}</div></div>`;
+  }
+
+  function closedConnectionsFit(connections) {
+    const chips = Array.from(connections.children ?? []);
+    const rowGap = Number.parseFloat(getComputedStyle(connections).columnGap) || 0;
+    const requiredWidth = chips.reduce((total, chip) => {
+      const style = getComputedStyle(chip);
+      const parts = Array.from(chip.children ?? []).filter((part) => {
+        const partStyle = getComputedStyle(part);
+        return partStyle.display !== "none" && partStyle.position !== "absolute";
+      });
+      const innerGap = (Number.parseFloat(style.columnGap) || 0) * Math.max(0, parts.length - 1);
+      const inset = [style.paddingLeft, style.paddingRight, style.borderLeftWidth, style.borderRightWidth]
+        .reduce((sum, value) => sum + (Number.parseFloat(value) || 0), 0);
+      const contentWidth = parts.reduce((sum, part) => {
+        const visibleWidth = part.getBoundingClientRect().width;
+        return sum + Math.max(Number(part.scrollWidth) || 0, visibleWidth);
+      }, 0);
+      return total + contentWidth + innerGap + inset;
+    }, rowGap * Math.max(0, chips.length - 1));
+    return requiredWidth <= Number(connections.clientWidth) + 0.5;
+  }
+
+  function fitClosedSessionDensities(list = $('[data-connection-list="closed"]')) {
+    if (typeof getComputedStyle !== "function") return;
+    Array.from(list?.querySelectorAll?.("[data-auto-density]") ?? []).forEach((session) => {
+      const connections = session.querySelector?.(".c-connection-session__connections");
+      if (!connections || !Number(connections.clientWidth)) return;
+      const signature = Array.from(connections.children ?? [], (chip) => chip.children?.[1]?.dataset?.shortName || "").join(",");
+      const layoutKey = `${connections.clientWidth}:${signature || connections.children?.length || 0}`;
+      const cached = closedSessionLayouts.get(session.dataset.threadId);
+      if (cached?.key === layoutKey) {
+        session.dataset.density = cached.density;
+        return;
+      }
+      const density = CONNECTION_DENSITIES.find((candidate) => {
+        session.dataset.density = candidate;
+        return closedConnectionsFit(connections);
+      }) || "state-only";
+      session.dataset.density = density;
+      if (session.dataset.threadId) closedSessionLayouts.set(session.dataset.threadId, { key: layoutKey, density });
+    });
   }
 
   function renderTransitionDetails(item, identityDetail) {
@@ -876,6 +933,7 @@
           .map((group) => renderClosedSession(group, sessionStatuses.get(group.threadId) || "closed"))
           .join("")
         : '<span class="c-connection-empty">暂无关闭记录</span>');
+      fitClosedSessionDensities(closed);
     }
 
     const message = $("[data-connection-message]");
@@ -982,7 +1040,10 @@
       else return;
       event.preventDefault();
     });
-    window.addEventListener("resize", () => setConnectionDockOffset(connectionDockOffset), { passive: true });
+    window.addEventListener("resize", () => {
+      setConnectionDockOffset(connectionDockOffset);
+      fitClosedSessionDensities();
+    }, { passive: true });
     setConnectionDockOffset(0);
   }
 

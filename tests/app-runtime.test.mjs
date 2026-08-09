@@ -429,6 +429,37 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
     ? transitionDetails.filter((item) => item.open)
     : transitionDetails;
   const closed = element({ connectionList: "closed" });
+  const closedDensitySession = element({ autoDensity: "", threadId: "thread-density" });
+  closedDensitySession.dataset.density = "full";
+  const measuredPart = (kind, fullWidth, compactWidth = fullWidth) => ({
+    kind,
+    get scrollWidth() {
+      return closedDensitySession.dataset.density === "compact" ? compactWidth : fullWidth;
+    },
+    getBoundingClientRect() {
+      return { width: Math.min(8, this.scrollWidth) };
+    },
+  });
+  const measuredChip = () => ({
+    kind: "chip",
+    children: [
+      measuredPart("icon", 10),
+      measuredPart("name", 50, 14),
+      measuredPart("glyph", 12),
+      measuredPart("hover", 180),
+    ],
+  });
+  const closedConnections = {
+    kind: "connections",
+    clientWidth: 80,
+    children: [measuredChip(), measuredChip()],
+  };
+  closedDensitySession.querySelector = (selector) => selector === ".c-connection-session__connections"
+    ? closedConnections
+    : null;
+  closed.querySelectorAll = (selector) => selector === "[data-auto-density]"
+    ? [closedDensitySession]
+    : [];
   const message = element({ connectionMessage: "" });
   message.hidden = true;
   const selectors = new Map([
@@ -455,15 +486,19 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   const threadTitles = {
     "thread-12345678-alpha": "Alpha 压缩调试",
     "thread-12345678-beta": "Beta 连接验证",
+    "thread-12345678-gamma": "Gamma 并行验证",
     "thread-released": "已结束会话",
   };
   const snapshot = {
-    currentConnections: 7,
+    currentConnections: 10,
     prewarm: 2,
     boundThreads: [
       { id: "S001", threadId: "thread-12345678-alpha", activity: "down", idleSeconds: 0, reclaimPolicy: "threadEnd" },
       { id: "S002", threadId: "thread-12345678-alpha", activity: "idle", idleSeconds: 18, reclaimPolicy: "threadEnd" },
       { id: "S004", threadId: "thread-12345678-beta", activity: "up", idleSeconds: 0, reclaimPolicy: "threadEnd" },
+      { id: "S010", threadId: "thread-12345678-gamma", activity: "down", idleSeconds: 0, reclaimPolicy: "threadEnd" },
+      { id: "S011", threadId: "thread-12345678-gamma", activity: "idle", idleSeconds: 4, reclaimPolicy: "threadEnd" },
+      { id: "S012", threadId: "thread-12345678-gamma", activity: "up", idleSeconds: 0, reclaimPolicy: "threadEnd" },
     ],
     transitions: [
       { id: "T003", threadId: "thread-12345678-alpha", connectionId: "S005", label: "恢复绑定连接", stage: "等待可用连接", detail: "上游关闭", elapsedSeconds: 2 },
@@ -512,14 +547,25 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
     addEventListener() {},
     setInterval(handler) { onTick = handler; },
   };
+  let styleReads = 0;
+  const getComputedStyle = (target) => {
+    styleReads += 1;
+    if (target.kind === "connections") return { columnGap: "5px" };
+    if (target.kind === "chip") return { columnGap: "5px", paddingLeft: "4px", paddingRight: "4px" };
+    if (target.kind === "hover") return { display: "grid", position: "absolute" };
+    if (target.kind === "name" && closedDensitySession.dataset.density === "state-only") {
+      return { display: "none", position: "static" };
+    }
+    return { display: "block", position: "static" };
+  };
 
-  await runApp(source, { document, Error, window, URL, Intl });
+  await runApp(source, { document, Error, window, URL, Intl, getComputedStyle });
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(invoked, ["get_app_status", "get_connection_snapshot"]);
-  assert.equal(summaryUp.textContent, "1");
-  assert.equal(summaryDown.textContent, "1");
-  assert.equal(summaryIdle.textContent, "1");
+  assert.equal(summaryUp.textContent, "2");
+  assert.equal(summaryDown.textContent, "2");
+  assert.equal(summaryIdle.textContent, "2");
 
   onClick({ target: summaryTrigger });
   await new Promise((resolve) => setImmediate(resolve));
@@ -530,9 +576,13 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.equal(panelOverflow, false);
   assert.equal(trigger.attributes.get("aria-expanded"), "true");
   assert.equal(summaryTrigger.attributes.get("aria-expanded"), "true");
-  assert.equal(total.textContent, "7");
+  assert.equal(total.textContent, "10");
   assert.match(prewarm.innerHTML, /<strong>P01<\/strong>[\s\S]*?<dt>状态<\/dt><dd>空白预热<\/dd>[\s\S]*?<dt>回收<\/dt><dd>容量压力时回收<\/dd>/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"/);
+  assert.match(bound.innerHTML, /data-density="compact"[^>]*data-thread-id="thread-12345678-alpha"/);
+  assert.match(bound.innerHTML, /data-density="full"[^>]*data-thread-id="thread-12345678-beta"/);
+  assert.match(bound.innerHTML, /data-density="state-only"[^>]*data-thread-id="thread-12345678-gamma"/);
+  assert.match(bound.innerHTML, /data-short-name="01"[^>]*>连接 01<\/strong>/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?会话 01[\s\S]*?×2[\s\S]*?c-connection-session__separator[\s\S]*?连接 01[\s\S]*?连接 02/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-beta"[^>]*>[\s\S]*?会话 02/);
   assert.match(bound.innerHTML, /c-connection-session__summary"[^>]*aria-label="会话 01，2 条连接，发送 0，接收 1，空闲 1"[^>]*>\s*<svg class="c-session-icon"/);
@@ -566,6 +616,23 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.match(closed.innerHTML, /data-connection-event-id="C003"/);
   assert.match(closed.innerHTML, /上游连接关闭/);
   assert.match(closed.innerHTML, /连接恢复失败/);
+  assert.match(closed.innerHTML, /data-auto-density[^>]*data-density="full"/);
+  assert.equal(closedDensitySession.dataset.density, "state-only");
+
+  const readsAfterFirstLayout = styleReads;
+  await onTick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(styleReads, readsAfterFirstLayout);
+
+  closedConnections.clientWidth = 120;
+  await onTick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(closedDensitySession.dataset.density, "compact");
+
+  closedConnections.clientWidth = 200;
+  await onTick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(closedDensitySession.dataset.density, "full");
 
   panel.scrollHeight = 700;
   await onTick();
@@ -663,6 +730,14 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.equal(panel.hidden, true);
   assert.equal(trigger.attributes.get("aria-expanded"), "false");
   assert.equal(trigger.focused, true);
+});
+
+test("绑定会话双列且近期关闭保持单列", async () => {
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+
+  assert.match(css, /data-connection-group="bound"[^}]*c-connection-sessions[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s);
+  assert.match(css, /data-connection-group="closed"[^}]*c-connection-sessions[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+  assert.match(css, /c-connection-session__connections\s*>\s*\.c-connection-chip[^}]*flex:\s*1 1 0/s);
 });
 
 test("连续连接快照保留稳定节点、焦点和展开状态", async () => {

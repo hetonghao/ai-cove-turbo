@@ -1000,6 +1000,15 @@ h2 {
   min-height: 25px;
 }
 
+.c-connection-group[data-connection-group="bound"] .c-connection-sessions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 7px;
+}
+
+.c-connection-group[data-connection-group="closed"] .c-connection-sessions {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .c-connection-session {
   position: relative;
   display: flex;
@@ -1108,9 +1117,40 @@ h2 {
   position: relative;
   display: flex;
   flex: 1 1 auto;
-  flex-wrap: wrap;
-  gap: 5px;
+  gap: 3px;
   min-width: 0;
+}
+
+.c-connection-session__connections > .c-connection-chip {
+  flex: 1 1 0;
+  justify-content: center;
+  min-width: 0;
+  padding-inline: 5px;
+}
+
+.c-connection-session[data-density="compact"] .c-connection-chip > strong[data-short-name] {
+  font-size: 0;
+}
+
+.c-connection-session[data-density="compact"] .c-connection-chip > strong[data-short-name]::after {
+  content: attr(data-short-name);
+  font: 0.625rem/1 var(--font-mono);
+  font-weight: 600;
+}
+
+.c-connection-session[data-density="state-only"] .c-connection-chip > strong {
+  display: none;
+}
+
+.c-connection-session[data-density="state-only"] .c-connection-chip {
+  gap: 4px;
+  padding-inline: 3px;
+}
+
+.c-connection-group[data-connection-group="bound"] .c-connection-session:nth-child(even) .c-hover-card,
+.c-connection-group[data-connection-group="closed"] .c-connection-chip:nth-last-child(-n + 3) > .c-hover-card {
+  right: 0;
+  left: auto;
 }
 
 .c-connection-chip {
