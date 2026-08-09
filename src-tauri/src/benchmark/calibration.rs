@@ -20,8 +20,11 @@ const MIN_MATCH_COVERAGE_PCT: f64 = 70.0;
 const MIN_P90_BUCKET_SAMPLES: u64 = 12;
 const MIN_LIVE_SAMPLES: usize = 12;
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(
+    deny_unknown_fields,
+    rename_all(deserialize = "snake_case", serialize = "camelCase")
+)]
 struct BucketKey {
     input: usize,
     output: usize,
@@ -150,6 +153,7 @@ struct ScopeCalibration {
     covered_current_count: u64,
     coverage_pct: f64,
     latency: LatencyCalibration,
+    buckets: Vec<BucketEvidence>,
 }
 
 #[derive(Clone, Debug)]
@@ -276,6 +280,15 @@ impl From<LatencyCalibration> for LatencyEvidence {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BucketEvidence {
+    bucket: BucketKey,
+    current_samples: u64,
+    historical_samples: u64,
+    profile_coverage_pct: f64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScopeEvidence {
@@ -284,6 +297,7 @@ struct ScopeEvidence {
     coverage_pct: f64,
     #[serde(flatten)]
     latency: LatencyEvidence,
+    buckets: Vec<BucketEvidence>,
 }
 
 impl From<&ScopeCalibration> for ScopeEvidence {
@@ -293,6 +307,7 @@ impl From<&ScopeCalibration> for ScopeEvidence {
             covered_current_count: value.covered_current_count,
             coverage_pct: value.coverage_pct,
             latency: value.latency.into(),
+            buckets: value.buckets.clone(),
         }
     }
 }
@@ -647,11 +662,20 @@ fn calibrate_scope(
     let mut first_p90 = 0.0;
     let mut complete_p90 = 0.0;
     let mut p90_available = true;
+    let mut buckets = Vec::with_capacity(current.len());
     for current_bucket in current {
-        let Some(historical_bucket) = historical
+        let historical_bucket = historical
             .iter()
-            .find(|candidate| candidate.bucket == current_bucket.bucket)
-        else {
+            .find(|candidate| candidate.bucket == current_bucket.bucket);
+        buckets.push(BucketEvidence {
+            bucket: current_bucket.bucket.clone(),
+            current_samples: current_bucket.count,
+            historical_samples: historical_bucket.map_or(0, |bucket| bucket.count),
+            profile_coverage_pct: historical_bucket.map_or(0.0, |_| {
+                count_as_f64(current_bucket.count) / count_as_f64(total_current) * 100.0
+            }),
+        });
+        let Some(historical_bucket) = historical_bucket else {
             continue;
         };
         covered_current_count = covered_current_count
@@ -686,6 +710,7 @@ fn calibrate_scope(
         sample_count,
         covered_current_count,
         coverage_pct,
+        buckets,
         latency: LatencyCalibration {
             first_event_p50_ms: first_p50 / covered,
             first_event_p90_ms: p90_available.then_some(first_p90 / covered),
@@ -789,7 +814,8 @@ fn mechanism_evidence(cases: &[BenchmarkCase]) -> Result<(MechanismEvidence, f64
         .iter()
         .filter(|sample| sample.retries == 0)
         .any(|sample| {
-            sample.round_transports.first() != Some(&super::RoundTransport::Http)
+            sample.websocket_reconnects != 0
+                || sample.round_transports.first() != Some(&super::RoundTransport::Http)
                 || sample
                     .round_transports
                     .iter()
@@ -799,7 +825,7 @@ fn mechanism_evidence(cases: &[BenchmarkCase]) -> Result<(MechanismEvidence, f64
         })
     {
         return Err(profile_error(
-            "Hybrid continuation requires one HTTP first round and at least two warm WS rounds",
+            "Hybrid continuation requires one HTTP first round, at least two warm WS rounds, and no reconnects",
         ));
     }
     let http = case_report(continuation_case(cases, HTTP_PATH)?)?;
@@ -1128,6 +1154,28 @@ fn write_constant_change(
     )
 }
 
+fn write_bucket_evidence(
+    output: &mut impl Write,
+    label: &str,
+    scope: &ScopeEvidence,
+) -> io::Result<()> {
+    writeln!(output, "  {label}逐桶：")?;
+    for bucket in &scope.buckets {
+        writeln!(
+            output,
+            "    bucket[input={}, output={}, cached_ratio={}, reasoning_effort={}] current_n={} history_n={} coverage={:.1}%",
+            bucket.bucket.input,
+            bucket.bucket.output,
+            bucket.bucket.cached_ratio,
+            bucket.bucket.reasoning_effort,
+            bucket.current_samples,
+            bucket.historical_samples,
+            bucket.profile_coverage_pct,
+        )?;
+    }
+    Ok(())
+}
+
 fn write_candidate_report(
     output: &mut impl Write,
     summary: &CandidateSummary,
@@ -1204,6 +1252,8 @@ fn write_candidate_report(
             day.full_day.sample_count,
             day.full_day.coverage_pct,
         )?;
+        write_bucket_evidence(output, "同窗", &day.same_window)?;
+        write_bucket_evidence(output, "全天", &day.full_day)?;
     }
     writeln!(
         output,
@@ -1585,6 +1635,42 @@ mod tests {
     }
 
     #[test]
+    fn refuses_candidate_with_hybrid_reconnects() -> Result<(), io::Error> {
+        use std::time::Duration;
+
+        use super::super::{BenchmarkSettings, HYBRID_PATH, settings::WorkloadSource};
+        use super::candidate_summary;
+
+        let bytes = serde_json::to_vec(&profile()?).map_err(io::Error::other)?;
+        let settings = BenchmarkSettings {
+            upstream: "https://api.ai-cove.com/v1".to_owned(),
+            model: "gpt-5.6-luna".to_owned(),
+            prompt: "fixed workload".to_owned(),
+            workload_source: WorkloadSource::BuiltIn,
+            runs: 12,
+            warmups: 1,
+            timeout: Duration::from_secs(180),
+        };
+        let mut cases = benchmark_cases(false);
+        let hybrid = cases
+            .iter_mut()
+            .find(|case| case.path == HYBRID_PATH)
+            .ok_or_else(|| io::Error::other("missing Hybrid fixture"))?;
+        hybrid
+            .samples
+            .first_mut()
+            .ok_or_else(|| io::Error::other("missing Hybrid sample fixture"))?
+            .websocket_reconnects = 1;
+
+        let error = candidate_summary(&bytes, &settings, &cases)
+            .expect_err("Hybrid reconnects must not produce constants")
+            .to_string();
+
+        assert!(error.contains("reconnect"));
+        Ok(())
+    }
+
+    #[test]
     fn candidate_reports_constant_deltas_and_bandwidth_sensitivity() -> Result<(), io::Error> {
         use std::time::Duration;
 
@@ -1667,6 +1753,34 @@ mod tests {
         assert!(!serialized.contains("must-not-appear-in-summary"));
         assert!(!serialized.contains("user_id"));
         assert!(!serialized.contains("request_headers"));
+        let serialized = serde_json::to_value(&summary).map_err(io::Error::other)?;
+        let bucket = serialized
+            .pointer("/historicalCalibration/days/0/sameWindow/buckets/0")
+            .ok_or_else(|| io::Error::other("missing per-bucket evidence"))?;
+        assert_eq!(
+            bucket
+                .pointer("/bucket/reasoningEffort")
+                .and_then(serde_json::Value::as_str),
+            Some("high")
+        );
+        assert_eq!(
+            bucket
+                .get("currentSamples")
+                .and_then(serde_json::Value::as_u64),
+            Some(100)
+        );
+        assert_eq!(
+            bucket
+                .get("historicalSamples")
+                .and_then(serde_json::Value::as_u64),
+            Some(1_000)
+        );
+        assert_eq!(
+            bucket
+                .get("profileCoveragePct")
+                .and_then(serde_json::Value::as_f64),
+            Some(100.0)
+        );
         Ok(())
     }
 
@@ -1700,6 +1814,8 @@ mod tests {
         assert!(human.contains("10 Mbps"));
         assert!(human.contains("20 Mbps"));
         assert!(human.contains("历史 before/after 仅作交叉验证，不归因于 Turbo"));
+        assert!(human.contains("逐桶："));
+        assert!(human.contains("current_n=100 history_n=1000 coverage=100.0%"));
         let machine: serde_json::Value =
             serde_json::from_slice(&machine).map_err(io::Error::other)?;
         assert_eq!(

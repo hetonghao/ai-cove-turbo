@@ -7,7 +7,7 @@
 - 公网模型 benchmark 会产生付费请求，只有获得明确授权并注入 `AI_COVE_API_KEY` 后才能运行。
 - profile 不得包含用户 ID、提示词、IP、Token 名称、请求 ID、API Key 或完整请求头；解析器拒绝未声明字段。
 - `measurement_date` 的 `anchor_date` 必须是 D-15，且历史至少三天。少于五天时，每个缺失日期必须使用固定原因码说明。
-- 每条核心路径必须有至少 12 个无重试样本；Hybrid 每个有效样本必须包含首轮 HTTP 和至少两个 warm WS continuation。
+- 每条核心路径必须有至少 12 个无重试样本；Hybrid 每个有效样本必须包含首轮 HTTP 和至少两个 warm WS continuation，且期间不得发生重连。
 - 任一日期的同窗或全天匹配覆盖率低于 70%，或历史方向与机制层相反时，不生成候选常量。
 
 ## Profile 口径
@@ -24,6 +24,8 @@
 `current` 还需提供 HTTP/WS 请求数、raw/sent bytes 的 P50/P90，以及首事件和 complete 的 P50/P90。每个历史日期同时提供 `same_window` 与 `full_day`。历史桶少于 12 条或缺少 P90 时，报告保留 P50、样本数和覆盖率，但不构造 P90。
 
 多桶统计先按当天分布标准化每个历史日，再对日期取中位数，因此每个日期等权，不按历史请求量加权。历史 before/after 只用于真实体验交叉验证；WebSocket 固定节省毫秒只来自 Turbo HTTP 与 Hybrid 纯 WS warm rounds 的差值。上传压缩收益单独按 5、10、20 Mbps 输出，避免重复计入 WS 固定收益。
+
+候选报告在每个历史日的同窗和全天范围下逐桶输出当前样本数、历史样本数和 `profileCoveragePct`；该值是该匹配桶对当前 profile 总覆盖率的贡献，同一范围内求和等于逐日总覆盖率。
 
 ## 执行
 

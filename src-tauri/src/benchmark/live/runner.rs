@@ -71,14 +71,17 @@ pub(super) async fn verify_benchmark_websocket_lifecycle(
                 && sample.websocket_messages == expected_messages
                 && sample.messages_per_connection == Some(expected_messages)
                 && sample.websocket_reconnects == 0 => {}
-        BenchmarkPath::Hybrid => {
+        BenchmarkPath::Hybrid if sample.websocket_reconnects == 0 => {
             validate_hybrid_lifecycle(
                 sample.http_requests,
                 sample.websocket_messages,
                 sample.logical_requests,
             )?;
         }
-        BenchmarkPath::WebSocket | BenchmarkPath::Direct | BenchmarkPath::Http => {
+        BenchmarkPath::WebSocket
+        | BenchmarkPath::Hybrid
+        | BenchmarkPath::Direct
+        | BenchmarkPath::Http => {
             return Err(io::Error::other(format!(
                 "benchmark-client {} lifecycle gate failed: handshakes={}, logical_requests={}, http_requests={}, websocket_messages={}, messages_per_connection={:?}, reconnects={}",
                 path.label(),
