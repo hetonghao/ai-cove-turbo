@@ -156,6 +156,8 @@
   let renderedBarMarkup = "";
   let activeChartIndex = 0;
   let connectionPanelOpen = false;
+  let connectionPanelTrigger = null;
+  let connectionDockOffset = 0;
   let connectionSnapshot = invoke
     ? { currentConnections: 0, prewarm: 0, boundThreads: [], transitions: [], recentClosed: [] }
     : previewConnectionSnapshot;
@@ -165,6 +167,8 @@
   let connectionError = "";
   const sessionNumbers = new Map();
   const connectionNumbers = new Map();
+  const sessionTitles = new Map();
+  const sessionTitleRequests = new Set();
 
   const actions = {
     "toggle-compression": ["set_compression", () => ({ enabled: !state.compressionEnabled })],
@@ -621,6 +625,27 @@
     return `会话 ${String(sessionNumbers.get(threadId) || 0).padStart(2, "0")}`;
   }
 
+  function sessionTitle(threadId) {
+    if (!invoke) return "Preview 会话";
+    if (!sessionTitles.has(threadId)) return "读取中…";
+    return sessionTitles.get(threadId) || "未命名会话";
+  }
+
+  function requestSessionTitles(snapshot, recentClosed) {
+    if (!invoke) return;
+    const items = [...snapshot.boundThreads, ...snapshot.transitions, ...recentClosed];
+    new Set(items.map(connectionThreadId).filter(Boolean)).forEach((threadId) => {
+      if (sessionTitleRequests.has(threadId)) return;
+      sessionTitleRequests.add(threadId);
+      void invoke("get_codex_thread_title", { threadId })
+        .then((title) => {
+          sessionTitles.set(threadId, String(title || "").trim());
+          if (connectionPanelOpen) renderConnectionInspector();
+        })
+        .catch(() => sessionTitles.set(threadId, ""));
+    });
+  }
+
   function connectionName(threadId, connectionId) {
     const number = connectionNumbers.get(threadId)?.byId.get(connectionId) || 0;
     return `连接 ${String(number).padStart(2, "0")}`;
@@ -709,6 +734,8 @@
       });
     }).join("");
     const sessionDetails = [
+      ["会话名称", sessionTitle(group.threadId)],
+      ["会话 ID", group.threadId],
       ["连接", `${items.length} 条`],
       ["传输", `发送 ${counts.up} · 接收 ${counts.down} · 空闲 ${counts.idle}`],
     ];
@@ -739,6 +766,8 @@
     const abnormalCount = items.filter((item) => !item.normal).length;
     const sessionState = status === "closed" ? "已释放" : status === "pending" ? "恢复中" : "仍在绑定";
     const sessionDetails = [
+      ["会话名称", sessionTitle(group.threadId)],
+      ["会话 ID", group.threadId],
       ["会话状态", sessionState],
       ["关闭记录", `${items.length} 条`],
       ["异常", `${abnormalCount} 条`],
@@ -769,6 +798,20 @@
     const snapshot = normalizeConnectionSnapshot(connectionSnapshot);
     const recentClosed = snapshot.recentClosed.slice(0, RECENT_CLOSED_LIMIT);
     reconcileConnectionNumbers(snapshot, recentClosed);
+    requestSessionTitles(snapshot, recentClosed);
+    const activityCounts = snapshot.boundThreads.reduce((counts, item) => {
+      const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
+      counts[activity] += 1;
+      return counts;
+    }, { up: 0, down: 0, idle: 0 });
+    Object.entries(activityCounts).forEach(([activity, count]) => {
+      const target = $(`[data-connection-summary="${activity}"]`);
+      if (target) target.textContent = numberFormatter.format(count);
+    });
+    const summaryLabel = `发送 ${activityCounts.up}，接收 ${activityCounts.down}，休眠 ${activityCounts.idle}`;
+    const summaryTrigger = $("[data-connection-summary-trigger]");
+    if (summaryTrigger) summaryTrigger.setAttribute("aria-label", `${summaryLabel}，${connectionPanelOpen ? "收起" : "打开"}连接检查器`);
+    if (!connectionPanelOpen) return;
     const boundGroups = groupConnectionsByThread(snapshot.boundThreads);
     const sessionStatuses = new Map(
       boundGroups.map((group) => [group.threadId, boundSessionStatus(group)]),
@@ -844,31 +887,107 @@
           ? "正在读取当前 WebSocket 连接…"
           : "";
     }
+    panel.classList?.toggle?.("is-overflowing", Number(panel.scrollHeight) > Number(panel.clientHeight) + 1);
   }
 
-  function setConnectionPanelOpen(open, { restoreFocus = true } = {}) {
+  function setConnectionPanelOpen(open, { restoreFocus = true, trigger = null } = {}) {
     connectionPanelOpen = Boolean(open);
     const panel = $("[data-connection-panel]");
-    const trigger = $('[data-action="toggle-connections"]');
-    if (trigger) trigger.setAttribute("aria-expanded", String(connectionPanelOpen));
+    const dock = $("[data-connection-dock]");
+    if (connectionPanelOpen && trigger) connectionPanelTrigger = trigger;
+    all('[data-action="toggle-connections"]').forEach((control) => {
+      control.setAttribute("aria-expanded", String(connectionPanelOpen));
+    });
+    if (dock) dock.dataset.open = String(connectionPanelOpen);
+    if (panel) panel.hidden = !connectionPanelOpen;
+    renderConnectionInspector();
     if (panel) {
-      panel.hidden = !connectionPanelOpen;
       if (connectionPanelOpen) {
-        renderConnectionInspector();
         playMotion(panel, [
-          { opacity: 0.82, transform: "translate3d(8px, -4px, 0)", filter: "blur(3px)" },
-          { opacity: 1, transform: "translate3d(0, 0, 0)", filter: "blur(0)" },
+          { opacity: 0.72, transform: "translate3d(0, -8px, 0)", clipPath: "inset(0 0 100% 0 round 14px)", filter: "blur(3px)" },
+          { opacity: 1, transform: "translate3d(0, 0, 0)", clipPath: "inset(0 0 0 0 round 14px)", filter: "blur(0)" },
         ], motion.revealMs);
         $('[data-action="close-connections"]')?.focus?.();
       } else {
         cancelMotion(panel);
       }
     }
-    if (!connectionPanelOpen && restoreFocus) trigger?.focus?.();
+    if (!connectionPanelOpen && restoreFocus) connectionPanelTrigger?.focus?.();
+  }
+
+  function setConnectionDockOffset(value) {
+    const dock = $("[data-connection-dock]");
+    if (!dock) return;
+    const viewportWidth = Number(window.innerWidth) || document.documentElement?.clientWidth || 0;
+    const dockWidth = Number(dock.offsetWidth) || dock.getBoundingClientRect?.().width || 0;
+    const limit = Math.max(0, (viewportWidth - dockWidth) / 2 - 12);
+    connectionDockOffset = Math.max(-limit, Math.min(limit, Number(value) || 0));
+    dock.style.setProperty("--connection-dock-offset", `${Math.round(connectionDockOffset)}px`);
+  }
+
+  function bindConnectionDock() {
+    const dock = $("[data-connection-dock]");
+    const grip = $("[data-connection-grip]");
+    if (!dock || !grip) return;
+    let drag = null;
+    let suppressClick = false;
+
+    grip.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      drag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        lastY: event.clientY,
+        startOffset: connectionDockOffset,
+        moved: false,
+      };
+      dock.classList.add("is-dragging");
+      grip.setPointerCapture?.(event.pointerId);
+    });
+    grip.addEventListener("pointermove", (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const deltaX = event.clientX - drag.startX;
+      const deltaY = event.clientY - drag.startY;
+      drag.lastY = event.clientY;
+      drag.moved ||= Math.hypot(deltaX, deltaY) > 3;
+      setConnectionDockOffset(drag.startOffset + deltaX);
+      event.preventDefault();
+    });
+    const finishDrag = (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const upwardDistance = drag.startY - (Number.isFinite(event.clientY) ? event.clientY : drag.lastY);
+      suppressClick = drag.moved;
+      if (suppressClick) window.setTimeout?.(() => { suppressClick = false; }, 0);
+      dock.classList.remove("is-dragging");
+      grip.releasePointerCapture?.(event.pointerId);
+      drag = null;
+      if (upwardDistance >= 28) setConnectionPanelOpen(false);
+    };
+    grip.addEventListener("pointerup", finishDrag);
+    grip.addEventListener("pointercancel", finishDrag);
+    grip.addEventListener("click", (event) => {
+      if (suppressClick) {
+        suppressClick = false;
+        event.preventDefault();
+        return;
+      }
+      setConnectionPanelOpen(false);
+    });
+    grip.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowUp") setConnectionPanelOpen(false);
+      else if (event.key === "ArrowLeft") setConnectionDockOffset(connectionDockOffset - 24);
+      else if (event.key === "ArrowRight") setConnectionDockOffset(connectionDockOffset + 24);
+      else if (event.key === "Home") setConnectionDockOffset(0);
+      else return;
+      event.preventDefault();
+    });
+    window.addEventListener("resize", () => setConnectionDockOffset(connectionDockOffset), { passive: true });
+    setConnectionDockOffset(0);
   }
 
   async function refreshConnectionSnapshot() {
-    if (!connectionPanelOpen || connectionRefreshing || document.hidden) return;
+    if (state.tab !== "live" || connectionRefreshing || document.hidden) return;
     if (!invoke) {
       connectionSnapshot = previewConnectionSnapshot;
       connectionHydrated = true;
@@ -877,7 +996,7 @@
       return;
     }
     connectionRefreshing = true;
-    connectionLoading = !connectionHydrated;
+    connectionLoading = connectionPanelOpen && !connectionHydrated;
     connectionError = "";
     renderConnectionInspector();
     try {
@@ -888,7 +1007,7 @@
     } finally {
       connectionLoading = false;
       connectionRefreshing = false;
-      if (connectionPanelOpen) renderConnectionInspector();
+      if (state.tab === "live") renderConnectionInspector();
     }
   }
 
@@ -1121,8 +1240,8 @@
       if (connectionPanelOpen) {
         setConnectionPanelOpen(false);
       } else {
-        setConnectionPanelOpen(true);
-        await refreshConnectionSnapshot();
+        setConnectionPanelOpen(true, { trigger: control });
+        if (!connectionHydrated) await refreshConnectionSnapshot();
       }
       return;
     }
@@ -1191,7 +1310,7 @@
       renderState();
     } finally {
       refreshing = false;
-      if (connectionPanelOpen) await refreshConnectionSnapshot();
+      if (state.tab === "live") await refreshConnectionSnapshot();
     }
   }
 
@@ -1351,9 +1470,11 @@
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && invoke) void refreshStatus();
     });
+    bindConnectionDock();
     bindDotField();
     renderTab();
     renderState();
+    renderConnectionInspector();
     updateUrl();
     if (invoke) {
       void refreshStatus();

@@ -371,14 +371,41 @@ test("Strands 数量跟随五项聚合状态转绿", async () => {
   assert.deepEqual(strands.map((canvas) => canvas.dataset.count), ["4", "4"]);
 });
 
-test("连接检查器只在打开时读取快照、兼容旧总数并支持 Escape 关闭", async () => {
+test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const trigger = element({ action: "toggle-connections" });
   trigger.focused = false;
   trigger.focus = () => { trigger.focused = true; };
   trigger.closest = (selector) => selector === "[data-action]" ? trigger : null;
+  const summaryTrigger = element({ action: "toggle-connections", connectionSummaryTrigger: "" });
+  summaryTrigger.focused = false;
+  summaryTrigger.focus = () => { summaryTrigger.focused = true; };
+  summaryTrigger.closest = (selector) => selector === "[data-action]" ? summaryTrigger : null;
   const panel = motionElement({ connectionPanel: "" }, true);
+  let panelOverflow = false;
+  panel.clientHeight = 600;
+  panel.scrollHeight = 500;
+  panel.classList = {
+    toggle(name, active) {
+      if (name === "is-overflowing") panelOverflow = active;
+    },
+  };
+  const dock = element({ connectionDock: "" });
+  dock.offsetWidth = 456;
+  let dockOffset = "0px";
+  dock.style.setProperty = (name, value) => {
+    if (name === "--connection-dock-offset") dockOffset = value;
+  };
+  dock.classList = { add() {}, remove() {} };
+  const grip = element({ connectionGrip: "" });
+  const gripHandlers = new Map();
+  grip.addEventListener = (type, handler) => gripHandlers.set(type, handler);
+  grip.setPointerCapture = () => {};
+  grip.releasePointerCapture = () => {};
   const total = element({ connectionTotal: "" });
+  const summaryUp = element({ connectionSummary: "up" });
+  const summaryDown = element({ connectionSummary: "down" });
+  const summaryIdle = element({ connectionSummary: "idle" });
   const prewarmCount = element({ connectionCount: "prewarm" });
   const boundCount = element({ connectionCount: "bound" });
   const transitionCount = element({ connectionCount: "transitions" });
@@ -406,7 +433,12 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
   message.hidden = true;
   const selectors = new Map([
     ["[data-connection-panel]", panel],
+    ["[data-connection-dock]", dock],
+    ["[data-connection-grip]", grip],
     ["[data-connection-total]", total],
+    ['[data-connection-summary="up"]', summaryUp],
+    ['[data-connection-summary="down"]', summaryDown],
+    ['[data-connection-summary="idle"]', summaryIdle],
     ['[data-connection-count="prewarm"]', prewarmCount],
     ['[data-connection-count="bound"]', boundCount],
     ['[data-connection-count="transitions"]', transitionCount],
@@ -416,9 +448,15 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
     ['[data-connection-list="transitions"]', transitions],
     ['[data-connection-list="closed"]', closed],
     ["[data-connection-message]", message],
-    ['[data-action="toggle-connections"]', trigger],
+    ['[data-action="toggle-connections"]', summaryTrigger],
   ]);
   const invoked = [];
+  const titleCalls = [];
+  const threadTitles = {
+    "thread-12345678-alpha": "Alpha 压缩调试",
+    "thread-12345678-beta": "Beta 连接验证",
+    "thread-released": "已结束会话",
+  };
   const snapshot = {
     currentConnections: 7,
     prewarm: 2,
@@ -451,12 +489,17 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
     },
     querySelector(selector) { return selectors.get(selector) ?? null; },
     querySelectorAll(selector) {
+      if (selector === '[data-action="toggle-connections"]') return [summaryTrigger, trigger];
       if (selector === "[data-action]") return [trigger];
       return [];
     },
   };
   const window = {
-    __TAURI__: { core: { invoke: async (command) => {
+    __TAURI__: { core: { invoke: async (command, args) => {
+      if (command === "get_codex_thread_title") {
+        titleCalls.push(args.threadId);
+        return threadTitles[args.threadId] ?? null;
+      }
       invoked.push(command);
       return command === "get_connection_snapshot"
         ? snapshot
@@ -465,29 +508,37 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
     location: { href: "tauri://localhost/?tab=live" },
     history: { replaceState() {} },
     matchMedia: () => ({ matches: false }),
+    innerWidth: 1_000,
     addEventListener() {},
     setInterval(handler) { onTick = handler; },
   };
 
   await runApp(source, { document, Error, window, URL, Intl });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(invoked, ["get_app_status"]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(invoked, ["get_app_status", "get_connection_snapshot"]);
+  assert.equal(summaryUp.textContent, "1");
+  assert.equal(summaryDown.textContent, "1");
+  assert.equal(summaryIdle.textContent, "1");
 
-  onClick({ target: trigger });
+  onClick({ target: summaryTrigger });
+  await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(panel.hidden, false);
+  assert.equal(dock.dataset.open, "true");
+  assert.equal(panelOverflow, false);
   assert.equal(trigger.attributes.get("aria-expanded"), "true");
-  assert.equal(invoked.at(-1), "get_connection_snapshot");
+  assert.equal(summaryTrigger.attributes.get("aria-expanded"), "true");
   assert.equal(total.textContent, "7");
   assert.match(prewarm.innerHTML, /<strong>P01<\/strong>[\s\S]*?<dt>状态<\/dt><dd>空白预热<\/dd>[\s\S]*?<dt>回收<\/dt><dd>容量压力时回收<\/dd>/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?会话 01[\s\S]*?×2[\s\S]*?c-connection-session__separator[\s\S]*?连接 01[\s\S]*?连接 02/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-beta"[^>]*>[\s\S]*?会话 02/);
   assert.match(bound.innerHTML, /c-connection-session__summary"[^>]*aria-label="会话 01，2 条连接，发送 0，接收 1，空闲 1"[^>]*>\s*<svg class="c-session-icon"/);
-  assert.match(bound.innerHTML, /<span class="c-hover-card" aria-hidden="true"><strong>会话 01<\/strong><dl><div><dt>连接<\/dt><dd>2 条<\/dd><\/div><div><dt>传输<\/dt><dd>发送 0 · 接收 1 · 空闲 1<\/dd>/);
+  assert.match(bound.innerHTML, /<span class="c-hover-card" aria-hidden="true"><strong>会话 01<\/strong><dl><div><dt>会话名称<\/dt><dd>Alpha 压缩调试<\/dd><\/div><div><dt>会话 ID<\/dt><dd>thread-12345678-alpha<\/dd>/);
   const boundSessionHover = bound.innerHTML.match(/<span class="c-hover-card"[^>]*><strong>会话 01<\/strong>[\s\S]*?<\/span>/)?.[0] ?? "";
-  assert.doesNotMatch(boundSessionHover, /线程 ID|thread-/);
+  assert.match(boundSessionHover, /会话名称|会话 ID|thread-12345678-alpha/);
   assert.match(bound.innerHTML, /<svg class="c-session-icon"[^>]*><path d="M3 1\.75h8[^>]*\/><\/svg>/);
   assert.doesNotMatch(bound.innerHTML, /<svg class="c-session-icon"[^>]*>[\s\S]*?<rect/);
   assert.match(bound.innerHTML, /data-connection-id="S001"[\s\S]*?连接 01/);
@@ -507,7 +558,7 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
   assert.match(closed.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?会话 01[\s\S]*?×3[\s\S]*?c-connection-session__separator[\s\S]*?data-connection-event-id="C004"[\s\S]*?data-connection-event-id="C001"[\s\S]*?data-connection-event-id="C002"/);
   assert.match(closed.innerHTML, /data-thread-id="thread-released"[^>]*>[\s\S]*?c-session-icon" data-connection-state="closed"[\s\S]*?<dt>会话状态<\/dt><dd>已释放<\/dd>/);
   const closedSessionHover = closed.innerHTML.match(/<span class="c-hover-card"[^>]*><strong>会话 01<\/strong>[\s\S]*?<\/span>/)?.[0] ?? "";
-  assert.doesNotMatch(closedSessionHover, /线程 ID|thread-/);
+  assert.match(closedSessionHover, /会话名称|会话 ID|thread-12345678-alpha/);
   assert.match(closed.innerHTML, /data-connection-id="S003"[\s\S]*?连接 05/);
   assert.match(closed.innerHTML, /data-connection-id="S006"[\s\S]*?连接 06/);
   assert.match(closed.innerHTML, /data-connection-event-id="C001"/);
@@ -515,6 +566,41 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
   assert.match(closed.innerHTML, /data-connection-event-id="C003"/);
   assert.match(closed.innerHTML, /上游连接关闭/);
   assert.match(closed.innerHTML, /连接恢复失败/);
+
+  panel.scrollHeight = 700;
+  await onTick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(panelOverflow, true);
+  panel.scrollHeight = 500;
+
+  gripHandlers.get("pointerdown")({ button: 0, pointerId: 1, clientX: 100, clientY: 100, preventDefault() {} });
+  gripHandlers.get("pointermove")({ pointerId: 1, clientX: 170, clientY: 100, preventDefault() {} });
+  gripHandlers.get("pointerup")({ pointerId: 1, clientX: 170, clientY: 100 });
+  assert.equal(dockOffset, "70px");
+  gripHandlers.get("click")({ preventDefault() {} });
+  assert.equal(panel.hidden, false);
+
+  gripHandlers.get("pointerdown")({ button: 0, pointerId: 2, clientX: 170, clientY: 100, preventDefault() {} });
+  gripHandlers.get("pointermove")({ pointerId: 2, clientX: 170, clientY: 64, preventDefault() {} });
+  gripHandlers.get("pointerup")({ pointerId: 2, clientX: 170, clientY: 64 });
+  assert.equal(panel.hidden, true);
+  assert.equal(dock.dataset.open, "false");
+  gripHandlers.get("click")({ preventDefault() {} });
+
+  onClick({ target: summaryTrigger });
+  await new Promise((resolve) => setImmediate(resolve));
+  gripHandlers.get("click")({ preventDefault() {} });
+  assert.equal(panel.hidden, true);
+
+  onClick({ target: trigger });
+  assert.equal(panel.hidden, false);
+  assert.equal(summaryTrigger.attributes.get("aria-expanded"), "true");
+  onClick({ target: trigger });
+  assert.equal(panel.hidden, true);
+  assert.equal(summaryTrigger.attributes.get("aria-expanded"), "false");
+  onClick({ target: trigger });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(panel.hidden, false);
 
   // Given/When: 同一会话当前只剩空闲绑定。
   snapshot.boundThreads[0].activity = "idle";
@@ -526,9 +612,11 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
   assert.match(closed.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?c-session-icon" data-connection-state="bound"/);
 
   transitionDetails[0].open = true;
+  const titleCallCount = titleCalls.length;
   await onTick();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(invoked.slice(-2), ["get_app_status", "get_connection_snapshot"]);
+  assert.equal(titleCalls.length, titleCallCount);
   assert.equal(transitionDetails[0].dataset.transitionId, "T003");
   assert.equal(transitionDetails[0].open, true);
 
@@ -945,9 +1033,9 @@ test("实时终端提供可访问的回到最新操作", async () => {
   assert.match(html, /data-live-follow-label[^>]*aria-live="polite"[^>]*>回到最新</);
 });
 
-test("页面隐藏时暂停状态轮询并在恢复可见后立即刷新", async () => {
+test("页面隐藏时暂停状态与连接摘要轮询并在恢复可见后立即刷新", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
-  let invokes = 0;
+  const invokes = [];
   let onTick;
   let onVisibilityChange;
   const document = {
@@ -960,7 +1048,12 @@ test("页面隐藏时暂停状态轮询并在恢复可见后立即刷新", async
     querySelectorAll() { return []; },
   };
   const window = {
-    __TAURI__: { core: { invoke: async () => { invokes += 1; return {}; } } },
+    __TAURI__: { core: { invoke: async (command) => {
+      invokes.push(command);
+      return command === "get_connection_snapshot"
+        ? { currentConnections: 0, prewarm: 0, boundThreads: [], transitions: [], recentClosed: [] }
+        : {};
+    } } },
     location: { href: "tauri://localhost/?tab=live" },
     history: { replaceState() {} },
     addEventListener() {},
@@ -969,14 +1062,19 @@ test("页面隐藏时暂停状态轮询并在恢复可见后立即刷新", async
 
   await runApp(source, { document, window, URL, Intl });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(invokes, 1);
+  assert.deepEqual(invokes, ["get_app_status", "get_connection_snapshot"]);
 
   document.hidden = true;
   await onTick();
-  assert.equal(invokes, 1);
+  assert.deepEqual(invokes, ["get_app_status", "get_connection_snapshot"]);
 
   document.hidden = false;
   onVisibilityChange();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(invokes, 2);
+  assert.deepEqual(invokes, [
+    "get_app_status",
+    "get_connection_snapshot",
+    "get_app_status",
+    "get_connection_snapshot",
+  ]);
 });

@@ -3,12 +3,15 @@
 #![allow(clippy::unreachable)] // Tauri's command macro emits an internal unreachable branch.
 #![allow(clippy::redundant_pub_crate)] // Private modules expose crate-scoped test seams.
 
+mod codex_thread_title;
 pub(crate) mod config;
 pub(crate) mod proxy;
 pub(crate) mod runtime;
 
 #[cfg(test)]
 mod benchmark;
+#[cfg(test)]
+mod codex_thread_title_tests;
 #[cfg(test)]
 mod transport_ack_benchmark;
 
@@ -51,6 +54,7 @@ pub fn run() -> tauri::Result<()> {
         .invoke_handler(tauri::generate_handler![
             get_app_status,
             get_connection_snapshot,
+            get_codex_thread_title,
             set_compression,
             set_websocket,
             set_autostart,
@@ -190,6 +194,14 @@ async fn get_connection_snapshot(
     runtime: State<'_, Arc<AppRuntime>>,
 ) -> Result<ConnectionSnapshot, String> {
     Ok(runtime.connection_snapshot().await)
+}
+
+#[tauri::command]
+async fn get_codex_thread_title(app: AppHandle, thread_id: String) -> Option<String> {
+    let home = app.path().home_dir().ok()?;
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map_or_else(|| home.join(".codex"), std::path::PathBuf::from);
+    codex_thread_title::read(codex_home.join("state_5.sqlite"), thread_id).await
 }
 
 #[tauri::command]

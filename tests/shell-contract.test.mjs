@@ -193,6 +193,9 @@ test("实时 Strands 打开紧凑的非模态 WebSocket 连接检查器", async 
   const livePanel = html.slice(html.indexOf('id="panel-live"'), html.indexOf('id="panel-statistics"'));
 
   assert.match(livePanel, /data-action="toggle-connections"[\s\S]*aria-controls="connection-inspector"/);
+  assert.match(livePanel, /data-connection-dock[\s\S]*data-connection-summary-trigger[\s\S]*id="connection-inspector"/);
+  assert.equal(livePanel.match(/data-connection-summary="(?:up|down|idle)"/g)?.length, 3);
+  assert.match(livePanel, /data-connection-grip[\s\S]*向左右拖动可移动面板，点击或向上拖动可收起/);
   assert.match(livePanel, /id="connection-inspector"[\s\S]*aria-modal="false"/);
   assert.doesNotMatch(livePanel, /connection-backdrop|aria-modal="true"/);
 
