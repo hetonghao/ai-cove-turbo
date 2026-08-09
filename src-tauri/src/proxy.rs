@@ -33,6 +33,9 @@ use url::Url;
 mod hybrid;
 mod hybrid_pool;
 mod private_websocket;
+#[cfg(test)]
+#[path = "proxy/private_websocket_benchmark.rs"]
+pub(crate) mod private_websocket_benchmark;
 pub(crate) mod traffic;
 
 pub(crate) use hybrid_pool::ConnectionSnapshot;

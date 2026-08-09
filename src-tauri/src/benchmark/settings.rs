@@ -1,4 +1,6 @@
-use std::{env, error::Error, fs, io, time::Duration};
+use std::{env, fs, io, time::Duration};
+
+use super::{BenchmarkResult, benchmark_error};
 
 pub(super) const DEFAULT_MODEL: &str = "gpt-5.6-luna";
 pub(super) const DEFAULT_MULTI_ROUNDS: usize = 5;
@@ -46,7 +48,7 @@ pub(super) struct UsageScenario {
 }
 
 impl BenchmarkSettings {
-    pub(super) fn from_env() -> Result<Self, Box<dyn Error>> {
+    pub(super) fn from_env() -> BenchmarkResult<Self> {
         let (prompt, workload_source) = benchmark_prompt_from_env()?;
         Ok(Self {
             upstream: env::var("TURBO_BENCHMARK_UPSTREAM")
@@ -65,35 +67,34 @@ impl BenchmarkSettings {
 }
 
 pub(super) fn validate_runs(runs: usize) -> Result<usize, io::Error> {
-    if runs == 0 || !runs.is_multiple_of(3) {
+    if runs == 0 || !runs.is_multiple_of(4) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "TURBO_BENCHMARK_RUNS must be a positive multiple of 3",
+            "TURBO_BENCHMARK_RUNS must be a positive multiple of 4",
         ));
     }
     Ok(runs)
 }
 
-fn benchmark_prompt_from_env() -> Result<(String, WorkloadSource), Box<dyn Error>> {
+fn benchmark_prompt_from_env() -> BenchmarkResult<(String, WorkloadSource)> {
     let inline = optional_env("TURBO_BENCHMARK_PROMPT")?;
     let file = optional_env("TURBO_BENCHMARK_PROMPT_FILE")?;
     match (inline, file) {
         (Some(_), Some(_)) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "set only one of TURBO_BENCHMARK_PROMPT or TURBO_BENCHMARK_PROMPT_FILE",
-        )
-        .into()),
+        )),
         (Some(prompt), None) => Ok((prompt, WorkloadSource::InlineEnvironment)),
         (None, Some(path)) => Ok((fs::read_to_string(path)?, WorkloadSource::File)),
         (None, None) => Ok((default_long_prompt(), WorkloadSource::BuiltIn)),
     }
 }
 
-fn optional_env(name: &str) -> Result<Option<String>, env::VarError> {
+fn optional_env(name: &str) -> BenchmarkResult<Option<String>> {
     match env::var(name) {
         Ok(value) => Ok(Some(value)),
         Err(env::VarError::NotPresent) => Ok(None),
-        Err(error) => Err(error),
+        Err(error) => Err(benchmark_error(error)),
     }
 }
 
@@ -110,46 +111,42 @@ pub(super) fn workload_fingerprint(bytes: &[u8]) -> u64 {
     })
 }
 
-fn positive_env(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {
+fn positive_env(name: &str, default: usize) -> BenchmarkResult<usize> {
     let value = env::var(name).unwrap_or_else(|_| default.to_string());
-    let parsed = value.parse::<usize>()?;
+    let parsed = value.parse::<usize>().map_err(benchmark_error)?;
     if parsed == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{name} must be positive"),
-        )
-        .into());
+        ));
     }
     Ok(parsed)
 }
 
-fn positive_env_u64(name: &str, default: u64) -> Result<u64, Box<dyn Error>> {
+fn positive_env_u64(name: &str, default: u64) -> BenchmarkResult<u64> {
     let value = env::var(name).unwrap_or_else(|_| default.to_string());
-    let parsed = value.parse::<u64>()?;
+    let parsed = value.parse::<u64>().map_err(benchmark_error)?;
     if parsed == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{name} must be positive"),
-        )
-        .into());
+        ));
     }
     Ok(parsed)
 }
 
-fn non_negative_env(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {
-    Ok(env::var(name)
+fn non_negative_env(name: &str, default: usize) -> BenchmarkResult<usize> {
+    env::var(name)
         .unwrap_or_else(|_| default.to_string())
-        .parse::<usize>()?)
+        .parse::<usize>()
+        .map_err(benchmark_error)
 }
 
 pub(super) fn usage_scenarios(settings: &BenchmarkSettings) -> Vec<UsageScenario> {
-    let multi_turn_prompts = (1..=DEFAULT_MULTI_ROUNDS)
-        .map(|round| {
-            format!(
-                "Turbo benchmark multi-turn round {round}; keep the context unchanged and reply with OK only.\n{}",
-                settings.prompt
-            )
-        })
+    let multi_turn_prompts = std::iter::once(settings.prompt.clone())
+        .chain((2..=DEFAULT_MULTI_ROUNDS).map(|round| {
+            format!("Turbo benchmark continuation round {round}; reply with OK only.")
+        }))
         .collect();
     vec![
         UsageScenario {
@@ -163,7 +160,7 @@ pub(super) fn usage_scenarios(settings: &BenchmarkSettings) -> Vec<UsageScenario
             requires_compression: true,
         },
         UsageScenario {
-            name: "连续 5 轮固定长上下文",
+            name: "连续 5 轮真实 continuation",
             prompts: multi_turn_prompts,
             requires_compression: true,
         },

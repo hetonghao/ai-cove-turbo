@@ -2,9 +2,19 @@ use std::{error::Error, io, time::Duration};
 
 use crate::proxy::MetricsSnapshot;
 
+mod calibration;
 mod live;
 mod report;
 mod settings;
+
+pub(super) type BenchmarkResult<T> = Result<T, io::Error>;
+
+pub(super) fn benchmark_error<E>(error: E) -> io::Error
+where
+    E: Error + Send + Sync + 'static,
+{
+    io::Error::other(error)
+}
 
 use settings::{
     BenchmarkSettings, DEFAULT_MODEL, DEFAULT_MULTI_ROUNDS, DEFAULT_TIMEOUT, DEFAULT_UPSTREAM,
@@ -14,6 +24,7 @@ use settings::{
 const DIRECT_PATH: &str = "直连（不走 Turbo）";
 const HTTP_PATH: &str = "Turbo HTTP + 自适应 zstd";
 const WEBSOCKET_PATH: &str = "Turbo WS + 自适应 zstd";
+const HYBRID_PATH: &str = "local-WS Hybrid";
 const BENCHMARK_INSTRUCTIONS: &str = "Treat the input as context and reply with OK only.";
 
 #[cfg(test)]
@@ -24,6 +35,23 @@ struct RoundSample {
     e2e: Duration,
     first_event: Option<Duration>,
     response_events: u64,
+    response_id: Option<String>,
+    request_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RoundTransport {
+    Http,
+    WebSocket,
+}
+
+impl RoundTransport {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Http => "HTTP",
+            Self::WebSocket => "WS",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -34,6 +62,8 @@ struct Sample {
     encoded_bytes: u64,
     logical_requests: u64,
     application_messages: u64,
+    http_requests: u64,
+    websocket_messages: u64,
     response_events: u64,
     websocket_handshakes: u64,
     round_e2e: Vec<Duration>,
@@ -42,6 +72,8 @@ struct Sample {
     connection_lifetime: Option<Duration>,
     websocket_reconnects: u64,
     messages_per_connection: Option<u64>,
+    retries: u64,
+    round_transports: Vec<RoundTransport>,
 }
 
 #[derive(Debug)]
@@ -80,16 +112,53 @@ fn websocket_payload(model: &str, prompt: &str) -> String {
     .to_string()
 }
 
+fn payload_with_previous_response_id(
+    payload: &str,
+    previous_response_id: Option<&str>,
+) -> BenchmarkResult<String> {
+    let mut value = serde_json::from_str::<serde_json::Value>(payload).map_err(benchmark_error)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("benchmark payload must be a JSON object"))?;
+    object.remove("previous_response_id");
+    if let Some(response_id) = previous_response_id {
+        object.insert(
+            "previous_response_id".to_owned(),
+            serde_json::Value::String(response_id.to_owned()),
+        );
+    }
+    serde_json::to_string(&value).map_err(benchmark_error)
+}
+
+enum Completion {
+    Pending,
+    Complete(Option<String>),
+}
+
+fn completion_response_id(event: &[u8]) -> Completion {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(event) else {
+        return Completion::Pending;
+    };
+    if !matches!(
+        value.get("type").and_then(serde_json::Value::as_str),
+        Some("response.completed" | "response.done")
+    ) {
+        return Completion::Pending;
+    }
+    Completion::Complete(
+        value
+            .get("response")
+            .and_then(|response| response.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    )
+}
+
 fn response_is_complete(event: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(event)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .is_some_and(|kind| matches!(kind.as_str(), "response.completed" | "response.done"))
+    matches!(
+        completion_response_id(event.as_bytes()),
+        Completion::Complete(_)
+    )
 }
 
 fn summarize_latency(values: &[Duration]) -> Option<LatencyMsSummary> {
@@ -113,8 +182,8 @@ fn summarize_latency(values: &[Duration]) -> Option<LatencyMsSummary> {
     })
 }
 
-fn responses_url(base: &str, websocket: bool) -> Result<String, Box<dyn Error>> {
-    let mut url = url::Url::parse(base)?;
+fn responses_url(base: &str, websocket: bool) -> BenchmarkResult<String> {
+    let mut url = url::Url::parse(base).map_err(benchmark_error)?;
     let path = format!("{}/responses", url.path().trim_end_matches('/'));
     url.set_path(&path);
     url.set_query(None);
@@ -126,8 +195,7 @@ fn responses_url(base: &str, websocket: bool) -> Result<String, Box<dyn Error>> 
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "upstream must use http(s)",
-                )
-                .into());
+                ));
             }
         }
     } else {

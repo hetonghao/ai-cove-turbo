@@ -1,21 +1,24 @@
 use std::{
-    error::Error,
     io,
     sync::{Arc, atomic::AtomicBool},
 };
 
 use url::Url;
 
-use crate::proxy::{Metrics, ProxyOptions, start_proxy};
+use crate::proxy::{
+    Metrics, ProxyOptions, private_websocket_benchmark::start as start_private_websocket_proxy,
+    start_proxy,
+};
 
 use super::{
-    BenchmarkCase, BenchmarkSettings, DIRECT_PATH, HTTP_PATH, Sample, UsageScenario,
-    WEBSOCKET_PATH, http_payload, websocket_payload,
+    BenchmarkCase, BenchmarkResult, BenchmarkSettings, DIRECT_PATH, HTTP_PATH, HYBRID_PATH, Sample,
+    UsageScenario, WEBSOCKET_PATH, benchmark_error, http_payload, websocket_payload,
 };
 
 #[cfg(test)]
 mod connection_tests;
 mod http;
+#[cfg(test)]
 mod runner;
 mod websocket;
 
@@ -24,6 +27,7 @@ enum BenchmarkPath {
     Direct,
     Http,
     WebSocket,
+    Hybrid,
 }
 
 impl BenchmarkPath {
@@ -32,26 +36,36 @@ impl BenchmarkPath {
             Self::Direct => DIRECT_PATH,
             Self::Http => HTTP_PATH,
             Self::WebSocket => WEBSOCKET_PATH,
+            Self::Hybrid => HYBRID_PATH,
         }
     }
 }
 
-const fn rotated_paths(iteration: usize) -> [BenchmarkPath; 3] {
-    match iteration % 3 {
+const fn rotated_paths(iteration: usize) -> [BenchmarkPath; 4] {
+    match iteration % 4 {
         0 => [
             BenchmarkPath::Direct,
             BenchmarkPath::Http,
             BenchmarkPath::WebSocket,
+            BenchmarkPath::Hybrid,
         ],
         1 => [
             BenchmarkPath::Http,
             BenchmarkPath::WebSocket,
+            BenchmarkPath::Hybrid,
             BenchmarkPath::Direct,
         ],
-        _ => [
+        2 => [
             BenchmarkPath::WebSocket,
+            BenchmarkPath::Hybrid,
             BenchmarkPath::Direct,
             BenchmarkPath::Http,
+        ],
+        _ => [
+            BenchmarkPath::Hybrid,
+            BenchmarkPath::Direct,
+            BenchmarkPath::Http,
+            BenchmarkPath::WebSocket,
         ],
     }
 }
@@ -70,19 +84,79 @@ struct LiveContext<'a> {
     authorization: &'a str,
     upstream: &'a Url,
     direct_url: &'a str,
-    websocket_url: &'a str,
-    websocket_metrics: &'a Metrics,
 }
 
 impl LiveContext<'_> {
+    async fn collect_websocket_sample(
+        &self,
+        mode: websocket::Mode,
+        payloads: &[String],
+    ) -> BenchmarkResult<Sample> {
+        let metrics = Arc::new(Metrics::default());
+        let proxy = match mode {
+            websocket::Mode::PrivateWebSocket => {
+                start_private_websocket_proxy(self.upstream.clone(), Arc::clone(&metrics))
+                    .await
+                    .map_err(benchmark_error)?
+            }
+            websocket::Mode::Hybrid => start_proxy(ProxyOptions {
+                upstream: self.upstream.clone(),
+                compression_enabled: Arc::new(AtomicBool::new(true)),
+                websocket_enabled: Arc::new(AtomicBool::new(true)),
+                ai_cove_private_websocket_zstd: true,
+                metrics: Arc::clone(&metrics),
+                preferred_ports: vec![0],
+                max_request_body_bytes: 128 * 1024 * 1024,
+            })
+            .await
+            .map_err(benchmark_error)?,
+        };
+        let result = async {
+            let url = super::responses_url(proxy.endpoint(), true)?;
+            websocket::collect_sample(
+                &websocket::Case {
+                    url: &url,
+                    authorization: self.authorization,
+                    payloads,
+                    metrics: Some(metrics.as_ref()),
+                    mode,
+                },
+                self.settings,
+            )
+            .await
+        }
+        .await;
+        proxy.stop().await;
+        result
+    }
+
     async fn collect_sample(
         &self,
         path: BenchmarkPath,
         payloads: &PayloadSet<'_>,
-    ) -> Result<Sample, Box<dyn Error>> {
+    ) -> BenchmarkResult<Sample> {
+        match self.collect_sample_once(path, payloads).await {
+            Err(error) if error.kind() == io::ErrorKind::ConnectionAborted => {
+                eprintln!(
+                    "基准路径 {} 遇到临时上游错误，将完整重试一次：{error}",
+                    path.label()
+                );
+                let mut sample = self.collect_sample_once(path, payloads).await?;
+                sample.retries = 1;
+                Ok(sample)
+            }
+            result => result,
+        }
+    }
+
+    async fn collect_sample_once(
+        &self,
+        path: BenchmarkPath,
+        payloads: &PayloadSet<'_>,
+    ) -> BenchmarkResult<Sample> {
         match path {
             BenchmarkPath::Direct => {
-                let client = fresh_http_client()?;
+                let client = fresh_http_client().map_err(benchmark_error)?;
                 http::collect_sample(
                     &http::Case {
                         client: &client,
@@ -106,9 +180,10 @@ impl LiveContext<'_> {
                     preferred_ports: vec![0],
                     max_request_body_bytes: 128 * 1024 * 1024,
                 })
-                .await?;
+                .await
+                .map_err(benchmark_error)?;
                 let result = async {
-                    let client = fresh_http_client()?;
+                    let client = fresh_http_client().map_err(benchmark_error)?;
                     let url = super::responses_url(proxy.endpoint(), false)?;
                     http::collect_sample(
                         &http::Case {
@@ -123,46 +198,61 @@ impl LiveContext<'_> {
                     .await
                 }
                 .await;
-                let result = result.map_err(|error| io::Error::other(error.to_string()));
                 proxy.stop().await;
-                result.map_err(Into::into)
+                result
             }
             BenchmarkPath::WebSocket => {
-                websocket::collect_sample(
-                    &websocket::Case {
-                        url: self.websocket_url,
-                        authorization: self.authorization,
-                        payloads: payloads.websocket,
-                        metrics: Some(self.websocket_metrics),
-                    },
-                    self.settings,
-                )
-                .await
+                self.collect_websocket_sample(websocket::Mode::PrivateWebSocket, payloads.websocket)
+                    .await
+            }
+            BenchmarkPath::Hybrid => {
+                self.collect_websocket_sample(websocket::Mode::Hybrid, payloads.websocket)
+                    .await
             }
         }
     }
 }
 
-fn require_compression(case: &BenchmarkCase, required: bool) -> Result<(), Box<dyn Error>> {
-    if !required
-        || case
-            .samples
-            .iter()
-            .all(|sample| sample.encoded_bytes < sample.raw_bytes)
-    {
+fn require_compression(case: &BenchmarkCase, required: bool) -> BenchmarkResult<()> {
+    if !required {
+        return Ok(());
+    }
+    let mut samples = case
+        .samples
+        .iter()
+        .filter(|sample| sample.retries == 0)
+        .peekable();
+    if samples.peek().is_none() {
+        return Err(io::Error::other(format!(
+            "benchmark scenario={} path={} 没有无重试的有效样本",
+            case.scenario, case.path
+        )));
+    }
+    if samples.all(|sample| sample.encoded_bytes < sample.raw_bytes) {
         return Ok(());
     }
     Err(io::Error::other(format!(
         "{} / {} did not produce a smaller encoded payload",
         case.scenario, case.path
+    )))
+}
+
+fn sample_context_error(
+    scenario: &str,
+    path: BenchmarkPath,
+    iteration: usize,
+    error: &io::Error,
+) -> io::Error {
+    io::Error::other(format!(
+        "benchmark scenario={scenario} path={} iteration={iteration} failed: {error}",
+        path.label(),
     ))
-    .into())
 }
 
 async fn collect_scenario(
     context: &LiveContext<'_>,
     scenario: UsageScenario,
-) -> Result<[BenchmarkCase; 3], Box<dyn Error>> {
+) -> BenchmarkResult<[BenchmarkCase; 4]> {
     let http_payloads = scenario
         .prompts
         .iter()
@@ -192,6 +282,11 @@ async fn collect_scenario(
         path: BenchmarkPath::WebSocket.label(),
         samples: Vec::with_capacity(context.settings.runs),
     };
+    let mut hybrid = BenchmarkCase {
+        scenario: scenario.name,
+        path: BenchmarkPath::Hybrid.label(),
+        samples: Vec::with_capacity(context.settings.runs),
+    };
     let iterations = context
         .settings
         .warmups
@@ -199,51 +294,24 @@ async fn collect_scenario(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "too many benchmark runs"))?;
     for iteration in 0..iterations {
         for path in rotated_paths(iteration) {
-            let sample = context.collect_sample(path, &payloads).await?;
+            let sample = context
+                .collect_sample(path, &payloads)
+                .await
+                .map_err(|error| {
+                    sample_context_error(scenario.name, path, iteration + 1, &error)
+                })?;
             if iteration >= context.settings.warmups {
                 match path {
                     BenchmarkPath::Direct => direct.samples.push(sample),
                     BenchmarkPath::Http => http.samples.push(sample),
                     BenchmarkPath::WebSocket => websocket.samples.push(sample),
+                    BenchmarkPath::Hybrid => hybrid.samples.push(sample),
                 }
             }
         }
     }
     require_compression(&http, scenario.requires_compression)?;
     require_compression(&websocket, scenario.requires_compression)?;
-    Ok([direct, http, websocket])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{BenchmarkPath, rotated_paths};
-
-    #[test]
-    fn rotates_three_path_order_to_balance_time_drift() {
-        assert_eq!(
-            rotated_paths(0),
-            [
-                BenchmarkPath::Direct,
-                BenchmarkPath::Http,
-                BenchmarkPath::WebSocket
-            ]
-        );
-        assert_eq!(
-            rotated_paths(1),
-            [
-                BenchmarkPath::Http,
-                BenchmarkPath::WebSocket,
-                BenchmarkPath::Direct
-            ]
-        );
-        assert_eq!(
-            rotated_paths(2),
-            [
-                BenchmarkPath::WebSocket,
-                BenchmarkPath::Direct,
-                BenchmarkPath::Http
-            ]
-        );
-        assert_eq!(rotated_paths(3), rotated_paths(0));
-    }
+    require_compression(&hybrid, scenario.requires_compression)?;
+    Ok([direct, http, websocket, hybrid])
 }
