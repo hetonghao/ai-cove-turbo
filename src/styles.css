@@ -27,6 +27,7 @@
   --turbo-header-blur: 14px;
   --turbo-header-gap: 16px;
   --turbo-header-padding: 0 clamp(14px, 2.8vw, 32px);
+  --turbo-titlebar-controls-inset: 76px;
   --turbo-brand-gap: 9px;
   --turbo-brand-line-gap: 1px;
   --turbo-tabs-gap: 3px;
@@ -1789,6 +1790,10 @@ body[data-active-tab="config"] {
   min-width: 0;
 }
 
+.is-macos-overlay .turbo-shell__brand {
+  margin-left: var(--turbo-titlebar-controls-inset);
+}
+
 .turbo-shell__brand > span {
   display: grid;
   gap: var(--turbo-brand-line-gap);
@@ -2928,6 +2933,14 @@ body[data-active-tab="statistics"] {
 }
 
 @media (max-width: 520px) {
+  .is-macos-overlay .turbo-shell__header {
+    padding-left: calc(var(--turbo-mobile-padding) + var(--turbo-titlebar-controls-inset));
+  }
+
+  .is-macos-overlay .turbo-shell__brand {
+    margin-left: 0;
+  }
+
   .turbo-shell__header {
     gap: var(--turbo-mobile-gap);
     padding-inline: var(--turbo-mobile-padding);

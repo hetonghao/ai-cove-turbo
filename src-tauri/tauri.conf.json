@@ -12,6 +12,13 @@
       {
         "label": "main",
         "title": "AI Cove Turbo",
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 19
+        },
         "width": 1180,
         "height": 800,
         "minWidth": 360,

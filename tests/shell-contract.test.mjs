@@ -77,6 +77,27 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.doesNotMatch(css, /\.a-|variant--a|turbo-variant-switcher|app-shell|data-variant/);
 });
 
+test("macOS 原生按钮覆盖在应用导航内且不再显示独立标题栏", async () => {
+  // Given: Turbo 的桌面窗口配置与顶部导航。
+  const tauriConfig = JSON.parse(
+    await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+  );
+  const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const css = await readFile(new URL("styles.css", sourceUrl), "utf8");
+
+  // When: macOS 创建主窗口。
+  const mainWindow = tauriConfig.app.windows[0];
+
+  // Then: 保留原生窗口按钮，把内容延伸到标题栏，并为按钮留出安全区。
+  assert.equal(mainWindow.decorations, true);
+  assert.equal(mainWindow.titleBarStyle, "Overlay");
+  assert.equal(mainWindow.hiddenTitle, true);
+  assert.deepEqual(mainWindow.trafficLightPosition, { x: 16, y: 19 });
+  assert.match(html, /<header class="turbo-shell__header" data-tauri-drag-region>/);
+  assert.match(html, /classList\.add\("is-macos-overlay"\)/);
+  assert.match(css, /\.is-macos-overlay \.turbo-shell__brand\s*\{[^}]*margin-left: var\(--turbo-titlebar-controls-inset\)/);
+});
+
 test("实时页把同类路径计数收进一行并仅在需要时显示侧栏滚动条", async () => {
   // Given: 默认桌面窗口中的实时页侧栏。
   const html = await readFile(new URL("index.html", sourceUrl), "utf8");

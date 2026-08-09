@@ -33,7 +33,7 @@
 
 ## 5. Components
 
-- `TurboShellHeader`：Turbo 图标、产品名、实时/统计/配置 Tab、预览标识。
+- `TurboShellHeader`：Turbo 图标、产品名、实时/统计/配置 Tab、预览标识；macOS 使用原生 `Overlay` 标题栏，把红黄绿按钮纳入导航层并隐藏独立窗口标题，导航空白区域可拖拽，左侧品牌为原生按钮保留安全间距。
 - `Tabs`：原生按钮与 `tablist/tab/tabpanel` 语义，支持点击、左右方向键、Home、End；选中态由单一海蓝指示层在三个位置间平滑移动，按钮本身只承载文字与交互状态。
 - `VersionUpdateBar`：恢复旧版运维顶栏的全宽样式，紧贴顶部导航栏下方，集中展示当前版本、更新状态、检查/安装动作与条件式进度。
 - `BPopover`：状态、压缩与 WebSocket 独立开关、会话摘要、自启动与重启 Codex；运行偏好开关使用统一线性 SVG 图标表达压缩、双向连接、电源启动与 Dock；公网腿 zstd 复用 WebSocket 自动协商，不新增第三个开关。

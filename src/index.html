@@ -6,6 +6,7 @@
     <meta name="description" content="AI Cove Turbo 本地加速运行、统计与配置面板" />
     <meta name="theme-color" content="#080c0b" />
     <title>AI Cove Turbo</title>
+    <script>if (window.__TAURI__ && /Macintosh/.test(navigator.userAgent)) document.documentElement.classList.add("is-macos-overlay");</script>
     <link rel="icon" type="image/png" href="./assets/turbo-icon.png" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -13,7 +14,7 @@
     <a class="sr-only" href="#main-content">跳到主要内容</a>
 
     <div class="turbo-shell">
-      <header class="turbo-shell__header">
+      <header class="turbo-shell__header" data-tauri-drag-region>
         <a class="turbo-shell__brand" href="?tab=live" aria-label="AI Cove Turbo 实时页">
           <img class="turbo-icon turbo-icon--shell" src="./assets/turbo-icon.png" width="32" height="32" alt="" />
           <span><strong>Turbo</strong><small>AI Cove</small></span>
