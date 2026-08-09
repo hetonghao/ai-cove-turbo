@@ -182,14 +182,25 @@ pub(super) const fn reported_reconnects(
     before: MetricsSnapshot,
     after: MetricsSnapshot,
 ) -> u64 {
+    let handshakes = after
+        .websocket_handshakes
+        .saturating_sub(before.websocket_handshakes);
+    let active = after
+        .websocket_active
+        .saturating_sub(before.websocket_active);
+    let connection_churn = handshakes.saturating_sub(active);
     match mode {
-        Mode::PrivateWebSocket => after
-            .websocket_handshakes
-            .saturating_sub(before.websocket_handshakes)
-            .saturating_sub(1),
-        Mode::Hybrid => after
-            .hybrid_recovery_http
-            .saturating_sub(before.hybrid_recovery_http),
+        Mode::PrivateWebSocket => connection_churn,
+        Mode::Hybrid => {
+            let recovery_http = after
+                .hybrid_recovery_http
+                .saturating_sub(before.hybrid_recovery_http);
+            if recovery_http > connection_churn {
+                recovery_http
+            } else {
+                connection_churn
+            }
+        }
     }
 }
 
@@ -204,6 +215,18 @@ pub(super) fn validate_hybrid_round_transports(
     ))
 }
 
+fn observed_connection_counts(case: &Case<'_>, before: MetricsSnapshot) -> Option<(u64, u64)> {
+    case.metrics.map(|metrics| {
+        let after = metrics.snapshot();
+        (
+            after
+                .websocket_handshakes
+                .saturating_sub(before.websocket_handshakes),
+            reported_reconnects(case.mode, before, after),
+        )
+    })
+}
+
 fn request_bytes(round_samples: &[RoundSample]) -> BenchmarkResult<u64> {
     round_samples.iter().try_fold(0_u64, |total, sample| {
         total
@@ -212,7 +235,11 @@ fn request_bytes(round_samples: &[RoundSample]) -> BenchmarkResult<u64> {
     })
 }
 
-async fn sample(case: &Case<'_>, settings: &BenchmarkSettings) -> BenchmarkResult<Sample> {
+async fn sample(
+    case: &Case<'_>,
+    settings: &BenchmarkSettings,
+    metrics_before: MetricsSnapshot,
+) -> BenchmarkResult<Sample> {
     let started = Instant::now();
     let request = authenticated_request(case.url, case.authorization)?;
     let (mut socket, response) = timeout(settings.timeout, connect_async(request))
@@ -226,7 +253,6 @@ async fn sample(case: &Case<'_>, settings: &BenchmarkSettings) -> BenchmarkResul
         )));
     }
     let setup = started.elapsed();
-    let connection_started = Instant::now();
     let mut round_samples = Vec::with_capacity(case.payloads.len());
     let mut round_transports = Vec::with_capacity(case.payloads.len());
     let mut previous_response_id = None;
@@ -275,11 +301,13 @@ async fn sample(case: &Case<'_>, settings: &BenchmarkSettings) -> BenchmarkResul
         };
         round_transports.push(transport);
     }
+    let connection_counts = observed_connection_counts(case, metrics_before);
     timeout(settings.timeout, socket.close(None))
         .await
         .map_err(benchmark_error)?
         .map_err(benchmark_error)?;
     let logical_requests = u64::try_from(case.payloads.len()).map_err(benchmark_error)?;
+    let (websocket_handshakes, websocket_reconnects) = connection_counts.unwrap_or((1, 0));
     Ok(Sample {
         e2e: started.elapsed(),
         setup,
@@ -293,7 +321,7 @@ async fn sample(case: &Case<'_>, settings: &BenchmarkSettings) -> BenchmarkResul
             .iter()
             .map(|sample| sample.response_events)
             .sum(),
-        websocket_handshakes: 1,
+        websocket_handshakes,
         round_e2e: round_samples.iter().map(|sample| sample.e2e).collect(),
         first_events: round_samples
             .iter()
@@ -304,8 +332,8 @@ async fn sample(case: &Case<'_>, settings: &BenchmarkSettings) -> BenchmarkResul
             .skip(1)
             .map(|sample| sample.e2e)
             .collect(),
-        connection_lifetime: Some(connection_started.elapsed()),
-        websocket_reconnects: 0,
+        connection_lifetime: Some(started.elapsed().saturating_sub(setup)),
+        websocket_reconnects,
         messages_per_connection: Some(logical_requests),
         retries: 0,
         round_transports,
@@ -320,7 +348,7 @@ pub(super) async fn collect_sample(
         .metrics
         .map(crate::proxy::Metrics::snapshot)
         .unwrap_or_default();
-    let mut sample = sample(case, settings).await?;
+    let mut sample = sample(case, settings, before).await?;
     let (raw_bytes, encoded_bytes) = if let Some(metrics) = case.metrics {
         let after = metrics.snapshot();
         let (raw_bytes, encoded_bytes) = match case.mode {
@@ -339,10 +367,7 @@ pub(super) async fn collect_sample(
                 "Turbo did not record the WebSocket application messages",
             ));
         }
-        let handshakes = after
-            .websocket_handshakes
-            .saturating_sub(before.websocket_handshakes);
-        match (case.mode, handshakes) {
+        match (case.mode, sample.websocket_handshakes) {
             (Mode::PrivateWebSocket, 1) | (Mode::Hybrid, _) => {}
             (Mode::PrivateWebSocket, _) => {
                 return Err(io::Error::other(
@@ -372,8 +397,6 @@ pub(super) async fn collect_sample(
                 sample.websocket_messages = messages;
             }
         }
-        sample.websocket_handshakes = handshakes;
-        sample.websocket_reconnects = reported_reconnects(case.mode, before, after);
         sample.messages_per_connection = Some(sample.websocket_messages);
         (raw_bytes, encoded_bytes)
     } else {

@@ -110,15 +110,27 @@ fn excludes_hybrid_pool_prewarm_handshakes_from_reconnects() {
     let before = MetricsSnapshot::default();
     let mut after = before;
     after.websocket_handshakes = 7;
+    after.websocket_active = 7;
 
     assert_eq!(reported_reconnects(super::Mode::Hybrid, before, after), 0);
-    assert_eq!(
-        reported_reconnects(super::Mode::PrivateWebSocket, before, after),
-        6
-    );
 
     after.hybrid_recovery_http = 1;
     assert_eq!(reported_reconnects(super::Mode::Hybrid, before, after), 1);
+}
+
+#[test]
+fn reports_hybrid_pool_connection_churn_as_reconnect() {
+    // Given
+    let before = MetricsSnapshot::default();
+    let mut after = before;
+    after.websocket_handshakes = 8;
+    after.websocket_active = 7;
+
+    // When
+    let reconnects = reported_reconnects(super::Mode::Hybrid, before, after);
+
+    // Then
+    assert_eq!(reconnects, 1);
 }
 
 #[test]
