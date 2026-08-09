@@ -165,7 +165,6 @@
   let connectionError = "";
   const sessionNumbers = new Map();
   const connectionNumbers = new Map();
-  const pinnedSessionIds = new Set();
 
   const actions = {
     "toggle-compression": ["set_compression", () => ({ enabled: !state.compressionEnabled })],
@@ -591,7 +590,6 @@
       if (visibleThreads.has(threadId)) return;
       sessionNumbers.delete(threadId);
       connectionNumbers.delete(threadId);
-      pinnedSessionIds.delete(threadId);
     });
 
     const usedSessionNumbers = new Set(sessionNumbers.values());
@@ -641,6 +639,17 @@
     );
   }
 
+  function sortConnectionsByNumber(group) {
+    return [...group.items].sort((left, right) => {
+      const numbers = connectionNumbers.get(group.threadId)?.byId;
+      return (numbers?.get(observedConnectionId(left)) || 0) - (numbers?.get(observedConnectionId(right)) || 0);
+    });
+  }
+
+  function boundSessionStatus(group) {
+    return group.items.some((item) => ["up", "down"].includes(item.activity)) ? "active" : "bound";
+  }
+
   function formatConnectionAge(seconds) {
     const value = Math.max(0, Math.floor(Number(seconds) || 0));
     if (value < 60) return `${value} 秒`;
@@ -669,20 +678,13 @@
   }
 
   function renderBoundSession(group) {
-    const items = [...group.items].sort((left, right) => {
-      const leftNumber = connectionNumbers.get(group.threadId)?.byId.get(observedConnectionId(left)) || 0;
-      const rightNumber = connectionNumbers.get(group.threadId)?.byId.get(observedConnectionId(right)) || 0;
-      return leftNumber - rightNumber;
-    });
+    const items = sortConnectionsByNumber(group);
     const counts = items.reduce((result, item) => {
       const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
       result[activity] += 1;
       return result;
     }, { up: 0, down: 0, idle: 0 });
     const name = sessionName(group.threadId);
-    const metrics = ["up", "down", "idle"].map((activity) => counts[activity]
-      ? `<span class="c-connection-session__metric" data-connection-key="metric:${activity}">${connectionActivityGlyph(activity)}<b>${counts[activity]}</b></span>`
-      : "").join("");
     const details = items.map((item) => {
       const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
       const activityLabel = activity === "up"
@@ -710,16 +712,14 @@
       ["连接", `${items.length} 条`],
       ["传输", `发送 ${counts.up} · 接收 ${counts.down} · 空闲 ${counts.idle}`],
     ];
-    const pinned = pinnedSessionIds.has(group.threadId);
-    const pinLabel = pinned ? `取消固定 ${name}` : `固定展开 ${name}`;
-    const pin = `<button type="button" class="c-session-pin" data-action="pin-session" data-thread-id="${escapeHtml(group.threadId)}" aria-pressed="${pinned}" aria-label="${pinLabel}" title="${pinLabel}"><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M5 1.5h4M6 1.5v3L4 7.5v1h6v-1L8 4.5v-3M7 8.5v4" /></svg></button>`;
     const summary = `${name}，${items.length} 条连接，发送 ${counts.up}，接收 ${counts.down}，空闲 ${counts.idle}`;
-    return `<div class="c-connection-session c-connection-session--bound${pinned ? " is-pinned" : ""}" role="group" data-connection-key="bound:${escapeHtml(group.threadId)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(counts.up || counts.down ? "active" : "bound")}<strong>${name}</strong><span>×${items.length}</span>${metrics}${pin}${renderHoverDetail(name, sessionDetails)}</div><div class="c-connection-session__connections">${details}</div></div>`;
+    return `<div class="c-connection-session c-connection-session--bound" role="group" data-connection-key="bound:${escapeHtml(group.threadId)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(boundSessionStatus(group))}<strong>${name}</strong><span class="c-connection-session__count">×${items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><span class="c-connection-session__separator" aria-hidden="true"></span><div class="c-connection-session__connections">${details}</div></div>`;
   }
 
-  function renderClosedSession(group, released) {
+  function renderClosedSession(group, status) {
     const name = sessionName(group.threadId);
-    const events = group.items.map((item) => {
+    const items = sortConnectionsByNumber(group);
+    const events = items.map((item) => {
       const connectionId = observedConnectionId(item);
       return renderConnectionChip({
         status: item.normal ? "closed" : "error",
@@ -736,15 +736,15 @@
         eventId: item.id,
       });
     }).join("");
-    const abnormalCount = group.items.filter((item) => !item.normal).length;
-    const sessionState = released ? "已释放" : "仍在绑定";
+    const abnormalCount = items.filter((item) => !item.normal).length;
+    const sessionState = status === "closed" ? "已释放" : status === "pending" ? "恢复中" : "仍在绑定";
     const sessionDetails = [
       ["会话状态", sessionState],
-      ["关闭记录", `${group.items.length} 条`],
+      ["关闭记录", `${items.length} 条`],
       ["异常", `${abnormalCount} 条`],
     ];
-    const summary = `${name}，${sessionState}，${group.items.length} 条近期关闭记录，异常 ${abnormalCount}`;
-    return `<div class="c-connection-session c-connection-session--closed" role="group" data-connection-key="closed:${escapeHtml(group.threadId)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(released ? "error" : "active")}<strong>${name}</strong><span>×${group.items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><div class="c-connection-session__connections">${events}</div></div>`;
+    const summary = `${name}，${sessionState}，${items.length} 条近期关闭记录，异常 ${abnormalCount}`;
+    return `<div class="c-connection-session c-connection-session--closed" role="group" data-connection-key="closed:${escapeHtml(group.threadId)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(status)}<strong>${name}</strong><span class="c-connection-session__count">×${items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><span class="c-connection-session__separator" aria-hidden="true"></span><div class="c-connection-session__connections">${events}</div></div>`;
   }
 
   function renderTransitionDetails(item, identityDetail) {
@@ -753,15 +753,10 @@
 
   function renderTransitionItem(item, threadId) {
     const connectionId = observedConnectionId(item);
-    const identity = connectionName(threadId, connectionId);
+    const identity = `${sessionName(threadId)} · ${connectionName(threadId, connectionId)}`;
     const attributes = ` data-thread-id="${escapeHtml(threadId)}" data-connection-id="${escapeHtml(connectionId)}"`;
-    return `<div class="c-connection-transition__item" data-connection-key="transition-item:${escapeHtml(item.id)}"${attributes}><header>${connectionIcon("pending")}<strong>${escapeHtml(identity)}</strong><span>${escapeHtml(item.stage)}</span></header>${renderTransitionDetails(item, `${threadId} · ${connectionId}`)}</div>`;
-  }
-
-  function renderTransitionSession(group) {
-    const name = sessionName(group.threadId);
-    const summary = `${name}，${group.items.length} 条连接正在建立或恢复`;
-    return `<details class="c-connection-transition c-connection-transition--session" data-connection-key="transition-session:${escapeHtml(group.threadId)}" data-transition-id="session:${escapeHtml(group.threadId)}" data-thread-id="${escapeHtml(group.threadId)}"><summary aria-label="${escapeHtml(summary)}">${sessionIcon("pending")}<strong>${name}</strong><span>×${group.items.length}</span></summary><div class="c-connection-transition__items">${group.items.map((item) => renderTransitionItem(item, group.threadId)).join("")}</div></details>`;
+    const summary = `${identity}，${item.label}，${item.stage}`;
+    return `<details class="c-connection-transition" data-connection-key="transition:${escapeHtml(item.id)}" data-transition-id="${escapeHtml(item.id)}"${attributes}><summary aria-label="${escapeHtml(summary)}">${connectionIcon("pending")}<strong>${escapeHtml(identity)}</strong><span>${escapeHtml(item.stage)}</span></summary>${renderTransitionDetails(item, connectionId)}</details>`;
   }
 
   function renderPoolTransition(item) {
@@ -774,6 +769,14 @@
     const snapshot = normalizeConnectionSnapshot(connectionSnapshot);
     const recentClosed = snapshot.recentClosed.slice(0, RECENT_CLOSED_LIMIT);
     reconcileConnectionNumbers(snapshot, recentClosed);
+    const boundGroups = groupConnectionsByThread(snapshot.boundThreads);
+    const sessionStatuses = new Map(
+      boundGroups.map((group) => [group.threadId, boundSessionStatus(group)]),
+    );
+    snapshot.transitions.forEach((item) => {
+      const threadId = connectionThreadId(item);
+      if (threadId && !sessionStatuses.has(threadId)) sessionStatuses.set(threadId, "pending");
+    });
     const total = $("[data-connection-total]");
     if (total) total.textContent = numberFormatter.format(snapshot.currentConnections);
 
@@ -805,7 +808,7 @@
     const bound = $("[data-connection-list=\"bound\"]");
     if (bound) {
       connectionDom.reconcileList(bound, snapshot.boundThreads.length
-        ? groupConnectionsByThread(snapshot.boundThreads).map(renderBoundSession).join("")
+        ? boundGroups.map(renderBoundSession).join("")
         : '<span class="c-connection-empty">暂无绑定会话</span>');
     }
 
@@ -813,10 +816,10 @@
     if (transitions) {
       const expanded = new Set(Array.from(transitions.querySelectorAll?.("details[open][data-transition-id]") ?? [], (item) => item.dataset.transitionId));
       connectionDom.reconcileList(transitions, snapshot.transitions.length
-        ? [
-          ...groupConnectionsByThread(snapshot.transitions).map(renderTransitionSession),
-          ...snapshot.transitions.filter((item) => !connectionThreadId(item)).map(renderPoolTransition),
-        ].join("")
+        ? snapshot.transitions.map((item) => {
+          const threadId = connectionThreadId(item);
+          return threadId ? renderTransitionItem(item, threadId) : renderPoolTransition(item);
+        }).join("")
         : '<span class="c-connection-empty">当前没有连接操作</span>');
       Array.from(transitions.querySelectorAll?.("details[data-transition-id]") ?? []).forEach((item) => {
         item.open = expanded.has(item.dataset.transitionId);
@@ -825,12 +828,9 @@
 
     const closed = $("[data-connection-list=\"closed\"]");
     if (closed) {
-      const retainedThreadIds = new Set(
-        [...snapshot.boundThreads, ...snapshot.transitions].map(connectionThreadId).filter(Boolean),
-      );
       connectionDom.reconcileList(closed, recentClosed.length
         ? groupConnectionsByThread(recentClosed)
-          .map((group) => renderClosedSession(group, !retainedThreadIds.has(group.threadId)))
+          .map((group) => renderClosedSession(group, sessionStatuses.get(group.threadId) || "closed"))
           .join("")
         : '<span class="c-connection-empty">暂无关闭记录</span>');
     }
@@ -910,7 +910,7 @@
     const recovering = request.failurePhase === "hybridIdle";
     const failed = request.result === "error" && !recovering;
     const route = REQUEST_ROUTE_LABELS[request.route];
-    const transport = recovering ? `${route ?? request.transport} · 连接恢复` : failed ? `${route ?? request.transport} · 失败` : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
+    const transport = recovering ? (status === 1012 ? "Hybrid WS · 发布重建" : `${route ?? request.transport} · 连接恢复`) : failed ? `${route ?? request.transport} · 失败` : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
     const detail = recovering && request.failureReason ? ` title="${escapeHtml(request.failureReason)}"` : "";
     return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}"${detail}>${escapeHtml(transport)}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
   }
@@ -1117,20 +1117,6 @@
   }
 
   async function handleAction(action, control) {
-    if (action === "pin-session") {
-      const threadId = String(control?.dataset.threadId || "");
-      if (!threadId) return;
-      const pinned = !pinnedSessionIds.has(threadId);
-      if (pinned) pinnedSessionIds.add(threadId);
-      else pinnedSessionIds.delete(threadId);
-      const name = sessionName(threadId);
-      const label = pinned ? `取消固定 ${name}` : `固定展开 ${name}`;
-      control.setAttribute("aria-pressed", String(pinned));
-      control.setAttribute("aria-label", label);
-      control.setAttribute("title", label);
-      control.closest?.(".c-connection-session")?.classList?.toggle("is-pinned", pinned);
-      return;
-    }
     if (action === "toggle-connections") {
       if (connectionPanelOpen) {
         setConnectionPanelOpen(false);

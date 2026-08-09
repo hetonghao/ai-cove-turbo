@@ -428,12 +428,13 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
       { id: "S004", threadId: "thread-12345678-beta", activity: "up", idleSeconds: 0, reclaimPolicy: "threadEnd" },
     ],
     transitions: [
-      { id: "T003", threadId: "thread-12345678-alpha", connectionId: "S003", label: "恢复绑定连接", stage: "等待可用连接", detail: "上游关闭", elapsedSeconds: 2 },
+      { id: "T003", threadId: "thread-12345678-alpha", connectionId: "S005", label: "恢复绑定连接", stage: "等待可用连接", detail: "上游关闭", elapsedSeconds: 2 },
       { id: "T007", threadId: "thread-12345678-alpha", connectionId: "S007", label: "建立绑定连接", stage: "正在握手", detail: "等待上游确认", elapsedSeconds: 1 },
     ],
     recentClosed: [
       { id: "C001", threadId: "thread-12345678-alpha", connectionId: "S003", reason: "上游连接关闭", agoSeconds: 8, normal: false },
-      { id: "C002", threadId: "thread-12345678-alpha", connectionId: "S003", reason: "连接恢复失败", agoSeconds: 4, normal: false },
+      { id: "C004", threadId: "thread-12345678-alpha", connectionId: "S001", reason: "连接空闲关闭", agoSeconds: 6, normal: true },
+      { id: "C002", threadId: "thread-12345678-alpha", connectionId: "S006", reason: "连接恢复失败", agoSeconds: 4, normal: false },
       { id: "C003", threadId: "thread-released", connectionId: "S009", reason: "Codex 线程结束", agoSeconds: 3, normal: true },
     ],
   };
@@ -481,7 +482,7 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
   assert.equal(total.textContent, "7");
   assert.match(prewarm.innerHTML, /<strong>P01<\/strong>[\s\S]*?<dt>状态<\/dt><dd>空白预热<\/dd>[\s\S]*?<dt>回收<\/dt><dd>容量压力时回收<\/dd>/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"/);
-  assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?会话 01[\s\S]*?×2/);
+  assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?会话 01[\s\S]*?×2[\s\S]*?c-connection-session__separator[\s\S]*?连接 01[\s\S]*?连接 02/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-beta"[^>]*>[\s\S]*?会话 02/);
   assert.match(bound.innerHTML, /c-connection-session__summary"[^>]*aria-label="会话 01，2 条连接，发送 0，接收 1，空闲 1"[^>]*>\s*<svg class="c-session-icon"/);
   assert.match(bound.innerHTML, /<span class="c-hover-card" aria-hidden="true"><strong>会话 01<\/strong><dl><div><dt>连接<\/dt><dd>2 条<\/dd><\/div><div><dt>传输<\/dt><dd>发送 0 · 接收 1 · 空闲 1<\/dd>/);
@@ -493,56 +494,45 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
   assert.match(bound.innerHTML, /data-connection-id="S002"[\s\S]*?连接 02/);
   assert.match(bound.innerHTML, /c-connection-chip[^>]*data-connection-id="S001"[\s\S]*?<i class="c-ws-icon"/);
   assert.match(bound.innerHTML, /data-connection-id="S001"[\s\S]*?<dt>线程 ID<\/dt><dd>thread-12345678-alpha<\/dd>/);
-  assert.match(bound.innerHTML, /class="c-session-pin" data-action="pin-session" data-thread-id="thread-12345678-alpha" aria-pressed="false"/);
+  assert.doesNotMatch(bound.innerHTML, /c-session-pin|c-connection-session__metric|data-action="pin-session"/);
   assert.doesNotMatch(bound.innerHTML, /线程 12345678/);
   assert.match(bound.innerHTML, /<svg class="c-connection-idle" viewBox="0 0 18 14" data-direction="up-right"[^>]*>(?:<path[^>]* \/>){3}<\/svg>/);
   assert.doesNotMatch(bound.innerHTML, /zzz/);
   assert.match(bound.innerHTML, /随线程结束回收/);
-  assert.equal((transitions.innerHTML.match(/<details/g) ?? []).length, 1);
-  assert.match(transitions.innerHTML, /<details[^>]*data-transition-id="session:thread-12345678-alpha"/);
-  assert.match(transitions.innerHTML, /会话 01[\s\S]*?×2[\s\S]*?连接 03[\s\S]*?连接 04/);
+  assert.equal((transitions.innerHTML.match(/<details/g) ?? []).length, 2);
+  assert.match(transitions.innerHTML, /data-transition-id="T003"[\s\S]*?会话 01 · 连接 03/);
+  assert.match(transitions.innerHTML, /data-transition-id="T007"[\s\S]*?会话 01 · 连接 04/);
+  assert.doesNotMatch(transitions.innerHTML, /transition-session|×2/);
   assert.match(closed.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?c-session-icon" data-connection-state="active"[\s\S]*?<dt>会话状态<\/dt><dd>仍在绑定<\/dd>/);
-  assert.match(closed.innerHTML, /data-thread-id="thread-released"[^>]*>[\s\S]*?c-session-icon" data-connection-state="error"[\s\S]*?<dt>会话状态<\/dt><dd>已释放<\/dd>/);
+  assert.match(closed.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?会话 01[\s\S]*?×3[\s\S]*?c-connection-session__separator[\s\S]*?data-connection-event-id="C004"[\s\S]*?data-connection-event-id="C001"[\s\S]*?data-connection-event-id="C002"/);
+  assert.match(closed.innerHTML, /data-thread-id="thread-released"[^>]*>[\s\S]*?c-session-icon" data-connection-state="closed"[\s\S]*?<dt>会话状态<\/dt><dd>已释放<\/dd>/);
   const closedSessionHover = closed.innerHTML.match(/<span class="c-hover-card"[^>]*><strong>会话 01<\/strong>[\s\S]*?<\/span>/)?.[0] ?? "";
   assert.doesNotMatch(closedSessionHover, /线程 ID|thread-/);
-  assert.match(closed.innerHTML, /data-connection-id="S003"[\s\S]*?连接 03/);
+  assert.match(closed.innerHTML, /data-connection-id="S003"[\s\S]*?连接 05/);
+  assert.match(closed.innerHTML, /data-connection-id="S006"[\s\S]*?连接 06/);
   assert.match(closed.innerHTML, /data-connection-event-id="C001"/);
   assert.match(closed.innerHTML, /data-connection-event-id="C002"/);
   assert.match(closed.innerHTML, /data-connection-event-id="C003"/);
   assert.match(closed.innerHTML, /上游连接关闭/);
   assert.match(closed.innerHTML, /连接恢复失败/);
 
-  const pinnedClasses = new Set();
-  const pinnedSession = { classList: { toggle(name, enabled) {
-    if (enabled) pinnedClasses.add(name);
-    else pinnedClasses.delete(name);
-  } } };
-  const pinControl = element({ action: "pin-session", threadId: "thread-12345678-alpha" });
-  pinControl.closest = (selector) => {
-    if (selector === "[data-action]") return pinControl;
-    if (selector === ".c-connection-session") return pinnedSession;
-    return null;
-  };
-  onClick({ target: pinControl });
-  assert.equal(pinControl.attributes.get("aria-pressed"), "true");
-  assert.equal(pinnedClasses.has("is-pinned"), true);
+  // Given/When: 同一会话当前只剩空闲绑定。
+  snapshot.boundThreads[0].activity = "idle";
   await onTick();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.match(bound.innerHTML, /c-connection-session c-connection-session--bound is-pinned[^>]*data-thread-id="thread-12345678-alpha"/);
-  assert.match(bound.innerHTML, /data-action="pin-session" data-thread-id="thread-12345678-alpha" aria-pressed="true"/);
 
-  onClick({ target: pinControl });
-  assert.equal(pinControl.attributes.get("aria-pressed"), "false");
-  assert.equal(pinnedClasses.has("is-pinned"), false);
+  // Then: 近期关闭的会话图标与绑定区域复用同一个蓝色状态。
+  assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?c-session-icon" data-connection-state="bound"/);
+  assert.match(closed.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?c-session-icon" data-connection-state="bound"/);
 
   transitionDetails[0].open = true;
   await onTick();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(invoked.slice(-2), ["get_app_status", "get_connection_snapshot"]);
-  assert.equal(transitionDetails[0].dataset.transitionId, "session:thread-12345678-alpha");
+  assert.equal(transitionDetails[0].dataset.transitionId, "T003");
   assert.equal(transitionDetails[0].open, true);
 
-  // Given: 会话仍存在，但低号连接消失并加入一条新连接。
+  // Given: 会话仍存在，恢复中的连接取代已经关闭的低号连接。
   snapshot.boundThreads = [
     snapshot.boundThreads[1],
     { id: "S005", threadId: "thread-12345678-alpha", activity: "up", idleSeconds: 0, reclaimPolicy: "threadEnd" },
@@ -553,8 +543,8 @@ test("连接检查器只在打开时读取快照、兼容旧总数并支持 Esca
   await onTick();
   await new Promise((resolve) => setImmediate(resolve));
 
-  // Then: 组内编号只递增，不回填已消失的连接 01。
-  assert.match(bound.innerHTML, /data-connection-id="S005"[\s\S]*?连接 05/);
+  // Then: 同一物理连接从恢复区进入绑定区后沿用原编号。
+  assert.match(bound.innerHTML, /data-connection-id="S005"[\s\S]*?连接 03/);
 
   // Given: 会话 01 完全离开三个区域，随后出现新线程。
   snapshot.boundThreads = [snapshot.boundThreads[2]];
