@@ -20,7 +20,7 @@ use tokio_tungstenite::{
 use super::super::{
     BenchmarkResult, BenchmarkSettings, Completion, HYBRID_PATH, RoundSample, RoundTransport,
     Sample, WEBSOCKET_PATH, benchmark_error, completion_response_id, metric_delta,
-    payload_with_previous_response_id,
+    payload_with_previous_response_id, response_failure_error,
 };
 use crate::proxy::MetricsSnapshot;
 
@@ -74,7 +74,9 @@ pub(super) fn websocket_close_error(frame: Option<&CloseFrame>) -> io::Error {
         || io::Error::other("WebSocket closed before response completion without close frame"),
         |frame| {
             let code = u16::from(frame.code);
-            let kind = if matches!(code, 1011..=1013) {
+            let kind = if matches!(code, 1011..=1013)
+                || (code == 1002 && frame.reason == "upstream websocket error")
+            {
                 io::ErrorKind::ConnectionAborted
             } else {
                 io::ErrorKind::Other
@@ -127,9 +129,13 @@ where
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => Completion::Pending,
         };
         record_application_message(&mut timing, &message, started.elapsed());
-        if let Completion::Complete(response_id) = completion {
-            timing.response_id = response_id;
-            return Ok(timing);
+        match completion {
+            Completion::Complete(response_id) => {
+                timing.response_id = response_id;
+                return Ok(timing);
+            }
+            Completion::Failed(event_type) => return Err(response_failure_error(&event_type)),
+            Completion::Pending => {}
         }
     }
     Err(io::Error::other(

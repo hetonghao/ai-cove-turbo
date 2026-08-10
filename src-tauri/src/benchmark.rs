@@ -133,16 +133,27 @@ fn payload_with_previous_response_id(
 enum Completion {
     Pending,
     Complete(Option<String>),
+    Failed(String),
 }
 
 fn completion_response_id(event: &[u8]) -> Completion {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(event) else {
         return Completion::Pending;
     };
-    if !matches!(
-        value.get("type").and_then(serde_json::Value::as_str),
-        Some("response.completed" | "response.done")
+    let Some(event_type) = value.get("type").and_then(serde_json::Value::as_str) else {
+        return Completion::Pending;
+    };
+    if matches!(
+        event_type,
+        "response.failed"
+            | "response.incomplete"
+            | "response.cancelled"
+            | "response.canceled"
+            | "error"
     ) {
+        return Completion::Failed(event_type.to_owned());
+    }
+    if !matches!(event_type, "response.completed" | "response.done") {
         return Completion::Pending;
     }
     Completion::Complete(
@@ -151,6 +162,13 @@ fn completion_response_id(event: &[u8]) -> Completion {
             .and_then(|response| response.get("id"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+    )
+}
+
+fn response_failure_error(event_type: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        format!("upstream response ended with {event_type}"),
     )
 }
 

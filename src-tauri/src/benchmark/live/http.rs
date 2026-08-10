@@ -7,6 +7,7 @@ use tokio::time::timeout;
 use super::super::{
     BenchmarkResult, BenchmarkSettings, Completion, RoundSample, RoundTransport, Sample,
     benchmark_error, completion_response_id, metric_delta, payload_with_previous_response_id,
+    response_failure_error,
 };
 
 fn round_error(round: usize, error: &io::Error) -> io::Error {
@@ -29,6 +30,7 @@ struct SseResult {
     first_event: Option<std::time::Duration>,
     response_events: u64,
     response_id: Option<String>,
+    failure: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -74,8 +76,10 @@ impl SseTracker {
         {
             self.result.first_event = Some(elapsed);
         }
-        if let Completion::Complete(response_id) = completion_response_id(data) {
-            self.result.response_id = response_id;
+        match completion_response_id(data) {
+            Completion::Complete(response_id) => self.result.response_id = response_id,
+            Completion::Failed(event_type) => self.result.failure = Some(event_type),
+            Completion::Pending => {}
         }
     }
 }
@@ -124,8 +128,15 @@ async fn sample_round(
         while let Some(chunk) = body.next().await {
             let chunk = chunk.map_err(benchmark_error)?;
             tracker.push(&chunk, started.elapsed());
+            if let Some(event_type) = tracker.result.failure.as_deref() {
+                return Err(response_failure_error(event_type));
+            }
         }
-        Ok::<SseResult, io::Error>(tracker.finish())
+        let result = tracker.finish();
+        if let Some(event_type) = result.failure.as_deref() {
+            return Err(response_failure_error(event_type));
+        }
+        Ok::<SseResult, io::Error>(result)
     })
     .await
     .map_err(benchmark_error)??;
@@ -277,6 +288,10 @@ mod tests {
         axum::response::Response::new(Body::from_stream(stream))
     }
 
+    async fn failed_sse_response() -> &'static str {
+        "data: {\"type\":\"response.failed\"}\n\n"
+    }
+
     #[test]
     fn tracks_first_valid_sse_event_across_chunks() {
         let mut tracker = SseTracker::default();
@@ -346,6 +361,49 @@ mod tests {
 
         assert!(result.is_err());
         server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fails_fast_when_http_receives_failure_terminal() -> BenchmarkResult<()> {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                Router::new().route("/responses", post(failed_sse_response)),
+            )
+            .await;
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/responses");
+        let settings = BenchmarkSettings {
+            upstream: "http://127.0.0.1".to_owned(),
+            model: "test-model".to_owned(),
+            prompt: "test-prompt".to_owned(),
+            workload_source: WorkloadSource::BuiltIn,
+            runs: 4,
+            warmups: 0,
+            timeout: Duration::from_secs(1),
+        };
+        let case = Case {
+            client: &client,
+            url: &url,
+            authorization: "test-key",
+            payloads: &[],
+            metrics: None,
+        };
+
+        let result = sample_round(&case, "{\"input\":\"test\"}", &settings).await;
+        server.abort();
+        let Err(error) = result else {
+            return Err(std::io::Error::other(
+                "HTTP failure terminal was admitted as a benchmark sample",
+            ));
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert!(error.to_string().contains("response.failed"));
         Ok(())
     }
 

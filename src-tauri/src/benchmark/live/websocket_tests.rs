@@ -8,9 +8,9 @@ use tokio_tungstenite::tungstenite::{
 
 use super::{
     Case, Mode, ResponseTiming, authenticated_request, classify_hybrid_round_transport,
-    collect_sample, record_application_message, reported_reconnects, validate_hybrid_lifecycle,
-    validate_hybrid_round_transports, websocket_close_error, websocket_error,
-    websocket_round_error,
+    collect_sample, record_application_message, reported_reconnects, sample,
+    validate_hybrid_lifecycle, validate_hybrid_round_transports, websocket_close_error,
+    websocket_error, websocket_round_error,
 };
 use crate::{
     benchmark::{
@@ -163,6 +163,18 @@ fn does_not_retry_protocol_websocket_closes() {
 }
 
 #[test]
+fn retries_proxy_reported_upstream_websocket_errors() {
+    let close = CloseFrame {
+        code: CloseCode::Protocol,
+        reason: "upstream websocket error".into(),
+    };
+
+    let error = websocket_close_error(Some(&close));
+
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+}
+
+#[test]
 fn retries_transient_websocket_handshake_statuses_only() -> BenchmarkResult<()> {
     for (status, expected) in [
         (429, io::ErrorKind::ConnectionAborted),
@@ -178,6 +190,59 @@ fn retries_transient_websocket_handshake_statuses_only() -> BenchmarkResult<()> 
         )));
         assert_eq!(error.kind(), expected);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fails_fast_when_websocket_receives_failure_terminal() -> BenchmarkResult<()> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .map_err(websocket_error)?;
+        let _ = socket.next().await;
+        socket
+            .send(Message::Text(r#"{"type":"response.failed"}"#.into()))
+            .await
+            .map_err(websocket_error)?;
+        let _ = socket.next().await;
+        Ok::<(), io::Error>(())
+    });
+    let payloads = [websocket_payload("test-model", "test")];
+    let settings = BenchmarkSettings {
+        upstream: format!("http://{address}"),
+        model: "test-model".to_owned(),
+        prompt: "test-prompt".to_owned(),
+        workload_source: WorkloadSource::BuiltIn,
+        runs: 4,
+        warmups: 0,
+        timeout: Duration::from_millis(100),
+    };
+    let url = format!("ws://{address}/v1/responses");
+
+    let result = sample(
+        &Case {
+            url: &url,
+            authorization: "test-key",
+            payloads: &payloads,
+            metrics: None,
+            mode: Mode::Hybrid,
+        },
+        &settings,
+        MetricsSnapshot::default(),
+    )
+    .await;
+    server.abort();
+    let Err(error) = result else {
+        return Err(io::Error::other(
+            "WebSocket failure terminal was admitted as a benchmark sample",
+        ));
+    };
+
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    assert!(error.to_string().contains("response.failed"));
     Ok(())
 }
 
