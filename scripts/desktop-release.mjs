@@ -26,8 +26,8 @@ const ciPlatforms = [
     platform: "windows-x86_64",
     installerSuffix: ".exe",
     installerName: "ai-cove-turbo-windows.exe",
-    updaterSuffix: ".exe.zip",
-    updaterName: "ai-cove-turbo-windows-x86_64.exe.zip",
+    updaterSuffix: ".exe",
+    updaterName: "ai-cove-turbo-windows.exe",
   },
 ];
 
@@ -246,7 +246,9 @@ export async function assembleCiDesktopRelease({
       throw new Error(`updater signature is empty for ${spec.platform}`);
     }
     await cp(installerPath, path.join(directory, spec.installerName));
-    await cp(updaterArchivePath, path.join(directory, spec.updaterName));
+    if (spec.updaterName !== spec.installerName) {
+      await cp(updaterArchivePath, path.join(directory, spec.updaterName));
+    }
     await cp(updaterSignaturePath, path.join(directory, `${spec.updaterName}.sig`));
     platforms[spec.platform] = {
       signature,

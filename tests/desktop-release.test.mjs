@@ -91,11 +91,7 @@ test("CI assembly 从双平台 updater 实物生成合并 manifest", async () =>
     await writeFile(path.join(darwinDir, "AI Cove Turbo.app.tar.gz.sig"), "mac signature\n");
     await writeFile(path.join(windowsDir, "AI Cove Turbo_0.1.0-beta.1_x64-setup.exe"), "exe");
     await writeFile(
-      path.join(windowsDir, "AI Cove Turbo_0.1.0-beta.1_x64-setup.exe.zip"),
-      "windows updater",
-    );
-    await writeFile(
-      path.join(windowsDir, "AI Cove Turbo_0.1.0-beta.1_x64-setup.exe.zip.sig"),
+      path.join(windowsDir, "AI Cove Turbo_0.1.0-beta.1_x64-setup.exe.sig"),
       "windows signature\n",
     );
 
@@ -116,9 +112,13 @@ test("CI assembly 从双平台 updater 实物生成合并 manifest", async () =>
     assert.equal(manifest.platforms["windows-x86_64"].signature, "windows signature");
     assert.equal(
       manifest.platforms["windows-x86_64"].url,
-      "https://ai-cove.com/downloads/turbo/ai-cove-turbo-windows-x86_64.exe.zip?v=0.1.0-beta.1",
+      "https://ai-cove.com/downloads/turbo/ai-cove-turbo-windows.exe?v=0.1.0-beta.1",
     );
     assert.equal(await readFile(path.join(releaseDir, "ai-cove-turbo-windows.exe"), "utf8"), "exe");
+    assert.equal(
+      await readFile(path.join(releaseDir, "ai-cove-turbo-windows.exe.sig"), "utf8"),
+      "windows signature\n",
+    );
   } finally {
     await rm(testRoot, { recursive: true, force: true });
   }

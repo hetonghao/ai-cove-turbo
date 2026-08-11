@@ -72,8 +72,8 @@ jobs:
         run: |
           mkdir -p release-inputs/${{ matrix.platform }}
           find src-tauri/target/release/bundle -type f \
-            \( -name '*.dmg' -o -name '*.exe' -o -name '*.exe.zip' -o -name '*.app.tar.gz' -o \
-               -name '*.dmg.sig' -o -name '*.exe.sig' -o -name '*.exe.zip.sig' -o -name '*.app.tar.gz.sig' -o \
+            \( -name '*.dmg' -o -name '*.exe' -o -name '*.app.tar.gz' -o \
+               -name '*.dmg.sig' -o -name '*.exe.sig' -o -name '*.app.tar.gz.sig' -o \
                -name 'latest.json' \) -exec cp {} release-inputs/${{ matrix.platform }}/ \;
           test -n "$(find release-inputs/${{ matrix.platform }} -type f -print -quit)"
 

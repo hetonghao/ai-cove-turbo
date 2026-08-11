@@ -253,8 +253,8 @@ test("开机自启动保持后台且发布流程收集真实 updater 包", async
   );
   assert.match(workflow, /node scripts\/desktop-release\.mjs assemble-ci release-inputs desktop-release/);
   assert.match(workflow, /createUpdaterArtifacts: true/);
-  assert.match(workflow, /\.exe\.zip/);
-  assert.match(workflow, /\.exe\.zip\.sig/);
+  assert.match(workflow, /\.exe\.sig/);
+  assert.doesNotMatch(workflow, /\.exe\.zip/);
 });
 
 test("桌面版本和 updater endpoint 由同一编译期契约驱动", async () => {
