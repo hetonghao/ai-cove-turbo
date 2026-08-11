@@ -14,6 +14,22 @@ const installerName = "ai-cove-turbo-macos.dmg";
 const updaterArchiveName = "ai-cove-turbo-macos-aarch64.app.tar.gz";
 const updaterSignatureName = `${updaterArchiveName}.sig`;
 const updaterPlatform = "darwin-aarch64";
+const ciPlatforms = [
+  {
+    platform: "darwin-aarch64",
+    installerSuffix: ".dmg",
+    installerName,
+    updaterSuffix: ".app.tar.gz",
+    updaterName: updaterArchiveName,
+  },
+  {
+    platform: "windows-x86_64",
+    installerSuffix: ".exe",
+    installerName: "ai-cove-turbo-windows.exe",
+    updaterSuffix: ".exe.zip",
+    updaterName: "ai-cove-turbo-windows-x86_64.exe.zip",
+  },
+];
 
 function run(command, args, env = process.env) {
   const result = spawnSync(command, args, {
@@ -88,8 +104,8 @@ async function ensureSigningKey() {
   return { keyPath, publicKey: process.env.TURBO_UPDATER_PUBLIC_KEY?.trim() || localPublicKey };
 }
 
-function artifactUrl(baseUrl, version) {
-  return `${baseUrl.replace(/\/+$/u, "")}/${updaterArchiveName}?v=${encodeURIComponent(version)}`;
+function artifactUrl(baseUrl, archiveName, version) {
+  return `${baseUrl.replace(/\/+$/u, "")}/${archiveName}?v=${encodeURIComponent(version)}`;
 }
 
 export function createLocalBuildInvocation({ privateKey, publicKey, env = process.env }) {
@@ -126,7 +142,7 @@ function manifestFor({ version, baseUrl, signature }) {
     platforms: {
       [updaterPlatform]: {
         signature,
-        url: artifactUrl(baseUrl, version),
+        url: artifactUrl(baseUrl, updaterArchiveName, version),
       },
     },
   };
@@ -170,8 +186,13 @@ export async function validateDesktopRelease({ releaseDir: directory = releaseDi
     if (!signature || signature !== entry.signature.trim()) {
       throw new Error(`updater signature mismatch for ${platform}`);
     }
-    if (platform.startsWith("darwin-") && !fs.existsSync(path.join(directory, installerName))) {
-      throw new Error(`missing desktop installer for darwin: ${installerName}`);
+    const platformInstallerName = platform.startsWith("darwin-")
+      ? installerName
+      : platform.startsWith("windows-")
+        ? "ai-cove-turbo-windows.exe"
+        : null;
+    if (platformInstallerName && !fs.existsSync(path.join(directory, platformInstallerName))) {
+      throw new Error(`missing desktop installer for ${platform}: ${platformInstallerName}`);
     }
   }
   return { version: manifest.version, platforms: Object.keys(manifest.platforms).sort() };
@@ -200,6 +221,48 @@ export async function assembleDesktopRelease({
     "utf8",
   );
   return validateDesktopRelease({ releaseDir: directory });
+}
+
+export async function assembleCiDesktopRelease({
+  version,
+  inputDir,
+  releaseDir: directory,
+  baseUrl = process.env.DOWNLOAD_BASE_URL ?? defaultDownloadBaseUrl,
+}) {
+  const files = await listFiles(inputDir);
+  const platforms = {};
+  await rm(directory, { force: true, recursive: true });
+  await mkdir(directory, { recursive: true });
+
+  for (const spec of ciPlatforms) {
+    const installerPath = await findBundleArtifact(inputDir, spec.installerSuffix);
+    const updaterArchivePath = await findBundleArtifact(inputDir, spec.updaterSuffix);
+    const updaterSignaturePath = `${updaterArchivePath}.sig`;
+    if (!files.includes(updaterSignaturePath)) {
+      throw new Error(`missing generated updater signature: ${updaterSignaturePath}`);
+    }
+    const signature = (await readFile(updaterSignaturePath, "utf8")).trim();
+    if (!signature) {
+      throw new Error(`updater signature is empty for ${spec.platform}`);
+    }
+    await cp(installerPath, path.join(directory, spec.installerName));
+    await cp(updaterArchivePath, path.join(directory, spec.updaterName));
+    await cp(updaterSignaturePath, path.join(directory, `${spec.updaterName}.sig`));
+    platforms[spec.platform] = {
+      signature,
+      url: artifactUrl(baseUrl, spec.updaterName, version),
+    };
+  }
+
+  await writeFile(
+    path.join(directory, "latest.json"),
+    `${JSON.stringify({ version, notes: `AI Cove Turbo ${version}`, pub_date: new Date().toISOString(), platforms }, null, 2)}\n`,
+    "utf8",
+  );
+  return validateDesktopRelease({
+    releaseDir: directory,
+    requiredPlatforms: ciPlatforms.map(({ platform }) => platform),
+  });
 }
 
 export async function buildLocalRelease() {
@@ -234,6 +297,17 @@ export async function buildLocalRelease() {
 }
 
 export async function main(args = process.argv.slice(2)) {
+  if (args[0] === "assemble-ci") {
+    const version = await readVersion();
+    const directory = path.resolve(root, args[2] ?? "desktop-release");
+    const result = await assembleCiDesktopRelease({
+      version,
+      inputDir: path.resolve(root, args[1] ?? "release-inputs"),
+      releaseDir: directory,
+    });
+    process.stdout.write(`[desktop:assemble-ci] ${result.version} -> ${directory}\n`);
+    return result;
+  }
   if (args[0] === "validate") {
     const result = await validateDesktopRelease({ releaseDir: args[1] ?? releaseDir });
     process.stdout.write(`[desktop:validate-release] ${result.version} valid for ${result.platforms.join(", ")}\n`);

@@ -251,8 +251,8 @@ test("开机自启动保持后台且发布流程收集真实 updater 包", async
     workflow,
     /npx tauri build --ci --bundles "\$\{\{ matrix\.bundles \}\}" --config tauri-release-config\.json/,
   );
+  assert.match(workflow, /node scripts\/desktop-release\.mjs assemble-ci release-inputs desktop-release/);
   assert.match(workflow, /createUpdaterArtifacts: true/);
-  assert.match(workflow, /updater signature mismatch/);
   assert.match(workflow, /\.exe\.zip/);
   assert.match(workflow, /\.exe\.zip\.sig/);
 });
