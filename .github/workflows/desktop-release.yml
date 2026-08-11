@@ -23,8 +23,10 @@ jobs:
         include:
           - platform: darwin-aarch64
             os: macos-14
+            bundles: app,dmg
           - platform: windows-x86_64
             os: windows-latest
+            bundles: nsis
 
     steps:
       - name: Checkout
@@ -63,7 +65,7 @@ jobs:
             plugins: { updater: { pubkey: process.env.TURBO_UPDATER_PUBLIC_KEY } }
           }));
           NODE
-          npx tauri build --ci --config tauri-release-config.json
+          npx tauri build --ci --bundles "${{ matrix.bundles }}" --config tauri-release-config.json
 
       - name: Collect release artifacts
         shell: bash

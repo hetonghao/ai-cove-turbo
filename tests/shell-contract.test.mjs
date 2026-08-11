@@ -245,7 +245,12 @@ test("开机自启动保持后台且发布流程收集真实 updater 包", async
   assert.match(rust, /args_os\(\)[\s\S]*--background/);
   assert.match(workflow, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD/);
   assert.doesNotMatch(workflow, /test -n "\$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"/);
-  assert.match(workflow, /npx tauri build --ci --config tauri-release-config\.json/);
+  assert.match(workflow, /platform: darwin-aarch64[\s\S]*bundles: app,dmg/);
+  assert.match(workflow, /platform: windows-x86_64[\s\S]*bundles: nsis/);
+  assert.match(
+    workflow,
+    /npx tauri build --ci --bundles "\$\{\{ matrix\.bundles \}\}" --config tauri-release-config\.json/,
+  );
   assert.match(workflow, /createUpdaterArtifacts: true/);
   assert.match(workflow, /updater signature mismatch/);
   assert.match(workflow, /\.exe\.zip/);
