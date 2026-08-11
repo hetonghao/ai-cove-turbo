@@ -187,6 +187,7 @@ async function liveTailHarness() {
   return {
     follow,
     followLabel,
+    requestStream,
     terminal,
     async click(action) {
       const control = action === "follow-live" ? follow : element({ action });
@@ -377,19 +378,24 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   trigger.focused = false;
   trigger.focus = () => { trigger.focused = true; };
   trigger.closest = (selector) => selector === "[data-action]" ? trigger : null;
-  const summaryTrigger = element({ action: "toggle-connections", connectionSummaryTrigger: "" });
+  const panel = motionElement({ connectionPanel: "" }, true);
+  const panelClasses = new Set();
+  panel.classList = {
+    add(name) { panelClasses.add(name); },
+    remove(name) { panelClasses.delete(name); },
+  };
+  panel.getBoundingClientRect = () => ({ height: 400 });
+  const summaryTrigger = motionElement({ action: "toggle-connections", connectionSummaryTrigger: "" });
+  summaryTrigger.getBoundingClientRect = () => {
+    const translated = Number(String(summaryTrigger.style.transform || "").match(/translate3d\(0, (-?[\d.]+)px,/u)?.[1] || 0);
+    const panelInFlow = !panel.hidden
+      && !panelClasses.has("is-closing")
+      && !panelClasses.has("is-drag-preview");
+    return { top: (panelInFlow ? 458 : 58) + translated };
+  };
   summaryTrigger.focused = false;
   summaryTrigger.focus = () => { summaryTrigger.focused = true; };
   summaryTrigger.closest = (selector) => selector === "[data-action]" ? summaryTrigger : null;
-  const panel = motionElement({ connectionPanel: "" }, true);
-  let panelOverflow = false;
-  panel.clientHeight = 600;
-  panel.scrollHeight = 500;
-  panel.classList = {
-    toggle(name, active) {
-      if (name === "is-overflowing") panelOverflow = active;
-    },
-  };
   const dock = element({ connectionDock: "" });
   dock.offsetWidth = 456;
   let dockOffset = "0px";
@@ -397,7 +403,7 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
     if (name === "--connection-dock-offset") dockOffset = value;
   };
   dock.classList = { add() {}, remove() {} };
-  const grip = element({ connectionGrip: "" });
+  const grip = summaryTrigger;
   const gripHandlers = new Map();
   grip.addEventListener = (type, handler) => gripHandlers.set(type, handler);
   grip.setPointerCapture = () => {};
@@ -479,15 +485,15 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
     ['[data-connection-list="transitions"]', transitions],
     ['[data-connection-list="closed"]', closed],
     ["[data-connection-message]", message],
+    ["[data-connection-summary-trigger]", summaryTrigger],
     ['[data-action="toggle-connections"]', summaryTrigger],
   ]);
   const invoked = [];
-  const titleCalls = [];
-  const threadTitles = {
-    "thread-12345678-alpha": "Alpha 压缩调试",
-    "thread-12345678-beta": "Beta 连接验证",
-    "thread-12345678-gamma": "Gamma 并行验证",
-    "thread-released": "已结束会话",
+  const infoCalls = [];
+  const threadInfos = {
+    "thread-12345678-alpha": { name: "Nash", parentName: "Turbo 主会话", isSubagent: true },
+    "thread-12345678-beta": { name: "", parentName: null, isSubagent: false },
+    "thread-released": { name: "已结束会话", parentName: null, isSubagent: false },
   };
   const snapshot = {
     currentConnections: 10,
@@ -531,9 +537,9 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   };
   const window = {
     __TAURI__: { core: { invoke: async (command, args) => {
-      if (command === "get_codex_thread_title") {
-        titleCalls.push(args.threadId);
-        return threadTitles[args.threadId] ?? null;
+      if (command === "get_codex_thread_info") {
+        infoCalls.push(args.threadId);
+        return threadInfos[args.threadId] ?? null;
       }
       invoked.push(command);
       return command === "get_connection_snapshot"
@@ -567,13 +573,33 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.equal(summaryDown.textContent, "2");
   assert.equal(summaryIdle.textContent, "2");
 
+  gripHandlers.get("pointerdown")({ button: 0, pointerId: 0, clientX: 100, clientY: 100, preventDefault() {} });
+  gripHandlers.get("pointermove")({ pointerId: 0, clientX: 140, clientY: 100, preventDefault() {} });
+  gripHandlers.get("pointerup")({ pointerId: 0, clientX: 140, clientY: 100 });
+  assert.equal(dockOffset, "40px");
+  assert.equal(panel.hidden, true);
+  gripHandlers.get("click")({ preventDefault() {}, stopPropagation() {} });
+  gripHandlers.get("keydown")({ key: "Home", preventDefault() {} });
+  assert.equal(dockOffset, "0px");
+
   onClick({ target: summaryTrigger });
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(panel.hidden, false);
+  assert.equal(panel.attributes.get("aria-hidden"), "false");
   assert.equal(dock.dataset.open, "true");
-  assert.equal(panelOverflow, false);
+  assert.equal(dock.dataset.phase, "opening");
+  assert.deepEqual(
+    Array.from(summaryTrigger.animations.at(-1).keyframes, (frame) => frame.transform),
+    ["translate3d(0, -400px, 0)", "translate3d(0, -72px, 0)", "translate3d(0, 0, 0)"],
+  );
+  assert.deepEqual(
+    Array.from(panel.animations.at(-1).keyframes, (frame) => frame.clipPath),
+    ["inset(0 0 100% 0 round 14px)", "inset(0 0 18% 0 round 14px)", "inset(0 0 0 0 round 14px)"],
+  );
+  panel.animations.at(-1).onfinish();
+  assert.equal(dock.dataset.phase, "open");
   assert.equal(trigger.attributes.get("aria-expanded"), "true");
   assert.equal(summaryTrigger.attributes.get("aria-expanded"), "true");
   assert.equal(total.textContent, "10");
@@ -585,16 +611,23 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.match(bound.innerHTML, /data-short-name="01"[^>]*>连接 01<\/strong>/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?会话 01[\s\S]*?×2[\s\S]*?c-connection-session__separator[\s\S]*?连接 01[\s\S]*?连接 02/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-beta"[^>]*>[\s\S]*?会话 02/);
-  assert.match(bound.innerHTML, /c-connection-session__summary"[^>]*aria-label="会话 01，2 条连接，发送 0，接收 1，空闲 1"[^>]*>\s*<svg class="c-session-icon"/);
-  assert.match(bound.innerHTML, /<span class="c-hover-card" aria-hidden="true"><strong>会话 01<\/strong><dl><div><dt>会话名称<\/dt><dd>Alpha 压缩调试<\/dd><\/div><div><dt>会话 ID<\/dt><dd>thread-12345678-alpha<\/dd>/);
+  assert.match(bound.innerHTML, /c-connection-session__summary"[^>]*aria-label="会话 01，子会话，2 条连接，发送 0，接收 1，空闲 1"[^>]*>\s*<svg class="c-session-icon"/);
+  assert.match(bound.innerHTML, /<span class="c-hover-card" aria-hidden="true"><strong>会话 01<\/strong><dl><div><dt>会话名称<\/dt><dd>Nash<\/dd><\/div><div><dt>会话类型<\/dt><dd>子会话<\/dd><\/div><div><dt>所属父会话<\/dt><dd>Turbo 主会话<\/dd>/);
   const boundSessionHover = bound.innerHTML.match(/<span class="c-hover-card"[^>]*><strong>会话 01<\/strong>[\s\S]*?<\/span>/)?.[0] ?? "";
-  assert.match(boundSessionHover, /会话名称|会话 ID|thread-12345678-alpha/);
+  assert.doesNotMatch(boundSessionHover, /会话 ID|线程 ID|thread-12345678-alpha/);
+  assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?<svg class="c-session-icon" data-connection-state="active" data-session-kind="subagent"[\s\S]*?c-session-icon__branch/);
   assert.match(bound.innerHTML, /<svg class="c-session-icon"[^>]*><path d="M3 1\.75h8[^>]*\/><\/svg>/);
   assert.doesNotMatch(bound.innerHTML, /<svg class="c-session-icon"[^>]*>[\s\S]*?<rect/);
+  const betaStart = bound.innerHTML.indexOf('data-thread-id="thread-12345678-beta"');
+  const gammaStart = bound.innerHTML.indexOf('data-thread-id="thread-12345678-gamma"');
+  assert.match(bound.innerHTML.slice(betaStart, gammaStart), /<dt>会话名称<\/dt><dd>-<\/dd>/);
+  assert.match(bound.innerHTML.slice(gammaStart), /<dt>会话名称<\/dt><dd>-<\/dd>/);
   assert.match(bound.innerHTML, /data-connection-id="S001"[\s\S]*?连接 01/);
   assert.match(bound.innerHTML, /data-connection-id="S002"[\s\S]*?连接 02/);
   assert.match(bound.innerHTML, /c-connection-chip[^>]*data-connection-id="S001"[\s\S]*?<i class="c-ws-icon"/);
-  assert.match(bound.innerHTML, /data-connection-id="S001"[\s\S]*?<dt>线程 ID<\/dt><dd>thread-12345678-alpha<\/dd>/);
+  const boundConnectionHover = bound.innerHTML.match(/data-connection-id="S001"[\s\S]*?<span class="c-hover-card"[^>]*>[\s\S]*?<\/span>/)?.[0] ?? "";
+  assert.match(boundConnectionHover, /<dt>连接 ID<\/dt><dd>S001<\/dd>/);
+  assert.doesNotMatch(boundConnectionHover, /线程 ID|会话 ID|thread-12345678-alpha/);
   assert.doesNotMatch(bound.innerHTML, /c-session-pin|c-connection-session__metric|data-action="pin-session"/);
   assert.doesNotMatch(bound.innerHTML, /线程 12345678/);
   assert.match(bound.innerHTML, /<svg class="c-connection-idle" viewBox="0 0 18 14" data-direction="up-right"[^>]*>(?:<path[^>]* \/>){3}<\/svg>/);
@@ -608,7 +641,8 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.match(closed.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?会话 01[\s\S]*?×3[\s\S]*?c-connection-session__separator[\s\S]*?data-connection-event-id="C004"[\s\S]*?data-connection-event-id="C001"[\s\S]*?data-connection-event-id="C002"/);
   assert.match(closed.innerHTML, /data-thread-id="thread-released"[^>]*>[\s\S]*?c-session-icon" data-connection-state="closed"[\s\S]*?<dt>会话状态<\/dt><dd>已释放<\/dd>/);
   const closedSessionHover = closed.innerHTML.match(/<span class="c-hover-card"[^>]*><strong>会话 01<\/strong>[\s\S]*?<\/span>/)?.[0] ?? "";
-  assert.match(closedSessionHover, /会话名称|会话 ID|thread-12345678-alpha/);
+  assert.match(closedSessionHover, /会话名称|会话类型|所属父会话|Turbo 主会话/);
+  assert.doesNotMatch(closedSessionHover, /会话 ID|线程 ID|thread-12345678-alpha/);
   assert.match(closed.innerHTML, /data-connection-id="S003"[\s\S]*?连接 05/);
   assert.match(closed.innerHTML, /data-connection-id="S006"[\s\S]*?连接 06/);
   assert.match(closed.innerHTML, /data-connection-event-id="C001"/);
@@ -634,12 +668,6 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(closedDensitySession.dataset.density, "full");
 
-  panel.scrollHeight = 700;
-  await onTick();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(panelOverflow, true);
-  panel.scrollHeight = 500;
-
   gripHandlers.get("pointerdown")({ button: 0, pointerId: 1, clientX: 100, clientY: 100, preventDefault() {} });
   gripHandlers.get("pointermove")({ pointerId: 1, clientX: 170, clientY: 100, preventDefault() {} });
   gripHandlers.get("pointerup")({ pointerId: 1, clientX: 170, clientY: 100 });
@@ -649,22 +677,65 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
 
   gripHandlers.get("pointerdown")({ button: 0, pointerId: 2, clientX: 170, clientY: 100, preventDefault() {} });
   gripHandlers.get("pointermove")({ pointerId: 2, clientX: 170, clientY: 64, preventDefault() {} });
+  assert.equal(dock.dataset.phase, "dragging-close");
+  assert.equal(panelClasses.has("is-drag-preview"), true);
+  assert.equal(summaryTrigger.style.transform, "translate3d(0, 364px, 0)");
+  assert.equal(panel.style.clipPath, "inset(0 0 9% 0 round 14px)");
   gripHandlers.get("pointerup")({ pointerId: 2, clientX: 170, clientY: 64 });
-  assert.equal(panel.hidden, true);
+  assert.equal(panel.hidden, false);
+  assert.equal(panel.attributes.get("aria-hidden"), "true");
   assert.equal(dock.dataset.open, "false");
+  assert.equal(dock.dataset.phase, "closing");
+  assert.equal(panelClasses.has("is-closing"), true);
+  assert.deepEqual(
+    Array.from(summaryTrigger.animations.at(-1).keyframes, (frame) => frame.transform),
+    ["translate3d(0, 364px, 0)", "translate3d(0, 65.52px, 0)", "translate3d(0, 0, 0)"],
+  );
+  const closingClipPaths = Array.from(panel.animations.at(-1).keyframes, (frame) => frame.clipPath);
+  assert.ok(Math.abs(Number(closingClipPaths[0].match(/inset\(0 0 ([\d.]+)%/u)?.[1]) - 9) < 0.001);
+  assert.equal(closingClipPaths[1], "inset(0 0 100% 0 round 14px)");
+  panel.animations.at(-1).onfinish();
+  assert.equal(panel.hidden, true);
+  assert.equal(dock.dataset.phase, "closed");
+  assert.equal(panelClasses.has("is-closing"), false);
   gripHandlers.get("click")({ preventDefault() {} });
 
+  gripHandlers.get("pointerdown")({ button: 0, pointerId: 3, clientX: 170, clientY: 100, preventDefault() {} });
+  gripHandlers.get("pointermove")({ pointerId: 3, clientX: 170, clientY: 300, preventDefault() {} });
+  assert.equal(panel.hidden, false);
+  assert.equal(dock.dataset.phase, "dragging-open");
+  assert.equal(panelClasses.has("is-drag-preview"), true);
+  assert.equal(summaryTrigger.style.transform, "translate3d(0, 200px, 0)");
+  assert.equal(panel.style.clipPath, "inset(0 0 50% 0 round 14px)");
+  gripHandlers.get("pointerup")({ pointerId: 3, clientX: 170, clientY: 300 });
+  assert.equal(dock.dataset.open, "true");
+  assert.equal(dock.dataset.phase, "opening");
+  assert.equal(panelClasses.has("is-drag-preview"), false);
+  assert.deepEqual(
+    Array.from(panel.animations.at(-1).keyframes, (frame) => frame.clipPath),
+    ["inset(0 0 50% 0 round 14px)", "inset(0 0 0 0 round 14px)"],
+  );
+  panel.animations.at(-1).onfinish();
+  assert.equal(dock.dataset.phase, "open");
+  gripHandlers.get("click")({ preventDefault() {}, stopPropagation() {} });
+
   onClick({ target: summaryTrigger });
-  await new Promise((resolve) => setImmediate(resolve));
-  gripHandlers.get("click")({ preventDefault() {} });
+  assert.equal(panel.hidden, false);
+  assert.deepEqual(
+    Array.from(panel.animations.at(-1).keyframes, (frame) => frame.clipPath),
+    ["inset(0 0 0 0 round 14px)", "inset(0 0 82% 0 round 14px)", "inset(0 0 100% 0 round 14px)"],
+  );
+  panel.animations.at(-1).onfinish();
   assert.equal(panel.hidden, true);
 
   onClick({ target: trigger });
   assert.equal(panel.hidden, false);
   assert.equal(summaryTrigger.attributes.get("aria-expanded"), "true");
   onClick({ target: trigger });
-  assert.equal(panel.hidden, true);
+  assert.equal(panel.hidden, false);
   assert.equal(summaryTrigger.attributes.get("aria-expanded"), "false");
+  panel.animations.at(-1).onfinish();
+  assert.equal(panel.hidden, true);
   onClick({ target: trigger });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(panel.hidden, false);
@@ -679,11 +750,11 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.match(closed.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?c-session-icon" data-connection-state="bound"/);
 
   transitionDetails[0].open = true;
-  const titleCallCount = titleCalls.length;
+  const infoCallCount = infoCalls.length;
   await onTick();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(invoked.slice(-2), ["get_app_status", "get_connection_snapshot"]);
-  assert.equal(titleCalls.length, titleCallCount);
+  assert.equal(infoCalls.length, infoCallCount);
   assert.equal(transitionDetails[0].dataset.transitionId, "T003");
   assert.equal(transitionDetails[0].open, true);
 
@@ -727,17 +798,38 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.equal(total.textContent, "4");
 
   onKeydown({ key: "Escape", target: { closest: () => null } });
-  assert.equal(panel.hidden, true);
+  assert.equal(panel.hidden, false);
   assert.equal(trigger.attributes.get("aria-expanded"), "false");
   assert.equal(trigger.focused, true);
+  panel.animations.at(-1).onfinish();
+  assert.equal(panel.hidden, true);
 });
 
 test("绑定会话双列且近期关闭保持单列", async () => {
+  const html = await readFile(new URL("../src/index.html", import.meta.url), "utf8");
   const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
 
+  assert.ok(html.indexOf("data-connection-panel") < html.indexOf("data-connection-summary-trigger"));
+  assert.match(html, /data-connection-summary-trigger[^>]*data-connection-grip/);
+  assert.doesNotMatch(html, /close-connections|c-connection-grip/);
   assert.match(css, /data-connection-group="bound"[^}]*c-connection-sessions[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s);
   assert.match(css, /data-connection-group="closed"[^}]*c-connection-sessions[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
   assert.match(css, /c-connection-session__connections\s*>\s*\.c-connection-chip[^}]*flex:\s*1 1 0/s);
+  assert.match(css, /\.c-connection-inspector\s*{[^}]*max-height:\s*calc\(100dvh[^}]*overflow-y:\s*auto[^}]*scrollbar-width:\s*none/s);
+  assert.match(css, /\.c-connection-inspector::\-webkit-scrollbar\s*{[^}]*display:\s*none/s);
+  assert.match(html, /c-connection-inspector__header[^>]*>[\s\S]*?<h2[^>]*><span class="c-connection-inspector__live">LIVE<\/span><span>WebSocket 连接<\/span><em>当前 <strong data-connection-total>0<\/strong> 条<\/em><\/h2>/);
+  assert.match(css, /\.c-connection-dock\[data-open="true"\] \.c-connection-summary,\s*\.c-connection-dock\[data-phase="dragging-open"\] \.c-connection-summary,\s*\.c-connection-dock\[data-phase="dragging-close"\] \.c-connection-summary\s*{[^}]*gap:\s*7px[^}]*min-height:\s*var\(--turbo-connection-summary-open-height\)[^}]*padding:\s*0 9px 6px/s);
+  assert.match(css, /\.c-connection-summary::after\s*{[^}]*width:\s*28px[^}]*height:\s*2px[^}]*opacity:\s*0[^}]*content:\s*""/s);
+  assert.match(css, /data-open="true"\] \.c-connection-summary:hover::after[^}]*background:\s*var\(--c-accent\)[^}]*opacity:\s*1/s);
+  assert.match(css, /\.c-connection-inspector\.is-closing,\s*\.c-connection-inspector\.is-drag-preview\s*{[^}]*position:\s*absolute[^}]*pointer-events:\s*none/s);
+  assert.match(source, /previousSummaryTop[\s\S]*nextSummaryTop[\s\S]*translate3d\(0, \$\{shift\}px, 0\)/);
+  assert.match(source, /dock\.dataset\.phase\s*=\s*connectionPanelOpen\s*\?\s*"opening"[\s\S]*?"closing"[\s\S]*?"closed"/);
+  assert.match(source, /Math\.hypot\(deltaX, deltaY\)\s*>\s*3[\s\S]*drag\.axis\s*=\s*Math\.abs\(deltaX\)\s*>\s*Math\.abs\(deltaY\)\s*\?\s*"x"\s*:\s*"y"/);
+  assert.match(source, /applyVerticalProgress\(\(drag\.startedOpen\s*\?\s*1\s*:\s*0\)\s*\+\s*deltaY\s*\/\s*drag\.panelHeight\)/);
+  assert.match(source, /distance\s*>\s*-CONNECTION_DRAG_THRESHOLD_PX[\s\S]*distance\s*>=\s*CONNECTION_DRAG_THRESHOLD_PX/);
+  assert.doesNotMatch(css, /\.c-connection-inspector\.is-overflowing/);
+  assert.doesNotMatch(source, /close-connections/);
 });
 
 test("连续连接快照保留稳定节点、焦点和展开状态", async () => {
@@ -874,22 +966,36 @@ test("本机回环上游显示 AI Cove 修复入口而不是通用重试", async
   assert.equal(retry.hidden, true);
 });
 
-test("页面切换按方向进入且连续切换会中断旧动画", async () => {
+test("页面切换按方向进入、实时页固定连接摘要不参与变换且保留面板状态", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const tabs = [element({ tab: "live" }), element({ tab: "statistics" }), element({ tab: "config" })];
+  const liveSurface = motionElement();
   const panels = [
     motionElement({ panel: "live" }),
     motionElement({ panel: "statistics" }, true),
     motionElement({ panel: "config" }, true),
   ];
+  panels[0].querySelector = (selector) => selector === ".c-console" ? liveSurface : null;
+  const connectionSummary = motionElement({ action: "toggle-connections", connectionSummaryTrigger: "" });
+  connectionSummary.closest = (selector) => selector === "[data-action]" ? connectionSummary : null;
+  const connectionTrigger = element({ action: "toggle-connections" });
+  const connectionPanel = motionElement({ connectionPanel: "" }, true);
+  const connectionDock = element({ connectionDock: "" });
+  const connectionSelectors = new Map([
+    ["[data-connection-summary-trigger]", connectionSummary],
+    ["[data-connection-panel]", connectionPanel],
+    ["[data-connection-dock]", connectionDock],
+  ]);
   let onClick;
   const document = {
     readyState: "complete",
     body: element(),
     addEventListener(type, handler) { if (type === "click") onClick = handler; },
+    querySelector(selector) { return connectionSelectors.get(selector) ?? null; },
     querySelectorAll(selector) {
       if (selector === "[data-tab]") return tabs;
       if (selector === "[data-panel]") return panels;
+      if (selector === '[data-action="toggle-connections"]') return [connectionSummary, connectionTrigger];
       return [];
     },
   };
@@ -905,8 +1011,16 @@ test("页面切换按方向进入且连续切换会中断旧动画", async () =>
   });
 
   await runApp(source, { document, window, URL, Intl });
+  onClick({ target: connectionSummary });
+  assert.equal(connectionSummary.attributes.get("aria-expanded"), "true");
+  assert.equal(connectionTrigger.attributes.get("aria-expanded"), "true");
+
   clickTab(tabs[1]);
+  assert.equal(connectionSummary.attributes.get("aria-expanded"), "true");
+  assert.equal(connectionTrigger.attributes.get("aria-expanded"), "true");
   clickTab(tabs[2]);
+  assert.equal(connectionSummary.attributes.get("aria-expanded"), "true");
+  assert.equal(connectionTrigger.attributes.get("aria-expanded"), "true");
   clickTab(tabs[1]);
 
   assert.equal(panels[0].hidden, true);
@@ -917,6 +1031,13 @@ test("页面切换按方向进入且连续切换会中断旧动画", async () =>
   assert.equal(panels[1].animations[0].cancelled, true);
   assert.equal(panels[1].animations[1].keyframes[0].transform, "translate3d(-10px, 0, 0)");
   assert.equal(panels[1].animations[1].keyframes[0].filter, "blur(3px)");
+
+  clickTab(tabs[0]);
+  assert.equal(connectionSummary.attributes.get("aria-expanded"), "true");
+  assert.equal(connectionTrigger.attributes.get("aria-expanded"), "true");
+  assert.equal(panels[0].animations.length, 0);
+  assert.equal(liveSurface.animations.length, 1);
+  assert.equal(liveSurface.animations[0].keyframes[0].transform, "translate3d(-10px, 0, 0)");
 });
 
 test("减少动态效果时页面切换不播放动画", async () => {
@@ -1087,6 +1208,19 @@ test("上滚后继续追加请求并提供回到最新操作", async () => {
   assert.equal(live.terminal.scrollTop, live.terminal.scrollHeight);
   assert.equal(live.follow.hidden, true);
   assert.equal(live.followLabel.textContent, "回到最新");
+});
+
+test("仅真实发布排空的空闲 1012 显示发布重建", async () => {
+  const live = await liveTailHarness();
+  live.setRequests([
+    { id: 2, timestampMs: 2_000, status: 1012, path: "/v1/responses", rawBytes: 0, sentBytes: 0, transport: "WS", result: "error", route: "hybridWs", failurePhase: "hybridIdle", failureReason: "service restarting" },
+    { id: 3, timestampMs: 3_000, status: 1012, path: "/v1/responses", rawBytes: 0, sentBytes: 0, transport: "WS", result: "error", route: "hybridWs", failurePhase: "hybridIdle", failureReason: "upstream requires HTTP replay" },
+  ]);
+
+  await live.tick();
+
+  assert.equal(live.requestStream.innerHTML.match(/Hybrid WS · 发布重建/gu)?.length, 1);
+  assert.equal(live.requestStream.innerHTML.match(/Hybrid WS · 连接恢复/gu)?.length, 1);
 });
 
 test("手动滚到底部或清空终端会恢复跟随", async () => {

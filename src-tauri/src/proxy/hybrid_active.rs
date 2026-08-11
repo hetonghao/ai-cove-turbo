@@ -1,160 +1,13 @@
 use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message, error::ProtocolError};
 
-use super::common::{close_client, event_type, reject_thread_switch, send_error};
+use super::super::hybrid_pool::LeaseRetirement;
+use super::common::close_client;
 use super::sse::{
-    http_request_payload, idle_event_diagnostic, is_success_terminal_event,
+    idle_event_diagnostic, is_internal_idle_request_error, is_success_terminal_event,
     success_terminal_response_id,
 };
-use super::{Active, ActiveKind, ClientWebSocket, Session, WorkerCommand, WorkerEvent};
-
-pub(super) async fn handle_active_client_message(
-    client: &mut ClientWebSocket,
-    session: &mut Session,
-    active: &Active,
-    message: Option<Result<Message, WebSocketError>>,
-) -> bool {
-    let Some(Ok(message)) = message else {
-        return false;
-    };
-    match message {
-        Message::Ping(payload) => client.send(Message::Pong(payload)).await.is_ok(),
-        Message::Pong(_) => true,
-        Message::Close(_) => false,
-        Message::Frame(_) => {
-            let _ = close_client(client, 1002, "raw websocket frame is invalid").await;
-            false
-        }
-        Message::Text(text) => {
-            forward_active_message(client, session, active, text.as_bytes().to_vec(), false).await
-        }
-        Message::Binary(payload) => {
-            forward_active_message(client, session, active, payload.to_vec(), true).await
-        }
-    }
-}
-
-async fn forward_active_message(
-    client: &mut ClientWebSocket,
-    session: &mut Session,
-    active: &Active,
-    payload: Vec<u8>,
-    original_binary: bool,
-) -> bool {
-    let Ok(event_type) = event_type(&payload) else {
-        let _ = send_error(
-            client,
-            "invalid_request",
-            "WebSocket event must be valid JSON",
-        )
-        .await;
-        return true;
-    };
-    if event_type == "response.create" {
-        if let Ok(prepared) = http_request_payload(&payload) {
-            if !session.bind_thread_id(prepared.thread_id).await {
-                return reject_thread_switch(client).await;
-            }
-        }
-        return send_error(
-            client,
-            "invalid_request",
-            "上一条 response.create 尚未结束，不支持并发创建",
-        )
-        .await;
-    }
-    let command = if event_type == "response.cancel" {
-        WorkerCommand::Cancel(payload)
-    } else if active.kind == ActiveKind::WebSocket {
-        WorkerCommand::Forward(payload, original_binary)
-    } else {
-        let _ = send_error(
-            client,
-            "invalid_request",
-            "HTTP response only accepts response.cancel while active",
-        )
-        .await;
-        return true;
-    };
-    if active.kind == ActiveKind::WebSocket {
-        session
-            .observe_activity(super::ConnectionActivity::Up)
-            .await;
-    }
-    active.commands.send(command).await.is_ok()
-}
-
-pub(super) async fn handle_worker_event(
-    client: &mut ClientWebSocket,
-    session: &mut Session,
-    active: &mut Option<Active>,
-    event: Option<WorkerEvent>,
-) -> bool {
-    let Some(event) = event else {
-        let _ = send_error(
-            client,
-            "server_error",
-            "response worker stopped unexpectedly",
-        )
-        .await;
-        let _ = close_client(client, 1011, "response worker stopped unexpectedly").await;
-        return false;
-    };
-    match event {
-        WorkerEvent::Message(message) => {
-            session
-                .observe_activity(super::ConnectionActivity::Down)
-                .await;
-            client.send(message).await.is_ok()
-        }
-        WorkerEvent::Terminal {
-            upstream,
-            response_id,
-        } => {
-            let Some(finished) = active.take() else {
-                return false;
-            };
-            if finished.kind == ActiveKind::WebSocket {
-                if response_id.is_some() {
-                    session.last_terminal_response_id = response_id;
-                }
-                session.ready = upstream.map(|upstream| *upstream);
-                if session.ready.is_some() {
-                    session.observe_idle().await;
-                } else {
-                    session.observe_recovering("响应结束后没有可复用连接").await;
-                }
-            }
-            true
-        }
-        WorkerEvent::Cancelled => {
-            active.take();
-            let message = serde_json::json!({
-                "type": "response.cancelled",
-                "response": {"status": "cancelled"},
-            });
-            client
-                .send(Message::Text(message.to_string().into()))
-                .await
-                .is_ok()
-        }
-        WorkerEvent::Error { code, message } => {
-            let failed_websocket = active
-                .take()
-                .is_some_and(|item| item.kind == ActiveKind::WebSocket);
-            if failed_websocket {
-                session.observe_recovering(message).await;
-                session.state.hybrid_pool.discard(&session.pool_scope).await;
-            }
-            if failed_websocket && code == 1011 {
-                return send_error(client, "server_error", message).await;
-            }
-            let _ = send_error(client, "server_error", message).await;
-            let _ = close_client(client, code, message).await;
-            false
-        }
-    }
-}
+use super::{ClientWebSocket, Session};
 
 pub(super) async fn handle_idle_upstream(
     client: &mut ClientWebSocket,
@@ -179,17 +32,20 @@ pub(super) async fn handle_idle_upstream(
                 .as_ref()
                 .map_or("upstream closed", |frame| frame.reason.as_ref());
             session.ready.take();
-            session
-                .observe_recovering(format!("上游关闭 · {code} · {reason}"))
-                .await;
             session.state.metrics.record_websocket_diagnostic(
                 &session.path,
                 code,
                 crate::proxy::traffic::FailurePhase::HybridIdle,
                 reason,
             );
+            let retirement = LeaseRetirement::Recovering {
+                reason: format!("上游关闭 · {code} · {reason}"),
+            };
             session.state.metrics.record_websocket_closed();
-            session.state.hybrid_pool.discard(&session.pool_scope).await;
+            session.discard(retirement).await;
+            if code == 1012 {
+                session.drain_reconnect_pending = true;
+            }
             if matches!(code, 1011 | 1012) {
                 return true;
             }
@@ -214,6 +70,11 @@ pub(super) async fn handle_idle_upstream(
                 && response_id.as_ref() == session.last_terminal_response_id.as_ref();
             if reusable {
                 true
+            } else if is_internal_idle_request_error(&decoded.payload) {
+                session
+                    .retire_idle_upstream(LeaseRetirement::Replacing)
+                    .await;
+                true
             } else {
                 let reason = idle_event_diagnostic(
                     &decoded.payload,
@@ -235,7 +96,6 @@ async fn resolve_idle_upstream_message(
 ) -> Result<Message, bool> {
     let Some(message) = message else {
         session.ready.take();
-        session.observe_recovering("上游连接已结束").await;
         session.state.metrics.record_websocket_diagnostic(
             &session.path,
             1011,
@@ -243,7 +103,11 @@ async fn resolve_idle_upstream_message(
             "upstream stream ended",
         );
         session.state.metrics.record_websocket_closed();
-        session.state.hybrid_pool.discard(&session.pool_scope).await;
+        session
+            .discard(LeaseRetirement::Recovering {
+                reason: "上游连接已结束".to_owned(),
+            })
+            .await;
         return Err(true);
     };
     let Err(error) = message else {
@@ -251,7 +115,6 @@ async fn resolve_idle_upstream_message(
     };
     session.ready.take();
     let reason = error.to_string();
-    session.observe_recovering(reason.clone()).await;
     let code = super::private_websocket::websocket_error_code(&error);
     session.state.metrics.record_websocket_diagnostic(
         &session.path,
@@ -267,7 +130,11 @@ async fn resolve_idle_upstream_message(
             | WebSocketError::Tls(_)
             | WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
     );
-    session.state.hybrid_pool.discard(&session.pool_scope).await;
+    session
+        .discard(LeaseRetirement::Recovering {
+            reason: reason.clone(),
+        })
+        .await;
     if recoverable {
         return Err(true);
     }
@@ -276,16 +143,17 @@ async fn resolve_idle_upstream_message(
 }
 
 async fn recover_unexpected_idle_message(session: &mut Session, reason: &str) -> bool {
-    session.ready.take();
-    session.observe_recovering(reason).await;
     session.state.metrics.record_websocket_diagnostic(
         &session.path,
         1002,
         crate::proxy::traffic::FailurePhase::HybridIdle,
         reason,
     );
-    session.state.metrics.record_websocket_closed();
-    session.state.hybrid_pool.discard(&session.pool_scope).await;
+    session
+        .retire_idle_upstream(LeaseRetirement::Recovering {
+            reason: reason.to_owned(),
+        })
+        .await;
     true
 }
 
@@ -307,7 +175,10 @@ pub(super) async fn handle_idle_keepalive(session: &mut Session) -> bool {
         "private websocket keepalive failed",
     );
     session.state.metrics.record_websocket_closed();
-    session.observe_recovering("WebSocket 健康检查未通过").await;
-    session.state.hybrid_pool.discard(&session.pool_scope).await;
+    session
+        .discard(LeaseRetirement::Recovering {
+            reason: "WebSocket 健康检查未通过".to_owned(),
+        })
+        .await;
     true
 }

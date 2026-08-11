@@ -1,30 +1,34 @@
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message;
+use tokio::{
+    sync::mpsc,
+    time::{Instant, Sleep},
+};
+use tokio_tungstenite::tungstenite::{Bytes, Message};
 
 use super::{
-    Active, ActiveKind, PrivateWebSocket, WorkerCommand, WorkerEvent,
-    common::text_message,
+    Active, ActiveKind, PrivateWebSocket, WebSocketSendReceipt, WorkerCommand, WorkerEvent,
+    common::{event_type, text_message},
     private_websocket,
     sse::{is_terminal_event, success_terminal_response_id},
 };
 use crate::proxy::Metrics;
+
+const ACTIVE_KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const ACTIVE_KEEPALIVE_PAYLOAD: &[u8] = b"turbo-hybrid-active";
 
 pub(super) fn start_websocket_worker(
     upstream: PrivateWebSocket,
     payload: Vec<u8>,
     original_binary: bool,
     metrics: Arc<Metrics>,
-    path: String,
     previous_response_id: Option<String>,
 ) -> Active {
     let (command_tx, command_rx) = mpsc::channel(8);
     let (event_tx, event_rx) = mpsc::channel(8);
     let context = WorkerContext {
         metrics,
-        path,
         previous_response_id,
     };
     let task = tokio::spawn(run_websocket_worker(
@@ -45,8 +49,18 @@ pub(super) fn start_websocket_worker(
 
 struct WorkerContext {
     metrics: Arc<Metrics>,
-    path: String,
     previous_response_id: Option<String>,
+}
+
+enum BinaryOutcome {
+    Continue,
+    FailedTerminal {
+        response: Message,
+        code: u16,
+        reason: String,
+    },
+    Stop,
+    Terminal(Option<String>),
 }
 
 async fn run_websocket_worker(
@@ -57,19 +71,22 @@ async fn run_websocket_worker(
     mut commands: mpsc::Receiver<WorkerCommand>,
     events: mpsc::Sender<WorkerEvent>,
 ) {
-    if send_private_application(
-        &mut upstream,
-        payload,
-        original_binary,
-        &context.metrics,
-        &context.path,
-    )
-    .await
-    .is_err()
-    {
+    let Ok(receipt) = send_private_application(&mut upstream, payload, original_binary).await
+    else {
         send_worker_error(&events, &context, 1011, "private websocket send failed").await;
         return;
+    };
+    if events
+        .send(WorkerEvent::WebSocketSent(receipt))
+        .await
+        .is_err()
+    {
+        context.metrics.record_websocket_closed();
+        return;
     }
+    let keepalive = tokio::time::sleep(ACTIVE_KEEPALIVE_IDLE);
+    tokio::pin!(keepalive);
+    let mut awaiting_pong = false;
 
     loop {
         tokio::select! {
@@ -83,30 +100,25 @@ async fn run_websocket_worker(
                     send_worker_error(&events, &context, 1011, "private websocket failed while active").await;
                     return;
                 };
+                awaiting_pong = false;
+                reset_keepalive(keepalive.as_mut(), ACTIVE_KEEPALIVE_IDLE);
                 match message {
-                    Message::Binary(envelope) => {
-                        let Ok(decoded) = private_websocket::decode_private_message_async(envelope).await else {
-                            send_worker_error(&events, &context, 1007, "private websocket response is invalid").await;
-                            return;
-                        };
-                        let terminal = is_terminal_event(&decoded.payload);
-                        let response_id = terminal
-                            .then(|| success_terminal_response_id(&decoded.payload))
-                            .flatten();
-                        if response_id.is_some()
-                            && response_id.as_ref() == context.previous_response_id.as_ref()
-                        {
-                            continue;
-                        }
-                        let Ok(message) = decoded_message(decoded) else {
-                            send_worker_error(&events, &context, 1007, "private websocket response is not UTF-8").await;
-                            return;
-                        };
-                        if events.send(WorkerEvent::Message(message)).await.is_err() {
+                    Message::Binary(envelope) => match handle_binary_response(envelope, &events, &context).await {
+                        BinaryOutcome::Continue => {}
+                        BinaryOutcome::FailedTerminal { response, code, reason } => {
                             context.metrics.record_websocket_closed();
+                            drop(upstream);
+                            let _ = events
+                                .send(WorkerEvent::FailedTerminal {
+                                    response,
+                                    code,
+                                    reason,
+                                })
+                                .await;
                             return;
                         }
-                        if terminal {
+                        BinaryOutcome::Stop => return,
+                        BinaryOutcome::Terminal(response_id) => {
                             let _ = events
                                 .send(WorkerEvent::Terminal {
                                     upstream: Some(Box::new(upstream)),
@@ -115,7 +127,7 @@ async fn run_websocket_worker(
                                 .await;
                             return;
                         }
-                    }
+                    },
                     Message::Ping(payload) => {
                         if upstream.send(Message::Pong(payload)).await.is_err() {
                             send_worker_error(&events, &context, 1011, "private websocket control frame failed").await;
@@ -134,17 +146,111 @@ async fn run_websocket_worker(
                 }
             }
             command = commands.recv() => {
-                if !handle_worker_command(
-                    &mut upstream,
-                    command,
-                    &context,
-                    &events,
-                ).await {
+                if !handle_worker_command(&mut upstream, command, &context, &events).await {
                     return;
                 }
+                awaiting_pong = false;
+                reset_keepalive(keepalive.as_mut(), ACTIVE_KEEPALIVE_IDLE);
+            }
+            () = &mut keepalive => {
+                if awaiting_pong {
+                    send_worker_error(&events, &context, 1011, "private websocket keepalive timed out").await;
+                    return;
+                }
+                let payload = Bytes::from_static(ACTIVE_KEEPALIVE_PAYLOAD);
+                if upstream.send(Message::Ping(payload)).await.is_err() {
+                    send_worker_error(&events, &context, 1011, "private websocket keepalive failed").await;
+                    return;
+                }
+                awaiting_pong = true;
+                reset_keepalive(
+                    keepalive.as_mut(),
+                    super::super::hybrid_pool::PONG_TIMEOUT,
+                );
             }
         }
     }
+}
+
+async fn handle_binary_response(
+    envelope: Bytes,
+    events: &mpsc::Sender<WorkerEvent>,
+    context: &WorkerContext,
+) -> BinaryOutcome {
+    let Ok(decoded) = private_websocket::decode_private_message_async(envelope).await else {
+        send_worker_error(
+            events,
+            context,
+            1007,
+            "private websocket response is invalid",
+        )
+        .await;
+        return BinaryOutcome::Stop;
+    };
+    let terminal = is_terminal_event(&decoded.payload);
+    let failed_terminal =
+        event_type(&decoded.payload).is_ok_and(|event_type| event_type == "error");
+    let failed_diagnostic = failed_terminal.then(|| failed_terminal_diagnostic(&decoded.payload));
+    let response_id = terminal
+        .then(|| success_terminal_response_id(&decoded.payload))
+        .flatten();
+    if response_id.is_some() && response_id.as_ref() == context.previous_response_id.as_ref() {
+        return BinaryOutcome::Continue;
+    }
+    let Ok(message) = decoded_message(decoded) else {
+        send_worker_error(
+            events,
+            context,
+            1007,
+            "private websocket response is not UTF-8",
+        )
+        .await;
+        return BinaryOutcome::Stop;
+    };
+    if let Some((code, reason)) = failed_diagnostic {
+        return BinaryOutcome::FailedTerminal {
+            response: message,
+            code,
+            reason,
+        };
+    }
+    if events.send(WorkerEvent::Message(message)).await.is_err() {
+        context.metrics.record_websocket_closed();
+        return BinaryOutcome::Stop;
+    }
+    if terminal {
+        return BinaryOutcome::Terminal(response_id);
+    }
+    BinaryOutcome::Continue
+}
+
+fn reset_keepalive(keepalive: Pin<&mut Sleep>, after: Duration) {
+    keepalive.reset(Instant::now() + after);
+}
+
+fn failed_terminal_diagnostic(payload: &[u8]) -> (u16, String) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        return (1011, "upstream returned a failed terminal event".to_owned());
+    };
+    let status = value
+        .get("status")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
+        .filter(|status| *status >= 400)
+        .unwrap_or(1011);
+    let code = value
+        .pointer("/error/code")
+        .and_then(serde_json::Value::as_str);
+    let message = value
+        .pointer("/error/message")
+        .and_then(serde_json::Value::as_str);
+    let reason = match (code, message) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(code), None) => code.to_owned(),
+        (None, Some(message)) => message.to_owned(),
+        (None, None) => "upstream returned a failed terminal event".to_owned(),
+    };
+    (status, reason)
 }
 
 async fn handle_worker_command(
@@ -164,15 +270,9 @@ async fn handle_worker_command(
             (payload, original_binary, "private websocket send failed")
         }
     };
-    if send_private_application(
-        upstream,
-        payload,
-        original_binary,
-        &context.metrics,
-        &context.path,
-    )
-    .await
-    .is_err()
+    if send_private_application(upstream, payload, original_binary)
+        .await
+        .is_err()
     {
         send_worker_error(events, context, 1011, message).await;
         return false;
@@ -186,12 +286,6 @@ async fn send_worker_error(
     code: u16,
     message: &'static str,
 ) {
-    context.metrics.record_websocket_diagnostic(
-        &context.path,
-        code,
-        crate::proxy::traffic::FailurePhase::HybridActive,
-        message,
-    );
     context.metrics.record_websocket_closed();
     let _ = events.send(WorkerEvent::Error { code, message }).await;
 }
@@ -200,26 +294,22 @@ async fn send_private_application(
     upstream: &mut PrivateWebSocket,
     payload: Vec<u8>,
     original_binary: bool,
-    metrics: &Metrics,
-    path: &str,
-) -> Result<(), ()> {
-    let raw_len = payload.len();
+) -> Result<WebSocketSendReceipt, ()> {
+    let raw_bytes = u64::try_from(payload.len()).map_err(|_| ())?;
     let encoded = private_websocket::encode_private_message_async(payload, original_binary)
         .await
         .map_err(|_| ())?;
-    let sent_len = encoded.bytes.len();
+    let sent_bytes = u64::try_from(encoded.bytes.len()).map_err(|_| ())?;
+    let compressed = encoded.compressed;
     upstream
         .send(Message::Binary(encoded.bytes.into()))
         .await
         .map_err(|_| ())?;
-    metrics.record_websocket_zstd_message(
-        path,
-        raw_len,
-        sent_len,
-        encoded.compressed,
-        Some(crate::proxy::traffic::TrafficRoute::HybridWs),
-    );
-    Ok(())
+    Ok(WebSocketSendReceipt {
+        raw_bytes,
+        sent_bytes,
+        compressed,
+    })
 }
 
 fn decoded_message(decoded: private_websocket::DecodedPrivateMessage) -> Result<Message, ()> {

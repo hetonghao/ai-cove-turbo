@@ -4,9 +4,9 @@ use crate::proxy::{ConnectionSnapshot, ProxyHandle, hybrid_pool::ConnectionActiv
 
 use super::*;
 
-const OBSERVED_THREAD_ID: &str = "observed-thread";
+pub(super) const OBSERVED_THREAD_ID: &str = "observed-thread";
 
-async fn send_observed_create(client: &mut ClientWebSocket) -> io::Result<()> {
+pub(super) async fn send_observed_create(client: &mut ClientWebSocket) -> io::Result<()> {
     let turn_metadata = serde_json::json!({
         "session_id": "observability-session",
         "thread_id": OBSERVED_THREAD_ID,
@@ -58,14 +58,16 @@ async fn real_hybrid_session_reports_active_idle_and_closed_lifecycle() -> io::R
         delay_http: false,
     })
     .await?;
-    let (proxy, _) = start_test_proxy(&server).await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(7).await?;
+    server.fixture.wait_ready(6).await?;
 
     // When: Codex 以规范线程 ID 发起请求，上游暂缓响应。
     send_observed_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
+    server.fixture.wait_ready(7).await?;
+    assert_eq!(metrics.snapshot().hybrid_ws, 0);
 
     // Then: 产品快照显示该线程正在上行传输。
     let active = wait_for_snapshot(&proxy, "active upload", |snapshot| {
@@ -79,6 +81,15 @@ async fn real_hybrid_session_reports_active_idle_and_closed_lifecycle() -> io::R
     // When: 上游完成响应。
     server.fixture.release_private();
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_eq!(metrics.snapshot().hybrid_ws, 1);
+    let outcomes = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
+        .map_err(io::Error::other)?;
+    assert!(outcomes.as_array().is_some_and(|outcomes| {
+        outcomes.len() == 1
+            && outcomes
+                .first()
+                .is_some_and(|outcome| outcome.get("result") == Some(&Value::from("success")))
+    }));
 
     // Then: 同一线程保留为空闲绑定连接。
     let idle = wait_for_snapshot(&proxy, "idle binding", |snapshot| {
@@ -110,7 +121,183 @@ async fn real_hybrid_session_reports_active_idle_and_closed_lifecycle() -> io::R
 }
 
 #[tokio::test]
-async fn real_hybrid_idle_restart_reports_recovery_transition() -> io::Result<()> {
+async fn http_completion_does_not_report_websocket_receive_activity() -> io::Result<()> {
+    // Given: 私有连接尚未就绪，首轮请求只能走 HTTP。
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Delay,
+        delay_http: true,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+
+    // When: HTTP 响应完整返回，但私有 WebSocket 仍未建立。
+    send_observed_create(&mut client).await?;
+    server.fixture.wait_private(1).await?;
+    server.fixture.wait_http(1).await?;
+    server.fixture.release_http();
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+
+    // Then: 快照不得把 HTTP 下行伪报为线程专属 WebSocket 正在接收。
+    let snapshot = proxy.connection_snapshot().await;
+    assert!(
+        snapshot
+            .bound_threads
+            .iter()
+            .all(|item| item.thread_id != OBSERVED_THREAD_ID)
+    );
+
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn delayed_prewarm_binds_idle_session_before_next_request() -> io::Result<()> {
+    // Given: 首轮 HTTP 已完成，线程仍保持本地 WebSocket，但池连接尚未就绪。
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Delay,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    send_observed_create(&mut client).await?;
+    server.fixture.wait_private(1).await?;
+    server.fixture.wait_http(1).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+
+    // When: 池中第一条私有连接随后建立，客户端没有发送第二个请求。
+    server.fixture.release_private();
+    server.fixture.wait_ready(1).await?;
+
+    // Then: 空闲 Session 自动独占该连接，并保持请求不重放。
+    let rebound = wait_for_snapshot(&proxy, "idle binding without another request", |snapshot| {
+        snapshot.bound_threads.iter().any(|item| {
+            item.thread_id == OBSERVED_THREAD_ID && item.activity == ConnectionActivity::Idle
+        })
+    })
+    .await?;
+    assert_eq!(rebound.bound_threads.len(), 1);
+    let counts = server.fixture.counts().await;
+    assert_eq!(counts.private_messages, 0);
+    assert_eq!(counts.http_requests, 1);
+
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn snapshot_keeps_six_blank_connections_while_binding_waits() -> io::Result<()> {
+    // Given: 一个线程正走 HTTP，六条空白预热连接已建立但尚不能交给活跃请求。
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Delay,
+        delay_http: true,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    send_observed_create(&mut client).await?;
+    server.fixture.wait_private(6).await?;
+    server.fixture.wait_http(1).await?;
+    for _ in 0..6 {
+        server.fixture.release_private();
+    }
+    server.fixture.wait_ready(6).await?;
+
+    // When: 连接检查器读取池状态已经收敛的当前快照。
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    let snapshot = proxy.connection_snapshot().await;
+    tokio::time::resume();
+
+    // Then: 尚无 checkout lease，池中只保留六条真实空白预热。
+    assert_eq!(snapshot.current_connections, 6);
+    assert_eq!(snapshot.prewarm, 6);
+    assert!(snapshot.bound_threads.is_empty());
+    let waiting = snapshot
+        .transitions
+        .iter()
+        .find(|item| item.id.starts_with("POOL-BIND-G"))
+        .ok_or_else(|| io::Error::other("scope-specific POOL-BIND transition missing"))?;
+    assert_eq!(waiting.elapsed_seconds, 3);
+    assert!(waiting.detail.contains("连接组 G"));
+    assert!(waiting.detail.contains("空白预热 6"));
+    assert!(waiting.detail.contains("建立中 0"));
+
+    server.fixture.release_http();
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    server.fixture.wait_private(7).await?;
+    server.fixture.release_private();
+    server.fixture.wait_ready(7).await?;
+
+    // Then: HTTP 完成后，等待绑定自动收敛为一条空闲绑定与六条真实预热。
+    let rebound = wait_for_snapshot(&proxy, "HTTP completion binding convergence", |snapshot| {
+        snapshot.current_connections == 7
+            && snapshot.prewarm == 6
+            && snapshot.bound_threads.iter().any(|item| {
+                item.thread_id == OBSERVED_THREAD_ID && item.activity == ConnectionActivity::Idle
+            })
+    })
+    .await?;
+    assert_eq!(rebound.current_connections, 7);
+    assert_eq!(rebound.prewarm, 6);
+    assert_eq!(rebound.bound_threads.len(), 1);
+
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_prewarm_reports_sanitized_handshake_reason() -> io::Result<()> {
+    // Given: 一个独立连接组的首批私有 WebSocket 握手收到 HTTP 503，随后恢复。
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::FailFirstBatch,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    let (client, status) =
+        connect_local_with_authorization(&proxy, Some("Bearer diagnostic-secret")).await?;
+    assert_eq!(status, 101);
+    server.fixture.wait_private(12).await?;
+    server.fixture.wait_ready(6).await?;
+
+    // When: 连接检查器读取仍在等待的连接组。
+    let snapshot = wait_for_snapshot(&proxy, "classified handshake failure", |snapshot| {
+        snapshot.transitions.iter().any(|item| {
+            item.id.starts_with("POOL-BIND-G") && item.detail.contains("最近握手失败：HTTP 503")
+        })
+    })
+    .await?;
+
+    // Then: 详情足以定位失败类别，但不包含连接身份凭据。
+    let waiting = snapshot
+        .transitions
+        .iter()
+        .find(|item| item.id.starts_with("POOL-BIND-G"))
+        .ok_or_else(|| io::Error::other("scope-specific POOL-BIND transition missing"))?;
+    assert!(waiting.detail.contains("连接组 G"));
+    assert!(waiting.detail.contains("最近握手失败：HTTP 503"));
+    assert!(waiting.detail.contains("累计 6 次"));
+    assert!(!waiting.detail.contains("diagnostic-secret"));
+
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn real_hybrid_idle_restart_rebinds_and_records_closed_connection() -> io::Result<()> {
     // Given: 上游会在首个响应完成后以 1012 重启空闲连接。
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::IdleRestart,
@@ -120,28 +307,34 @@ async fn real_hybrid_idle_restart_reports_recovery_transition() -> io::Result<()
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(7).await?;
+    server.fixture.wait_ready(6).await?;
 
     // When: 绑定线程完成一次真实 WebSocket 请求，随后收到上游重启帧。
     send_observed_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
+    server.fixture.wait_ready(7).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    server.fixture.wait_restarts(1).await?;
+    server.fixture.wait_close_frames(1).await?;
 
-    // Then: 产品快照显示该线程正在恢复，并保留异常关闭原因。
-    let recovering = wait_for_snapshot(&proxy, "idle restart recovery", |snapshot| {
-        snapshot
-            .transitions
-            .iter()
-            .any(|item| item.label == "恢复绑定连接")
-            && snapshot.recent_closed.iter().any(|item| {
-                item.thread_id.as_deref() == Some(OBSERVED_THREAD_ID)
-                    && item.reason.contains("上游关闭 · 1012")
-                    && !item.normal
-            })
+    // Then: 产品快照保留异常关闭原因，并把同一 Session 自动恢复为空闲绑定。
+    let rebound = wait_for_snapshot(&proxy, "idle restart rebound", |snapshot| {
+        snapshot.bound_threads.iter().any(|item| {
+            item.thread_id == OBSERVED_THREAD_ID && item.activity == ConnectionActivity::Idle
+        }) && snapshot.recent_closed.iter().any(|item| {
+            item.thread_id.as_deref() == Some(OBSERVED_THREAD_ID)
+                && item.reason.contains("上游关闭 · 1012")
+                && !item.normal
+        })
     })
     .await?;
-    assert!(recovering.bound_threads.is_empty());
+    assert_eq!(rebound.bound_threads.len(), 1);
+    let bound_id = rebound
+        .bound_threads
+        .first()
+        .ok_or_else(|| io::Error::other("rebound connection missing"))?
+        .id
+        .as_str();
+    assert!(rebound.transitions.iter().all(|item| item.id != bound_id));
 
     client.close(None).await.map_err(io::Error::other)?;
     proxy.stop().await;

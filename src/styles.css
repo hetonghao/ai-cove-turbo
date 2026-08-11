@@ -60,6 +60,8 @@
   --turbo-strands-live-height: 64px;
   --turbo-connection-dock-width: 456px;
   --turbo-connection-summary-height: 32px;
+  --turbo-connection-summary-open-height: 28px;
+  --turbo-connection-viewport-gap: 12px;
   --turbo-strands-orange: #f97316;
   --turbo-strands-violet: #7c3aed;
   --turbo-strands-cyan: #06b6d4;
@@ -723,6 +725,57 @@ h2 {
   transition: none;
 }
 
+.c-connection-dock[data-open="true"] .c-connection-summary,
+.c-connection-dock[data-phase="dragging-open"] .c-connection-summary,
+.c-connection-dock[data-phase="dragging-close"] .c-connection-summary {
+  gap: 7px;
+  min-height: var(--turbo-connection-summary-open-height);
+  margin-top: -1px;
+  padding: 0 9px 6px;
+}
+
+.c-connection-summary::after {
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  width: 28px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0;
+  transform: translateX(-50%);
+  transition: opacity var(--speed-fast) var(--ease-out), background-color var(--speed-fast) var(--ease-out), box-shadow var(--speed-fast) var(--ease-out);
+  content: "";
+}
+
+.c-connection-dock[data-open="true"] .c-connection-summary::after {
+  opacity: 0.42;
+}
+
+.c-connection-dock[data-phase="dragging-open"] .c-connection-summary::after,
+.c-connection-dock[data-phase="dragging-close"] .c-connection-summary::after {
+  background: var(--c-accent);
+  box-shadow: 0 0 8px var(--turbo-accent-line);
+  opacity: 1;
+}
+
+.c-connection-dock[data-open="true"] .c-connection-summary:hover::after,
+.c-connection-dock[data-open="true"] .c-connection-summary:focus-visible::after {
+  background: var(--c-accent);
+  box-shadow: 0 0 8px var(--turbo-accent-line);
+  opacity: 1;
+}
+
+.c-connection-dock[data-open="true"] .c-connection-summary__item {
+  gap: 3px;
+  min-width: 21px;
+  transform: translateY(-1px);
+}
+
+.c-connection-dock.is-dragging .c-connection-summary {
+  cursor: grabbing;
+}
+
 .c-connection-summary {
   position: relative;
   z-index: 2;
@@ -739,6 +792,8 @@ h2 {
   background: rgba(13, 19, 16, 0.96);
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
   backdrop-filter: blur(14px);
+  cursor: grab;
+  touch-action: none;
 }
 
 .c-connection-summary:hover,
@@ -798,22 +853,34 @@ h2 {
 .c-connection-inspector {
   position: relative;
   width: 100%;
-  max-height: min(560px, 62dvh, calc(100dvh - var(--turbo-shell-height) - var(--turbo-connection-summary-height) - 28px));
-  margin-top: 6px;
-  overflow: visible;
+  max-height: calc(100dvh - var(--turbo-shell-height) - var(--turbo-connection-summary-open-height) - var(--turbo-connection-viewport-gap));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
   border: 1px solid rgba(214, 236, 221, 0.2);
-  border-radius: 14px;
+  border-top: 0;
+  border-radius: 0 0 14px 14px;
   color: var(--c-ink);
   background: rgba(13, 19, 16, 0.97);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48);
 }
 
-.c-connection-inspector.is-overflowing {
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-color: rgba(112, 216, 238, 0.3) transparent;
-  scrollbar-width: thin;
+.c-connection-inspector.is-closing,
+.c-connection-inspector.is-drag-preview {
+  position: absolute;
+  z-index: 1;
+  inset: 0 0 auto;
+  pointer-events: none;
+}
+
+.c-connection-dock.is-dragging .c-connection-summary,
+.c-connection-inspector.is-drag-preview {
+  will-change: transform, clip-path, opacity, filter;
+}
+
+.c-connection-inspector::-webkit-scrollbar {
+  display: none;
 }
 
 .c-connection-inspector__header {
@@ -822,9 +889,8 @@ h2 {
   top: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 16px 12px;
+  gap: 10px;
+  padding: 12px 16px 11px;
   border-bottom: 1px solid var(--c-line);
   background: rgba(13, 19, 16, 0.96);
   backdrop-filter: blur(14px);
@@ -832,47 +898,34 @@ h2 {
 
 .c-connection-inspector__header h2 {
   display: flex;
-  align-items: baseline;
-  gap: 7px;
-  margin: 3px 0 0;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
   font-size: 0.9375rem;
   letter-spacing: -0.02em;
 }
 
 .c-connection-inspector__header h2 em {
-  color: var(--c-accent);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--c-line);
+  color: var(--c-muted);
   font: 0.6875rem/1 var(--font-mono);
   font-style: normal;
   font-variant-numeric: tabular-nums;
 }
 
-.c-connection-inspector__header button {
-  flex: 0 0 auto;
-  width: 29px;
-  height: 29px;
-  border: 1px solid var(--c-line);
-  border-radius: 8px;
-  color: var(--c-muted);
-  background: var(--c-panel-2);
+.c-connection-inspector__header h2 strong {
+  color: var(--c-accent);
+  font-size: 0.75rem;
 }
 
-.c-connection-inspector__header button:hover {
-  border-color: rgba(214, 236, 221, 0.2);
-  color: var(--c-ink);
-}
-
-.c-connection-inspector__header button svg {
-  display: block;
-  width: 14px;
-  height: 14px;
-  margin: auto;
-}
-
-.c-connection-inspector__header button path {
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-width: 1.5;
+.c-connection-inspector__live {
+  color: var(--c-accent);
+  font: 700 0.625rem/1 var(--font-mono);
+  letter-spacing: 0.08em;
 }
 
 .c-connection-legend {
@@ -1192,6 +1245,18 @@ h2 {
   stroke-width: 1.4;
 }
 
+.c-session-icon__badge {
+  fill: var(--c-panel);
+  stroke: currentColor;
+  stroke-width: 1;
+}
+
+.c-session-icon .c-session-icon__branch {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 1;
+}
+
 .c-session-icon[data-connection-state="active"] {
   color: #62db8a;
   filter: drop-shadow(0 0 4px rgba(98, 219, 138, 0.3));
@@ -1421,43 +1486,6 @@ h2 {
   background: rgba(233, 184, 108, 0.08);
   font-size: 0.6875rem;
   line-height: 1.5;
-}
-
-.c-connection-grip {
-  position: absolute;
-  z-index: 3;
-  bottom: -19px;
-  left: 50%;
-  width: 92px;
-  height: 20px;
-  padding: 0;
-  border: 1px solid rgba(214, 236, 221, 0.2);
-  border-top: 0;
-  border-radius: 0 0 10px 10px;
-  color: var(--c-faint);
-  background: rgba(13, 19, 16, 0.97);
-  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.28);
-  transform: translateX(-50%);
-  cursor: grab;
-  touch-action: none;
-}
-
-.c-connection-grip:active {
-  cursor: grabbing;
-}
-
-.c-connection-grip span {
-  display: block;
-  width: 30px;
-  height: 3px;
-  margin: 5px auto 0;
-  border-radius: 999px;
-  background: currentColor;
-}
-
-.c-connection-grip:hover,
-.c-connection-grip:focus-visible {
-  color: var(--c-accent);
 }
 
 [data-connection-key].is-entering {

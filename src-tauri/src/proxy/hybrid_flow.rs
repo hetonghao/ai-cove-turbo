@@ -3,27 +3,82 @@ use std::{future::Future, time::Duration};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
-use crate::proxy::{HttpTraffic, traffic::TrafficRoute};
+use crate::proxy::HttpTraffic;
 
+use super::super::hybrid_pool::LeaseRetirement;
 use super::{
     Active, ClientWebSocket, Session,
     common::{close_client, event_type, reject_thread_switch, send_error},
-    http, legacy,
+    http, idle, legacy,
     sse::{HttpFallback, http_request_payload},
     websocket,
 };
 
+pub(super) async fn handle_idle(
+    client: &mut ClientWebSocket,
+    session: &mut Session,
+    active_response: &mut Option<Active>,
+) -> bool {
+    let selection = if session.ready.is_some() {
+        select_idle(
+            client.next(),
+            poll_ready(&mut session.ready),
+            tokio::time::sleep(super::super::hybrid_pool::KEEPALIVE_INTERVAL),
+        )
+        .await
+    } else if session.response_started {
+        select_waiting_idle(
+            client.next(),
+            session
+                .state
+                .hybrid_pool
+                .checkout_ready(&session.pool_scope, session.pool_id),
+        )
+        .await
+    } else {
+        IdleSelection::Client(client.next().await)
+    };
+    match selection {
+        IdleSelection::Client(message) => {
+            handle_idle_client_message(client, session, active_response, message).await
+        }
+        IdleSelection::PoolReady(upstream) => {
+            session.ready = Some(*upstream);
+            session.drain_reconnect_pending = false;
+            session.observe_idle().await;
+            true
+        }
+        IdleSelection::Ready(result) => idle::handle_idle_upstream(client, session, result).await,
+        IdleSelection::Keepalive => idle::handle_idle_keepalive(session).await,
+    }
+}
+
 pub(super) enum IdleSelection {
     Client(Option<Result<Message, WebSocketError>>),
+    PoolReady(Box<super::PrivateWebSocket>),
     Ready(Option<Result<Message, WebSocketError>>),
     Keepalive,
+}
+
+pub(super) async fn select_waiting_idle<Client, PoolReady>(
+    client: Client,
+    pool_ready: PoolReady,
+) -> IdleSelection
+where
+    Client: Future<Output = Option<Result<Message, WebSocketError>>>,
+    PoolReady: Future<Output = super::PrivateWebSocket>,
+{
+    tokio::select! {
+        biased;
+        upstream = pool_ready => IdleSelection::PoolReady(Box::new(upstream)),
+        message = client => IdleSelection::Client(message),
+    }
 }
 
 pub(super) async fn select_idle<Client, Ready, Keepalive>(
     client: Client,
     ready: Ready,
     keepalive: Keepalive,
-    ready_enabled: bool,
 ) -> IdleSelection
 where
     Client: Future<Output = Option<Result<Message, WebSocketError>>>,
@@ -32,8 +87,8 @@ where
 {
     tokio::select! {
         biased;
-        () = keepalive, if ready_enabled => IdleSelection::Keepalive,
-        result = ready, if ready_enabled => IdleSelection::Ready(result),
+        () = keepalive => IdleSelection::Keepalive,
+        result = ready => IdleSelection::Ready(result),
         message = client => IdleSelection::Client(message),
     }
 }
@@ -74,6 +129,27 @@ pub(super) async fn handle_idle_client_message(
     }
 }
 
+async fn reject_missing_continuation(
+    client: &mut ClientWebSocket,
+    session: &mut Session,
+    previous_response_id: Option<&str>,
+) -> bool {
+    let Some(previous_response_id) = previous_response_id else {
+        return false;
+    };
+    if session.last_terminal_response_id.as_deref() == Some(previous_response_id) {
+        return false;
+    }
+    session.response_started = false;
+    let _ = send_error(
+        client,
+        "previous_response_not_found",
+        "Previous response is not available on this websocket",
+    )
+    .await;
+    true
+}
+
 async fn start_response(
     client: &mut ClientWebSocket,
     session: &mut Session,
@@ -100,35 +176,52 @@ async fn start_response(
     if !session.bind_thread_id(prepared.thread_id).await {
         return reject_thread_switch(client).await;
     }
+    session.response_started = true;
+    let previous_response_id = prepared.previous_response_id;
     let fallback = prepared.fallback;
+    let wait_for_drain_reconnect = std::mem::take(&mut session.drain_reconnect_pending);
+    if session.ready.is_none()
+        && let (Some(thread_id), Some(response_id)) = (
+            session.thread_id.as_deref(),
+            previous_response_id.as_deref(),
+        )
+        && let Some(upstream) = session
+            .state
+            .hybrid_pool
+            .checkout_handoff_wait(&session.pool_scope, session.pool_id, thread_id, response_id)
+            .await
+    {
+        session.ready = Some(upstream);
+        session.last_terminal_response_id = Some(response_id.to_owned());
+    }
+    if reject_missing_continuation(client, session, previous_response_id.as_deref()).await {
+        return true;
+    }
     if session.ready.is_none() {
         session.ready = session
             .state
             .hybrid_pool
-            .checkout(&session.pool_scope)
+            .checkout(&session.pool_scope, session.pool_id)
             .await;
     }
-    if session.ready.is_none() && matches!(&fallback, HttpFallback::WebSocketRequired) {
+    if session.ready.is_none()
+        && (wait_for_drain_reconnect || matches!(&fallback, HttpFallback::WebSocketRequired))
+    {
         session.ready = session
             .state
             .hybrid_pool
-            .checkout_wait(&session.pool_scope, Duration::from_secs(2))
+            .checkout_wait(&session.pool_scope, session.pool_id, Duration::from_secs(2))
             .await;
     }
     if let Some(upstream) = session.ready.take() {
         session
             .observe_activity(super::ConnectionActivity::Up)
             .await;
-        session
-            .state
-            .metrics
-            .record_request_route(TrafficRoute::HybridWs);
         *active = Some(websocket::start_websocket_worker(
             upstream,
             payload,
             original_binary,
             std::sync::Arc::clone(&session.state.metrics),
-            session.path.clone(),
             session.last_terminal_response_id.clone(),
         ));
         return true;
@@ -146,7 +239,9 @@ async fn start_response(
     };
     let HttpFallback::Request(http_payload) = fallback else {
         session
-            .observe_recovering("续传请求正在等待可用 WebSocket")
+            .discard(LeaseRetirement::Recovering {
+                reason: "续传请求正在等待可用 WebSocket".to_owned(),
+            })
             .await;
         let _ = send_error(
             client,
@@ -156,7 +251,6 @@ async fn start_response(
         .await;
         return true;
     };
-    session.state.metrics.record_request_route(traffic.route);
     *active = Some(http::start_http_worker(session, http_payload, traffic));
     true
 }

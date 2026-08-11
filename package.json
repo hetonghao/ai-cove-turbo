@@ -1,10 +1,13 @@
 {
   "name": "ai-cove-turbo",
-  "version": "0.1.0",
+  "version": "0.1.0-beta.1",
   "private": true,
   "scripts": {
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
+    "desktop:release:local": "node scripts/desktop-release.mjs",
+    "desktop:validate-release": "node scripts/desktop-release.mjs validate",
+    "prototype:ws-panel": "node prototype/server.mjs 41732",
     "check": "node --check src/telemetry.js && node --check src/app.js && cargo check --manifest-path src-tauri/Cargo.toml",
     "test": "node --test tests/*.test.mjs && cargo test --manifest-path src-tauri/Cargo.toml",
     "benchmark:live": "cargo test --manifest-path src-tauri/Cargo.toml live_three_by_four_benchmark -- --ignored --nocapture"

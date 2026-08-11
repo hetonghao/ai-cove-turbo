@@ -58,9 +58,13 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
     serviceHealthy: true,
     configState: "managed",
     recentRequests: [
-      { id: 1, timestampMs: 70_000, status: 201, path: "/v1/responses", rawBytes: 200, sentBytes: 100, transport: "HTTP", result: "success" },
-      { id: 2, timestampMs: 71_000, status: 101, path: "/v1/responses", rawBytes: 100, sentBytes: 50, transport: "WS", result: "success" },
-      { id: 3, timestampMs: 72_000, status: 101, path: "/v1/ws-error", rawBytes: 100, sentBytes: 50, transport: "WS", result: "error" },
+      { id: 1, timestampMs: 70_000, status: 201, path: "/v1/direct", rawBytes: 200, sentBytes: 100, transport: "HTTP", result: "success", route: "directHttp" },
+      { id: 2, timestampMs: 71_000, status: 101, path: "/v1/hybrid-ws", rawBytes: 100, sentBytes: 50, transport: "WS", result: "success", route: "hybridWs" },
+      { id: 3, timestampMs: 72_000, status: 101, path: "/v1/ws-error", rawBytes: 100, sentBytes: 50, transport: "WS", result: "error", route: "hybridWs" },
+      { id: 4, timestampMs: 73_000, status: 200, path: "/v1/cold-start", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "success", route: "hybridColdStartHttp" },
+      { id: 5, timestampMs: 74_000, status: 200, path: "/v1/recovery", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "fallback", route: "hybridRecoveryHttp" },
+      { id: 6, timestampMs: 75_000, status: 1002, path: "/v1/ws-idle", rawBytes: 0, sentBytes: 0, transport: "WS", result: "error", route: "hybridWs", failurePhase: "hybridIdle", failureReason: "unexpected idle upstream binary message" },
+      { id: 7, timestampMs: 76_000, status: 1012, path: "/v1/ws-restart", rawBytes: 0, sentBytes: 0, transport: "WS", result: "error", route: "hybridWs", failurePhase: "hybridIdle", failureReason: "service restarting" },
     ],
     trafficWindows: [
       { minutes: 1, bucketSeconds: 10, currentPeriodStartMs: 70_000, buckets },
@@ -114,21 +118,39 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   vm.runInNewContext(appSource, context);
   await new Promise((resolve) => setImmediate(resolve));
 
-  // Then: 终端与统计图都来自同一份状态数据。
-  const requestRows = requestStream.innerHTML.match(/<tr>.*?<\/tr>/g) ?? [];
+  // Then: 统计页只渲染统计视图，切换到实时页后再从同一份状态数据补齐终端。
+  assert.equal(requestStream.innerHTML, "");
+  listeners.click({
+    target: {
+      closest(selector) {
+        if (selector === "[data-tab]") return tabs[0];
+        return null;
+      },
+    },
+  });
+  const requestRows = requestStream.innerHTML.match(/<tr\b.*?<\/tr>/g) ?? [];
   const failedRow = requestRows.find((row) => row.includes("/v1/ws-error")) ?? "";
-  assert.equal(requestRows.length, 3);
-  assert.match(requestStream.innerHTML, /201[\s\S]*\/v1\/responses[\s\S]*HTTP/);
+  const recoveredRow = requestRows.find((row) => row.includes("/v1/ws-idle")) ?? "";
+  const restartRow = requestRows.find((row) => row.includes("/v1/ws-restart")) ?? "";
+  assert.equal(requestRows.length, 7);
+  assert.match(requestRows.find((row) => row.includes("/v1/direct")) ?? "", />压缩 HTTP<\/span>/);
+  assert.match(requestRows.find((row) => row.includes("/v1/hybrid-ws")) ?? "", />Hybrid WS<\/span>/);
+  assert.match(requestRows.find((row) => row.includes("/v1/cold-start")) ?? "", />首轮 HTTP<\/span>/);
+  assert.match(requestRows.find((row) => row.includes("/v1/recovery")) ?? "", />回退 HTTP<\/span>/);
   assert.match(failedRow, /c-request-status c-request-status--error">101<\/span>/);
-  assert.match(failedRow, /c-transport c-transport--error">WS · 失败<\/span>/);
-  assert.doesNotMatch(failedRow, /c-request-status--success|<span class="c-transport">WS<\/span>/);
-  assert.equal(liveCount.textContent, "3");
+  assert.match(failedRow, /c-transport c-transport--error">Hybrid WS · 失败<\/span>/);
+  assert.doesNotMatch(failedRow, /c-request-status--success|<span class="c-transport">Hybrid WS<\/span>/);
+  assert.match(recoveredRow, /title="unexpected idle upstream binary message"/);
+  assert.match(recoveredRow, />Hybrid WS · 连接恢复<\/span>/);
+  assert.doesNotMatch(recoveredRow, /Hybrid WS · 失败/);
+  assert.match(restartRow, />Hybrid WS · 发布重建<\/span>/);
+  assert.equal(liveCount.textContent, "7");
   assert.equal(statElements[0].textContent, "5");
   assert.equal(statElements[1].textContent, "300 B");
   assert.equal(statElements[2].textContent, "150 B");
   assert.equal(statElements[3].textContent, "150 B");
   assert.equal(statElements[4].textContent, "50.0%");
-  assert.equal(statElements[5].textContent, "21.3% / 3.0%");
+  assert.equal(statElements[5].textContent, "22.6% / 9.6%");
   assert.equal((bars.innerHTML.match(/class="c-bar-slot/g) ?? []).length, 6);
   assert.equal(chartSlots.filter((slot) => slot.tabIndex === 0).length, 1);
   assert.match(bars.innerHTML, /class="c-bar-slot" style="--bar: 100%/);
@@ -176,7 +198,7 @@ test("速度估算按压缩字节和已就绪 WebSocket 请求加权", async () 
 
   // Then: 错误请求不进入提速分母，WS 请求额外获得连接复用常量。
   assert.equal(estimate.requests, 2);
-  assert.equal(estimate.firstPercent.toFixed(1), "16.6");
-  assert.equal(estimate.completePercent.toFixed(1), "4.4");
-  assert.equal(window.TurboTelemetry.formatSpeedGain(estimate), "16.6% / 4.4%");
+  assert.equal(estimate.firstPercent.toFixed(1), "18.2");
+  assert.equal(estimate.completePercent.toFixed(1), "9.0");
+  assert.equal(window.TurboTelemetry.formatSpeedGain(estimate), "18.2% / 9.0%");
 });

@@ -1,18 +1,46 @@
 use std::{sync::Arc, time::Duration};
 
-use axum::http::HeaderMap;
-use url::Url;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
 use super::{
-    HybridPool, HybridScope, MAX_POOL_CONNECTIONS, PONG_TIMEOUT, PoolInner, PrivateUpstream,
+    HybridPool, HybridScope, PONG_TIMEOUT, PoolConnection, PoolState, PrivateUpstream,
     desired_connections, probe_idle, total_connections,
 };
-use crate::proxy::private_websocket;
 
-#[derive(Clone)]
-struct ConnectionSpec {
-    target: Url,
-    headers: HeaderMap,
+mod connection;
+use connection::{ConnectionSpec, spawn_connection};
+
+fn reclaim_idle(state: &mut PoolState, scope: &HybridScope, count: usize) -> Vec<PoolConnection> {
+    let mut reclaimed = Vec::new();
+    for candidate_is_active in [false, true] {
+        for (candidate_scope, candidate) in &mut state.scopes {
+            if candidate_scope == scope || (candidate.active_local > 0) != candidate_is_active {
+                continue;
+            }
+            let take = count
+                .saturating_sub(reclaimed.len())
+                .min(candidate.idle.len());
+            reclaimed.extend(
+                candidate
+                    .idle
+                    .drain(candidate.idle.len().saturating_sub(take)..),
+            );
+            if reclaimed.len() == count {
+                return reclaimed;
+            }
+        }
+    }
+    if let Some(candidate) = state.scopes.get_mut(scope) {
+        let take = count
+            .saturating_sub(reclaimed.len())
+            .min(candidate.idle.len());
+        reclaimed.extend(
+            candidate
+                .idle
+                .drain(candidate.idle.len().saturating_sub(take)..),
+        );
+    }
+    reclaimed
 }
 
 impl HybridPool {
@@ -20,7 +48,22 @@ impl HybridPool {
         let plan = {
             let mut state = self.inner.state.lock().await;
             let global_total = state.scopes.values().map(total_connections).sum::<usize>();
-            let available = MAX_POOL_CONNECTIONS.saturating_sub(global_total);
+            let global_leased = state
+                .scopes
+                .values()
+                .map(|candidate| candidate.leased.len())
+                .sum::<usize>();
+            let global_desired = desired_connections(global_leased);
+            let available = global_desired.saturating_sub(global_total);
+            let excess = global_total.saturating_sub(global_desired);
+            let inactive_idle = state
+                .scopes
+                .iter()
+                .filter(|(candidate_scope, candidate)| {
+                    *candidate_scope != scope && candidate.active_local == 0
+                })
+                .map(|(_, candidate)| candidate.idle.len())
+                .sum::<usize>();
             let Some(entry) = state.scopes.get(scope) else {
                 return;
             };
@@ -29,80 +72,43 @@ impl HybridPool {
                 state.scopes.remove(scope);
                 return;
             }
-            let needed = desired_connections(entry.active_local).saturating_sub(current_total);
-            if needed == 0 {
+            let active_local = entry.active_local;
+            let leased_local = entry.leased.len();
+            let ready_needed = usize::from(
+                active_local > leased_local
+                    && entry.idle.is_empty()
+                    && entry.connecting == 0
+                    && entry.probing == 0,
+            );
+            let needed = desired_connections(leased_local)
+                .saturating_sub(current_total)
+                .min(available.saturating_add(inactive_idle).max(ready_needed));
+            if needed == 0 && excess == 0 {
                 return;
             }
-            let active_needed = entry.active_local.saturating_sub(current_total);
             let spec = ConnectionSpec {
                 target: entry.target.clone(),
                 headers: entry.headers.clone(),
             };
-            let reclaim_target = needed.saturating_sub(available);
-            let mut reclaimed = Vec::new();
-            if entry.active_local > 0 && reclaim_target > 0 {
-                for (candidate_scope, candidate) in &mut state.scopes {
-                    if candidate_scope == scope || candidate.active_local > 0 {
-                        continue;
-                    }
-                    let take = reclaim_target
-                        .saturating_sub(reclaimed.len())
-                        .min(candidate.idle.len());
-                    reclaimed.extend(
-                        candidate
-                            .idle
-                            .drain(candidate.idle.len().saturating_sub(take)..),
-                    );
-                    if reclaimed.len() == reclaim_target {
-                        break;
-                    }
-                }
-            }
-            let active_reclaim_target =
-                active_needed.saturating_sub(available.saturating_add(reclaimed.len()));
-            if active_reclaim_target > 0 {
-                let reclaimed_before_active = reclaimed.len();
-                for (candidate_scope, candidate) in &mut state.scopes {
-                    if candidate_scope == scope || candidate.active_local == 0 {
-                        continue;
-                    }
-                    let spare = total_connections(candidate).saturating_sub(candidate.active_local);
-                    let take = active_reclaim_target
-                        .saturating_sub(reclaimed.len().saturating_sub(reclaimed_before_active))
-                        .min(candidate.idle.len())
-                        .min(spare);
-                    reclaimed.extend(
-                        candidate
-                            .idle
-                            .drain(candidate.idle.len().saturating_sub(take)..),
-                    );
-                    if reclaimed.len().saturating_sub(reclaimed_before_active)
-                        == active_reclaim_target
-                    {
-                        break;
-                    }
-                }
+            let reclaim_target = excess.saturating_add(needed.saturating_sub(available));
+            let reclaimed = reclaim_idle(&mut state, scope, reclaim_target);
+            for connection in &reclaimed {
+                state.push_closed(connection.id, None, "连接池容量回收".to_owned(), true);
             }
             state.scopes.retain(|_, candidate| {
                 candidate.active_local > 0 || total_connections(candidate) > 0
             });
-            let connecting = needed.min(available.saturating_add(reclaimed.len()));
-            if connecting == 0 {
-                return;
+            let remaining_total = global_total.saturating_sub(reclaimed.len());
+            let connecting = needed.min(global_desired.saturating_sub(remaining_total));
+            if let Some(entry) = state.scopes.get_mut(scope) {
+                entry.connecting = entry.connecting.saturating_add(connecting);
             }
-            let Some(entry) = state.scopes.get_mut(scope) else {
-                return;
-            };
-            entry.connecting = entry.connecting.saturating_add(connecting);
             let plan = (connecting, spec, reclaimed);
             drop(state);
             plan
         };
         let (connecting, spec, reclaimed) = plan;
-        for _ in 0..reclaimed.len() {
-            self.inner.metrics.record_websocket_closed();
-        }
-        drop(reclaimed);
+        self.close_pool_connections_detached(reclaimed);
         for _ in 0..connecting {
             spawn_connection(Arc::clone(&self.inner), scope.clone(), spec.clone());
         }
@@ -138,7 +144,7 @@ impl HybridPool {
     }
 
     pub(super) async fn maintain_once(&self, scope: &HybridScope, pong_timeout: Duration) {
-        let upstream = {
+        let connection = {
             let mut state = self.inner.state.lock().await;
             let Some(entry) = state.scopes.get_mut(scope) else {
                 return;
@@ -147,12 +153,13 @@ impl HybridPool {
             if entry.idle.len() <= 1 {
                 return;
             }
-            let upstream = entry.idle.remove(0);
+            let connection = entry.idle.remove(0);
             entry.probing = entry.probing.saturating_add(1);
             drop(state);
-            upstream
+            connection
         };
-        let healthy = probe_idle(upstream, pong_timeout).await;
+        let connection_id = connection.id;
+        let healthy = probe_idle(connection.upstream, pong_timeout).await;
         let succeeded = healthy.is_some();
         {
             let mut state = self.inner.state.lock().await;
@@ -161,7 +168,13 @@ impl HybridPool {
             };
             entry.probing = entry.probing.saturating_sub(1);
             if let Some(upstream) = healthy {
-                entry.idle.push(upstream);
+                entry.idle.push(PoolConnection {
+                    id: connection_id,
+                    upstream,
+                });
+            }
+            if !succeeded {
+                state.push_closed(connection_id, None, "连接池健康检查失败".to_owned(), false);
             }
             drop(state);
         }
@@ -173,57 +186,33 @@ impl HybridPool {
         self.refill(scope).await;
     }
 
-    pub(super) async fn close_all(&self, upstreams: Vec<PrivateUpstream>) {
+    pub(super) fn close_detached(&self, upstreams: Vec<PrivateUpstream>) {
+        if upstreams.is_empty() {
+            return;
+        }
+        let pool = self.clone();
+        tokio::spawn(async move {
+            pool.close_all(upstreams).await;
+        });
+    }
+
+    pub(super) fn close_pool_connections_detached(&self, connections: Vec<PoolConnection>) {
+        self.close_detached(
+            connections
+                .into_iter()
+                .map(|connection| connection.upstream)
+                .collect(),
+        );
+    }
+
+    pub(in crate::proxy) async fn close_all(&self, upstreams: Vec<PrivateUpstream>) {
         for mut upstream in upstreams {
-            let _ = tokio::time::timeout(PONG_TIMEOUT, upstream.close(None)).await;
+            let close = CloseFrame {
+                code: CloseCode::Normal,
+                reason: "".into(),
+            };
+            let _ = tokio::time::timeout(PONG_TIMEOUT, upstream.close(Some(close))).await;
             self.inner.metrics.record_websocket_closed();
         }
     }
-}
-
-fn spawn_connection(inner: Arc<PoolInner>, scope: HybridScope, spec: ConnectionSpec) {
-    tokio::spawn(async move {
-        let connected =
-            private_websocket::connect_private(&spec.target, &spec.headers, &inner.tls_config)
-                .await;
-        let Some(upstream) = connected else {
-            let mut state = inner.state.lock().await;
-            let remove = if let Some(entry) = state.scopes.get_mut(&scope) {
-                entry.connecting = entry.connecting.saturating_sub(1);
-                entry.active_local == 0 && total_connections(entry) == 0
-            } else {
-                false
-            };
-            if remove {
-                state.scopes.remove(&scope);
-            }
-            drop(state);
-            return;
-        };
-        let mut upstream = Some(upstream);
-        let accepted = {
-            let mut state = inner.state.lock().await;
-            let global_total = state.scopes.values().map(total_connections).sum::<usize>();
-            let Some(entry) = state.scopes.get_mut(&scope) else {
-                return;
-            };
-            entry.connecting = entry.connecting.saturating_sub(1);
-            let keep = global_total <= MAX_POOL_CONNECTIONS
-                && total_connections(entry) < desired_connections(entry.active_local);
-            if keep {
-                if let Some(upstream) = upstream.take() {
-                    entry.idle.push(upstream);
-                }
-                entry.initialized = true;
-            }
-            drop(state);
-            keep
-        };
-        if accepted {
-            inner.metrics.record_websocket_connected();
-            inner.ready.notify_waiters();
-        } else if let Some(mut upstream) = upstream {
-            let _ = tokio::time::timeout(PONG_TIMEOUT, upstream.close(None)).await;
-        }
-    });
 }

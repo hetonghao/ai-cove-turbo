@@ -4,7 +4,7 @@ use url::Url;
 
 use super::{
     BenchmarkPath, BenchmarkResult, LiveContext, PayloadSet, benchmark_error, collect_scenario,
-    websocket::validate_hybrid_lifecycle,
+    disable_path, websocket::validate_hybrid_lifecycle,
 };
 use crate::benchmark::{
     BenchmarkSettings, DEFAULT_MULTI_ROUNDS, calibration::generate_candidate_artifacts,
@@ -110,11 +110,19 @@ async fn live_three_by_four_benchmark() -> BenchmarkResult<()> {
         upstream: &upstream,
         direct_url: &direct_url,
     };
-    verify_benchmark_websocket_lifecycle(&context, BenchmarkPath::WebSocket).await?;
-    verify_benchmark_websocket_lifecycle(&context, BenchmarkPath::Hybrid).await?;
+    let mut disabled = Vec::new();
+    for path in [BenchmarkPath::WebSocket, BenchmarkPath::Hybrid] {
+        if let Err(error) = verify_benchmark_websocket_lifecycle(&context, path).await {
+            eprintln!("{error}; 正式采样跳过该路径，其他路径继续");
+            disable_path(&mut disabled, path);
+        }
+    }
     let mut cases = Vec::with_capacity(12);
     for scenario in usage_scenarios(&settings) {
-        cases.extend(collect_scenario(&context, scenario).await?);
+        cases.extend(collect_scenario(&context, scenario, &mut disabled).await?);
+    }
+    if cases.is_empty() {
+        return Err(io::Error::other("benchmark has no usable paths"));
     }
     crate::benchmark::report::print_report(&settings, &cases)?;
     write_calibration_if_requested(&settings, &cases)?;

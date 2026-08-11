@@ -11,6 +11,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+use std::process::Command;
+
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
@@ -18,10 +21,10 @@ use url::Url;
 
 use crate::{
     config::{
-        AI_COVE_UPSTREAM, ConfigError, ManagedConfig, RestoreOutcome, UpstreamCompatibility,
-        manages_websocket, owns_current_value, owns_websocket_value, preflight, recover_stale,
-        relinquish_websocket, restore, set_ai_cove_upstream as replace_loopback_upstream,
-        set_managed_websocket, take_over,
+        AI_COVE_UPSTREAM, ConfigError, ManagedConfig, ManagedOwnership, RestoreOutcome,
+        UpstreamCompatibility, managed_ownership, preflight, recover_stale, relinquish_websocket,
+        restore, set_ai_cove_upstream as replace_loopback_upstream, set_managed_websocket,
+        take_over,
     },
     proxy::{
         ConnectionSnapshot, Metrics, ProxyHandle, ProxyOptions, start_proxy,
@@ -183,6 +186,7 @@ pub(crate) struct AppRuntime {
     proxy: AsyncMutex<Option<ProxyHandle>>,
     traffic_persistence: AsyncMutex<Option<TrafficPersistence>>,
     lifecycle_lock: AsyncMutex<()>,
+    codex_pid_before_restart: Mutex<Option<u32>>,
     shutting_down: AtomicBool,
 }
 
@@ -208,6 +212,7 @@ impl AppRuntime {
             proxy: AsyncMutex::new(None),
             traffic_persistence: AsyncMutex::new(None),
             lifecycle_lock: AsyncMutex::new(()),
+            codex_pid_before_restart: Mutex::new(None),
             shutting_down: AtomicBool::new(false),
         })
     }
@@ -298,6 +303,7 @@ impl AppRuntime {
         self.remember_port(&endpoint);
         *lock_mutex(&self.managed) = Some(managed);
         *self.proxy.lock().await = Some(proxy);
+        *lock_mutex(&self.codex_pid_before_restart) = codex_desktop_process_id();
         self.update_status(|status| {
             status.service_healthy = true;
             status.endpoint = endpoint;
@@ -409,6 +415,7 @@ impl AppRuntime {
             preferences.clone()
         };
         let _ = save_preferences(&self.paths.preferences_path(), &preferences);
+        *lock_mutex(&self.codex_pid_before_restart) = codex_desktop_process_id();
         self.update_status(|status| {
             status.websocket_enabled = enabled;
             status.websocket_verified = false;
@@ -461,7 +468,22 @@ impl AppRuntime {
         self.update_status(|status| {
             status.desktop_restarted = true;
             status.restart_required = false;
+            status.config_message = "已检测到 Codex 重新启动，等待首次请求验证".to_owned();
         });
+    }
+
+    pub(crate) async fn verify_codex_restart(&self) {
+        if !read_lock(&self.status).restart_required {
+            return;
+        }
+        let previous = *lock_mutex(&self.codex_pid_before_restart);
+        let current = tauri::async_runtime::spawn_blocking(codex_desktop_process_id)
+            .await
+            .ok()
+            .flatten();
+        if codex_restart_observed(previous, current) {
+            self.mark_desktop_restarted();
+        }
     }
 
     pub(crate) fn set_update_status(&self, state: &str, message: &str, progress: u8) {
@@ -580,9 +602,9 @@ impl AppRuntime {
         let Some(managed) = managed else {
             return;
         };
-        match owns_current_value(&managed) {
-            Ok(true) => {}
-            Ok(false) => {
+        match managed_ownership(&managed) {
+            Ok(ManagedOwnership::Owned) => {}
+            Ok(ManagedOwnership::BaseUrlLost) => {
                 let _ = restore(&managed, &self.paths.recovery_path());
                 lock_mutex(&self.managed).take();
                 let proxy = self.proxy.lock().await.take();
@@ -596,7 +618,20 @@ impl AppRuntime {
                         "检测到外部修改，Turbo 已停止接管且不会覆盖当前 base_url".to_owned();
                     status.restart_required = false;
                 });
-                return;
+            }
+            Ok(ManagedOwnership::WebSocketLost) => {
+                let mut managed_guard = lock_mutex(&self.managed);
+                if let Some(managed) = managed_guard.as_mut() {
+                    let _ = relinquish_websocket(managed, &self.paths.recovery_path());
+                }
+                drop(managed_guard);
+                self.update_status(|status| {
+                    status.config_state = "conflict".to_owned();
+                    status.websocket_state = "conflict".to_owned();
+                    status.websocket_verified = false;
+                    status.config_message = "检测到外部修改 supports_websockets；HTTP 通道继续运行，Turbo 不再覆盖该字段".to_owned();
+                    status.restart_required = false;
+                });
             }
             Err(error) => {
                 self.update_status(|status| {
@@ -604,32 +639,6 @@ impl AppRuntime {
                     status.config_message =
                         format!("读取 Codex 配置失败，Turbo 保持当前通道：{error}");
                 });
-                return;
-            }
-        }
-
-        if manages_websocket(&managed) {
-            match owns_websocket_value(&managed) {
-                Ok(true) => {}
-                Ok(false) => {
-                    let mut managed_guard = lock_mutex(&self.managed);
-                    if let Some(managed) = managed_guard.as_mut() {
-                        let _ = relinquish_websocket(managed, &self.paths.recovery_path());
-                    }
-                    drop(managed_guard);
-                    self.update_status(|status| {
-                        status.config_state = "conflict".to_owned();
-                        status.websocket_state = "conflict".to_owned();
-                        status.websocket_verified = false;
-                        status.config_message = "检测到外部修改 supports_websockets；HTTP 通道继续运行，Turbo 不再覆盖该字段".to_owned();
-                        status.restart_required = false;
-                    });
-                }
-                Err(error) => self.update_status(|status| {
-                    status.config_state = "error".to_owned();
-                    status.config_message =
-                        format!("读取 supports_websockets 失败，HTTP 通道继续运行：{error}");
-                }),
             }
         }
     }
@@ -739,6 +748,51 @@ fn save_preferences(path: &Path, preferences: &Preferences) -> std::io::Result<(
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+const fn codex_restart_observed(previous: Option<u32>, current: Option<u32>) -> bool {
+    match (previous, current) {
+        (Some(previous), Some(current)) => previous != current,
+        (None, Some(_)) => true,
+        (Some(_) | None, None) => false,
+    }
+}
+
+#[cfg(all(not(test), target_os = "macos"))]
+fn codex_desktop_process_id() -> Option<u32> {
+    let script = r#"tell application "System Events" to get unix id of first application process whose bundle identifier is "com.openai.codex""#;
+    let output = Command::new("/usr/bin/osascript")
+        .args(["-e", script])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().parse().ok())
+        .flatten()
+}
+
+#[cfg(all(not(test), target_os = "windows"))]
+fn codex_desktop_process_id() -> Option<u32> {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-Process -Name Codex -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Id",
+        ])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().parse().ok())
+        .flatten()
+}
+
+#[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]
+const fn codex_desktop_process_id() -> Option<u32> {
+    None
 }
 
 fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -946,6 +1000,14 @@ supports_websockets = false
         assert!(status.service_healthy);
         assert_eq!(status.config_state, "error");
         Ok(())
+    }
+
+    #[test]
+    fn codex_restart_requires_a_new_running_process() {
+        assert!(codex_restart_observed(Some(41), Some(42)));
+        assert!(codex_restart_observed(None, Some(42)));
+        assert!(!codex_restart_observed(Some(42), Some(42)));
+        assert!(!codex_restart_observed(Some(42), None));
     }
 
     #[test]

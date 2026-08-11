@@ -279,6 +279,9 @@ impl TrafficStore {
     }
 
     pub(crate) fn record(&self, record: TrafficRecord<'_>) {
+        if record.failure_phase == Some(FailurePhase::HybridIdle) && record.status != 1012 {
+            return;
+        }
         let event = RequestEvent {
             id: 0,
             timestamp_ms: record.timestamp_ms,
@@ -338,12 +341,17 @@ impl TrafficStore {
                 index
             }
         };
-        if let Some(totals) = state.buckets.get_mut(index).and_then(|bucket| {
-            bucket
-                .totals
-                .get_mut(class_index(record.transport, record.result))
-        }) {
-            totals.add_record(record);
+        if record.failure_phase != Some(FailurePhase::HybridIdle) {
+            if let Some(route) = record.route {
+                state.route_counts.record(route);
+            }
+            if let Some(totals) = state.buckets.get_mut(index).and_then(|bucket| {
+                bucket
+                    .totals
+                    .get_mut(class_index(record.transport, record.result))
+            }) {
+                totals.add_record(record);
+            }
         }
 
         state.latest_timestamp_ms = state.latest_timestamp_ms.max(record.timestamp_ms);
@@ -351,12 +359,6 @@ impl TrafficStore {
         state.mark_dirty(bucket_start);
         state.window_cache = None;
         state.trim(latest_timestamp_ms);
-    }
-
-    pub(crate) fn record_route(&self, route: TrafficRoute) {
-        let mut state = lock(&self.state);
-        state.route_counts.record(route);
-        state.mark_dirty(align(now_ms(), BASE_BUCKET_MS));
     }
 
     pub(crate) fn route_counts(&self) -> TrafficRouteCounts {

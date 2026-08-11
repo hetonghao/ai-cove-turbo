@@ -11,16 +11,19 @@ use crate::proxy::{
 };
 
 use super::{
-    BenchmarkCase, BenchmarkResult, BenchmarkSettings, DIRECT_PATH, HTTP_PATH, HYBRID_PATH, Sample,
-    UsageScenario, WEBSOCKET_PATH, benchmark_error, http_payload, websocket_payload,
+    BenchmarkResult, BenchmarkSettings, DIRECT_PATH, HTTP_PATH, HYBRID_PATH, Sample,
+    WEBSOCKET_PATH, benchmark_error,
 };
 
+mod collection;
 #[cfg(test)]
 mod connection_tests;
 mod http;
 #[cfg(test)]
 mod runner;
 mod websocket;
+
+use collection::{collect_scenario, disable_path, require_compression, sample_context_error};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BenchmarkPath {
@@ -211,107 +214,4 @@ impl LiveContext<'_> {
             }
         }
     }
-}
-
-fn require_compression(case: &BenchmarkCase, required: bool) -> BenchmarkResult<()> {
-    if !required {
-        return Ok(());
-    }
-    let mut samples = case
-        .samples
-        .iter()
-        .filter(|sample| sample.retries == 0)
-        .peekable();
-    if samples.peek().is_none() {
-        return Err(io::Error::other(format!(
-            "benchmark scenario={} path={} 没有无重试的有效样本",
-            case.scenario, case.path
-        )));
-    }
-    if samples.all(|sample| sample.encoded_bytes < sample.raw_bytes) {
-        return Ok(());
-    }
-    Err(io::Error::other(format!(
-        "{} / {} did not produce a smaller encoded payload",
-        case.scenario, case.path
-    )))
-}
-
-fn sample_context_error(
-    scenario: &str,
-    path: BenchmarkPath,
-    iteration: usize,
-    error: &io::Error,
-) -> io::Error {
-    io::Error::other(format!(
-        "benchmark scenario={scenario} path={} iteration={iteration} failed: {error}",
-        path.label(),
-    ))
-}
-
-async fn collect_scenario(
-    context: &LiveContext<'_>,
-    scenario: UsageScenario,
-) -> BenchmarkResult<[BenchmarkCase; 4]> {
-    let http_payloads = scenario
-        .prompts
-        .iter()
-        .map(|prompt| http_payload(&context.settings.model, prompt))
-        .collect::<Vec<_>>();
-    let websocket_payloads = scenario
-        .prompts
-        .iter()
-        .map(|prompt| websocket_payload(&context.settings.model, prompt))
-        .collect::<Vec<_>>();
-    let payloads = PayloadSet {
-        http: &http_payloads,
-        websocket: &websocket_payloads,
-    };
-    let mut direct = BenchmarkCase {
-        scenario: scenario.name,
-        path: BenchmarkPath::Direct.label(),
-        samples: Vec::with_capacity(context.settings.runs),
-    };
-    let mut http = BenchmarkCase {
-        scenario: scenario.name,
-        path: BenchmarkPath::Http.label(),
-        samples: Vec::with_capacity(context.settings.runs),
-    };
-    let mut websocket = BenchmarkCase {
-        scenario: scenario.name,
-        path: BenchmarkPath::WebSocket.label(),
-        samples: Vec::with_capacity(context.settings.runs),
-    };
-    let mut hybrid = BenchmarkCase {
-        scenario: scenario.name,
-        path: BenchmarkPath::Hybrid.label(),
-        samples: Vec::with_capacity(context.settings.runs),
-    };
-    let iterations = context
-        .settings
-        .warmups
-        .checked_add(context.settings.runs)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "too many benchmark runs"))?;
-    for iteration in 0..iterations {
-        for path in rotated_paths(iteration) {
-            let sample = context
-                .collect_sample(path, &payloads)
-                .await
-                .map_err(|error| {
-                    sample_context_error(scenario.name, path, iteration + 1, &error)
-                })?;
-            if iteration >= context.settings.warmups {
-                match path {
-                    BenchmarkPath::Direct => direct.samples.push(sample),
-                    BenchmarkPath::Http => http.samples.push(sample),
-                    BenchmarkPath::WebSocket => websocket.samples.push(sample),
-                    BenchmarkPath::Hybrid => hybrid.samples.push(sample),
-                }
-            }
-        }
-    }
-    require_compression(&http, scenario.requires_compression)?;
-    require_compression(&websocket, scenario.requires_compression)?;
-    require_compression(&hybrid, scenario.requires_compression)?;
-    Ok([direct, http, websocket, hybrid])
 }

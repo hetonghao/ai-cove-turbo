@@ -15,6 +15,27 @@ mod codex_thread_title_tests;
 #[cfg(test)]
 mod transport_ack_benchmark;
 
+#[cfg(test)]
+mod updater_tests {
+    use super::{DEFAULT_UPDATER_ENDPOINT, UPDATER_ENDPOINT, updater_endpoint};
+
+    #[test]
+    fn updater_endpoint_matches_the_compile_time_value() {
+        assert_eq!(
+            updater_endpoint().map(|endpoint| endpoint.to_string()),
+            Ok(UPDATER_ENDPOINT.to_owned()),
+        );
+    }
+
+    #[test]
+    fn production_endpoint_remains_the_fallback() {
+        assert_eq!(
+            DEFAULT_UPDATER_ENDPOINT,
+            "https://ai-cove.com/downloads/turbo/latest.json",
+        );
+    }
+}
+
 use std::{
     process::Command,
     sync::{
@@ -26,20 +47,32 @@ use std::{
 
 use proxy::ConnectionSnapshot;
 use runtime::{AppRuntime, AppStatus, RuntimePaths};
+#[cfg(target_os = "macos")]
+use tauri::menu::{IconMenuItem, NativeIcon};
 use tauri::{
     AppHandle, Manager, RunEvent, State, WindowEvent,
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::TrayIconBuilder,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartExt};
 use tauri_plugin_updater::UpdaterExt;
 
 const MAIN_WINDOW_LABEL: &str = "main";
+const TRAY_ID: &str = "ai-cove-turbo";
 const OPEN_MENU_ID: &str = "open";
+const OPEN_AI_COVE_MENU_ID: &str = "open-ai-cove";
 const QUIT_MENU_ID: &str = "quit";
-const UPDATER_ENDPOINT: &str = "https://ai-cove.com/downloads/turbo/latest.json";
+const AI_COVE_URL: &str = "https://ai-cove.com";
+const DEFAULT_UPDATER_ENDPOINT: &str = "https://ai-cove.com/downloads/turbo/latest.json";
+const UPDATER_ENDPOINT: &str = match option_env!("TURBO_UPDATER_ENDPOINT") {
+    Some(endpoint) if !endpoint.is_empty() => endpoint,
+    _ => DEFAULT_UPDATER_ENDPOINT,
+};
 
 /// Starts the Turbo desktop application.
+///
+/// # Errors
+/// Returns an error when Tauri cannot initialize or run the application.
 pub fn run() -> tauri::Result<()> {
     let updater = updater_public_key()
         .map_or_else(tauri_plugin_updater::Builder::new, |public_key| {
@@ -54,7 +87,7 @@ pub fn run() -> tauri::Result<()> {
         .invoke_handler(tauri::generate_handler![
             get_app_status,
             get_connection_snapshot,
-            get_codex_thread_title,
+            get_codex_thread_info,
             set_compression,
             set_websocket,
             set_autostart,
@@ -89,6 +122,12 @@ pub fn run() -> tauri::Result<()> {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            if matches!(event, WindowEvent::Focused(true)) {
+                let runtime = Arc::clone(window.state::<Arc<AppRuntime>>().inner());
+                tauri::async_runtime::spawn(async move {
+                    runtime.verify_codex_restart().await;
+                });
+            }
         })
         .build(tauri::generate_context!())?;
 
@@ -105,34 +144,75 @@ pub fn run() -> tauri::Result<()> {
 }
 
 fn install_tray(app: &tauri::App) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, OPEN_MENU_ID, "打开设置", true, None::<&str>)?;
+    #[cfg(target_os = "macos")]
+    let status = IconMenuItem::with_native_icon(
+        app,
+        "AI Cove Turbo 正在运行",
+        false,
+        Some(NativeIcon::StatusAvailable),
+        None::<&str>,
+    )?;
+    #[cfg(not(target_os = "macos"))]
+    let status = MenuItem::new(app, "AI Cove Turbo 正在运行", false, None::<&str>)?;
+    let status_separator = PredefinedMenuItem::separator(app)?;
+    let open = MenuItem::with_id(app, OPEN_MENU_ID, "打开主界面", true, None::<&str>)?;
+    let open_ai_cove = MenuItem::with_id(
+        app,
+        OPEN_AI_COVE_MENU_ID,
+        "打开 AI Cove",
+        true,
+        None::<&str>,
+    )?;
+    let version = MenuItem::new(
+        app,
+        concat!("版本 ", env!("CARGO_PKG_VERSION")),
+        false,
+        None::<&str>,
+    )?;
+    let quit_separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, QUIT_MENU_ID, "退出 Turbo", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
-    let mut tray = TrayIconBuilder::new()
+    let menu = Menu::with_items(
+        app,
+        &[
+            &status,
+            &status_separator,
+            &open,
+            &open_ai_cove,
+            &version,
+            &quit_separator,
+            &quit,
+        ],
+    )?;
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(true)
         .tooltip("AI Cove Turbo")
-        .title("Turbo")
         .on_menu_event(|app, event| match event.id.as_ref() {
             OPEN_MENU_ID => show_main_window(app),
+            OPEN_AI_COVE_MENU_ID => {
+                #[cfg(target_os = "macos")]
+                let _open_result = Command::new("open").arg(AI_COVE_URL).spawn();
+                #[cfg(target_os = "windows")]
+                let _open_result = Command::new("cmd")
+                    .args(["/C", "start", "", AI_COVE_URL])
+                    .spawn();
+                #[cfg(all(unix, not(target_os = "macos")))]
+                let _open_result = Command::new("xdg-open").arg(AI_COVE_URL).spawn();
+            }
             QUIT_MENU_ID => quit_after_restore(app),
             _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                }
-            ) {
-                show_main_window(tray.app_handle());
-            }
         });
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
+    #[cfg(target_os = "macos")]
+    let tray = tray
+        .icon(tauri::image::Image::from_bytes(include_bytes!(
+            "../icons/tray-template.png"
+        ))?)
+        .icon_as_template(true);
+    #[cfg(not(target_os = "macos"))]
+    let tray = match app.default_window_icon() {
+        Some(icon) => tray.icon(icon.clone()).title("Turbo"),
+        None => tray.title("Turbo"),
+    };
     tray.build(app)?;
     Ok(())
 }
@@ -197,7 +277,10 @@ async fn get_connection_snapshot(
 }
 
 #[tauri::command]
-async fn get_codex_thread_title(app: AppHandle, thread_id: String) -> Option<String> {
+async fn get_codex_thread_info(
+    app: AppHandle,
+    thread_id: String,
+) -> Option<codex_thread_title::CodexThreadInfo> {
     let home = app.path().home_dir().ok()?;
     let codex_home = std::env::var_os("CODEX_HOME")
         .map_or_else(|| home.join(".codex"), std::path::PathBuf::from);

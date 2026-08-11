@@ -14,7 +14,7 @@
     <a class="sr-only" href="#main-content">跳到主要内容</a>
 
     <div class="turbo-shell">
-      <header class="turbo-shell__header" data-tauri-drag-region>
+      <header class="turbo-shell__header" data-tauri-drag-region="deep">
         <a class="turbo-shell__brand" href="?tab=live" aria-label="AI Cove Turbo 实时页">
           <img class="turbo-icon turbo-icon--shell" src="./assets/turbo-icon.png" width="32" height="32" alt="" />
           <span><strong>Turbo</strong><small>AI Cove</small></span>
@@ -103,17 +103,10 @@
             <footer class="c-footer"><span>LIVE / LOCAL TRAFFIC</span><span>NO REQUEST BODY RETAINED</span><span data-state="runtime-mode">STARTING</span></footer>
           </div>
 
-          <div class="c-connection-dock" data-connection-dock data-open="false">
-            <button class="c-connection-summary" type="button" data-action="toggle-connections" data-connection-summary-trigger aria-controls="connection-inspector" aria-expanded="false" aria-haspopup="dialog" aria-label="发送 0，接收 0，休眠 0，打开连接检查器">
-              <span class="c-connection-summary__item"><svg class="c-connection-summary__icon" data-direction="up" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 10V2M3 5l3-3 3 3" /></svg><strong data-connection-summary="up">0</strong></span>
-              <span class="c-connection-summary__item"><svg class="c-connection-summary__icon" data-direction="down" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2v8m3-3-3 3-3-3" /></svg><strong data-connection-summary="down">0</strong></span>
-              <span class="c-connection-summary__item"><svg class="c-connection-summary__idle" viewBox="0 0 18 14" aria-hidden="true"><path d="M.75 10.5h3l-3 2.5h3" /><path d="M5 5.75h4.25L5 9.25h4.25" /><path d="M10.5.75h6l-6 5h6" /></svg><strong data-connection-summary="idle">0</strong></span>
-            </button>
-
+          <div class="c-connection-dock" data-connection-dock data-open="false" data-phase="closed">
             <aside id="connection-inspector" class="c-connection-inspector" data-connection-panel role="dialog" aria-modal="false" aria-labelledby="connection-inspector-title" hidden>
             <header class="c-connection-inspector__header">
-              <div><span class="c-overline">WEBSOCKET / LIVE POOL</span><h2 id="connection-inspector-title">当前连接 <em data-connection-total>0</em></h2></div>
-              <button type="button" data-action="close-connections" aria-label="关闭连接检查器"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8m0-8-8 8" /></svg></button>
+              <h2 id="connection-inspector-title"><span class="c-connection-inspector__live">LIVE</span><span>WebSocket 连接</span><em>当前 <strong data-connection-total>0</strong> 条</em></h2>
             </header>
             <div class="c-connection-legend" aria-label="连接状态图例"><span><i class="c-ws-icon" data-connection-state="warm" aria-hidden="true"></i>空白预热</span><span><i class="c-ws-icon" data-connection-state="active" aria-hidden="true"></i>正在传输</span><span><i class="c-ws-icon" data-connection-state="bound" aria-hidden="true"></i>绑定会话 · 空闲</span></div>
             <div class="c-connection-groups">
@@ -123,8 +116,12 @@
               <section class="c-connection-group" data-connection-group="closed"><header><div class="c-connection-group__title"><h3>近期关闭</h3><span class="c-connection-group__hint" tabindex="0" role="note" data-tooltip="最近 5 分钟内关闭的连接，最多显示 8 条。" aria-label="近期关闭说明：最近 5 分钟内关闭的连接，最多显示 8 条。">!</span></div><span data-connection-count="closed">0</span></header><div class="c-connection-sessions" data-connection-list="closed"><span class="c-connection-empty">暂无关闭记录</span></div></section>
             </div>
             <aside class="c-connection-message" data-connection-message aria-live="polite" hidden></aside>
-              <button class="c-connection-grip" type="button" data-connection-grip aria-label="向左右拖动可移动面板，点击或向上拖动可收起" aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp Home" title="左右拖动移动 · 点击或上拉收起"><span aria-hidden="true"></span></button>
             </aside>
+            <button class="c-connection-summary" type="button" data-action="toggle-connections" data-connection-summary-trigger data-connection-grip aria-controls="connection-inspector" aria-expanded="false" aria-haspopup="dialog" aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp Home" aria-label="发送 0，接收 0，休眠 0，打开连接检查器" title="打开连接检查器">
+              <span class="c-connection-summary__item"><svg class="c-connection-summary__icon" data-direction="up" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 10V2M3 5l3-3 3 3" /></svg><strong data-connection-summary="up">0</strong></span>
+              <span class="c-connection-summary__item"><svg class="c-connection-summary__icon" data-direction="down" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2v8m3-3-3 3-3-3" /></svg><strong data-connection-summary="down">0</strong></span>
+              <span class="c-connection-summary__item"><svg class="c-connection-summary__idle" viewBox="0 0 18 14" aria-hidden="true"><path d="M.75 10.5h3l-3 2.5h3" /><path d="M5 5.75h4.25L5 9.25h4.25" /><path d="M10.5.75h6l-6 5h6" /></svg><strong data-connection-summary="idle">0</strong></span>
+            </button>
           </div>
         </section>
 
@@ -170,7 +167,7 @@
 
         <section id="panel-config" class="tab-panel variant variant--b" role="tabpanel" aria-labelledby="tab-config" data-panel="config" hidden>
           <header class="b-version-bar" aria-labelledby="b-version-title">
-            <div class="c-product"><span class="c-prompt" aria-hidden="true">//</span><strong id="b-version-title">AI COVE TURBO</strong><span class="c-prompt">/ SETTING</span><span class="c-version">v0.1.0</span></div>
+            <div class="c-product"><span class="c-prompt" aria-hidden="true">//</span><strong id="b-version-title">AI COVE TURBO</strong><span class="c-prompt">/ SETTING</span><span class="c-version">v0.1.0-beta.1</span></div>
             <div class="c-topbar__right">
               <span class="b-version-bar__status"><strong data-state="update-state">尚未检查</strong><span data-state="update-message" aria-live="polite">尚未检查更新</span></span>
               <div class="b-version-bar__actions"><button type="button" data-action="check-for-updates">检查更新</button><button class="is-conditional" type="button" data-action="install-update" data-visible="install-update" hidden>安装更新</button></div>

@@ -11,6 +11,7 @@ use toml_edit::{DocumentMut, Item, value};
 use url::Url;
 
 pub(crate) const AI_COVE_UPSTREAM: &str = "https://api.ai-cove.com/v1";
+const AI_COVE_HOST_SUFFIX: &str = ".ai-cove.com";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UpstreamCompatibility {
@@ -44,6 +45,13 @@ pub(crate) enum RestoreOutcome {
     Restored,
     Conflict,
     NoRecord,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManagedOwnership {
+    Owned,
+    BaseUrlLost,
+    WebSocketLost,
 }
 
 #[derive(Debug)]
@@ -140,7 +148,7 @@ pub(crate) fn preflight(path: &Path) -> Result<Preflight, ConfigError> {
         return Err(ConfigError::InsecureUpstream);
     }
 
-    let compatibility = if upstream.host_str() == Some("api.ai-cove.com") {
+    let compatibility = if upstream.host_str().is_some_and(is_ai_cove_host) {
         UpstreamCompatibility::AiCove
     } else {
         UpstreamCompatibility::OtherHttps
@@ -261,27 +269,20 @@ pub(crate) fn restore(
     Ok(outcome)
 }
 
-pub(crate) fn owns_current_value(managed: &ManagedConfig) -> Result<bool, ConfigError> {
+pub(crate) fn managed_ownership(managed: &ManagedConfig) -> Result<ManagedOwnership, ConfigError> {
     let source = fs::read_to_string(&managed.config_path).map_err(ConfigError::Read)?;
     let document = source
         .parse::<DocumentMut>()
         .map_err(ConfigError::InvalidToml)?;
-    Ok(provider_base_url(&document, &managed.provider)? == managed.managed_base_url)
-}
-
-pub(crate) fn owns_websocket_value(managed: &ManagedConfig) -> Result<bool, ConfigError> {
-    let Some(expected) = managed.managed_supports_websockets else {
-        return Ok(false);
-    };
-    let source = fs::read_to_string(&managed.config_path).map_err(ConfigError::Read)?;
-    let document = source
-        .parse::<DocumentMut>()
-        .map_err(ConfigError::InvalidToml)?;
-    Ok(provider_websocket(&document, &managed.provider)? == Some(expected))
-}
-
-pub(crate) const fn manages_websocket(managed: &ManagedConfig) -> bool {
-    managed.managed_supports_websockets.is_some()
+    if provider_base_url(&document, &managed.provider)? != managed.managed_base_url {
+        return Ok(ManagedOwnership::BaseUrlLost);
+    }
+    if managed.managed_supports_websockets.is_some()
+        && provider_websocket(&document, &managed.provider)? != managed.managed_supports_websockets
+    {
+        return Ok(ManagedOwnership::WebSocketLost);
+    }
+    Ok(ManagedOwnership::Owned)
 }
 
 pub(crate) fn set_managed_websocket(
@@ -289,13 +290,20 @@ pub(crate) fn set_managed_websocket(
     enabled: bool,
     recovery_path: &Path,
 ) -> Result<(), ConfigError> {
-    if !owns_websocket_value(managed)? {
+    let source = fs::read_to_string(&managed.config_path).map_err(ConfigError::Read)?;
+    let mut document = source
+        .parse::<DocumentMut>()
+        .map_err(ConfigError::InvalidToml)?;
+    if provider_websocket(&document, &managed.provider)? != managed.managed_supports_websockets {
         return Err(ConfigError::FieldOwnershipLost("supports_websockets"));
     }
     let previous = managed.clone();
     managed.managed_supports_websockets = Some(enabled);
     write_json_atomic(recovery_path, managed)?;
-    if let Err(error) = update_websocket(&managed.config_path, &managed.provider, Some(enabled)) {
+    let result = provider_table_mut(&mut document, &managed.provider)
+        .map(|provider| provider.insert("supports_websockets", value(enabled)))
+        .and_then(|_| write_atomic(&managed.config_path, document.to_string().as_bytes()));
+    if let Err(error) = result {
         *managed = previous;
         let _ = write_json_atomic(recovery_path, managed);
         return Err(error);
@@ -324,27 +332,6 @@ fn update_managed_values(
     let provider_table = provider_table_mut(&mut document, provider)?;
     provider_table.insert("base_url", value(base_url));
     provider_table.insert("supports_websockets", value(websocket_enabled));
-    write_atomic(path, document.to_string().as_bytes())
-}
-
-fn update_websocket(
-    path: &Path,
-    provider: &str,
-    websocket_enabled: Option<bool>,
-) -> Result<(), ConfigError> {
-    let source = fs::read_to_string(path).map_err(ConfigError::Read)?;
-    let mut document = source
-        .parse::<DocumentMut>()
-        .map_err(ConfigError::InvalidToml)?;
-    let provider_table = provider_table_mut(&mut document, provider)?;
-    match websocket_enabled {
-        Some(enabled) => {
-            provider_table.insert("supports_websockets", value(enabled));
-        }
-        None => {
-            provider_table.remove("supports_websockets");
-        }
-    }
     write_atomic(path, document.to_string().as_bytes())
 }
 
@@ -421,6 +408,13 @@ fn is_loopback(url: &Url) -> bool {
         .is_ok_and(|address| address.is_loopback())
 }
 
+fn is_ai_cove_host(host: &str) -> bool {
+    let normalized = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+    normalized
+        .strip_suffix(AI_COVE_HOST_SUFFIX)
+        .is_some_and(|prefix| !prefix.is_empty() && !prefix.ends_with('.'))
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -455,6 +449,36 @@ base_url = "https://example.com/v1"
         assert_eq!(result.provider, "custom");
         assert_eq!(result.upstream.as_str(), "https://api.ai-cove.com/v1");
         assert_eq!(result.compatibility, UpstreamCompatibility::AiCove);
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_classifies_ai_cove_subdomains_by_host_boundary() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let path = root.path().join("config.toml");
+        for (base_url, expected) in [
+            (
+                "https://long-api.ai-cove.com/v1",
+                UpstreamCompatibility::AiCove,
+            ),
+            ("https://API.AI-COVE.COM./v1", UpstreamCompatibility::AiCove),
+            (
+                "https://api.ai-cove.com.evil.example/v1",
+                UpstreamCompatibility::OtherHttps,
+            ),
+            (
+                "https://not-ai-cove.com/v1",
+                UpstreamCompatibility::OtherHttps,
+            ),
+        ] {
+            fs::write(
+                &path,
+                format!(
+                    "model_provider = \"custom\"\n\n[model_providers.custom]\nbase_url = \"{base_url}\"\n"
+                ),
+            )?;
+            assert_eq!(preflight(&path)?.compatibility, expected, "{base_url}");
+        }
         Ok(())
     }
 
@@ -532,10 +556,41 @@ base_url = "https://external.example/v1"
 "#,
         )?;
 
-        assert!(!owns_current_value(&managed)?);
+        assert_eq!(managed_ownership(&managed)?, ManagedOwnership::BaseUrlLost);
         assert_eq!(restore(&managed, &recovery_path)?, RestoreOutcome::Conflict);
         assert!(fs::read_to_string(&config_path)?.contains("https://external.example/v1"));
         assert!(!recovery_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn managed_ownership_classifies_websocket_conflict() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_path = root.path().join("config.toml");
+        let recovery_path = root.path().join("recovery.json");
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.ai-cove.com/v1"
+supports_websockets = false
+"#,
+        )?;
+        let managed = take_over(
+            &preflight(&config_path)?,
+            "http://127.0.0.1:44175/v1",
+            true,
+            &recovery_path,
+        )?;
+        let source = fs::read_to_string(&config_path)?
+            .replace("supports_websockets = true", "supports_websockets = false");
+        fs::write(&config_path, source)?;
+
+        assert_eq!(
+            managed_ownership(&managed)?,
+            ManagedOwnership::WebSocketLost
+        );
         Ok(())
     }
 

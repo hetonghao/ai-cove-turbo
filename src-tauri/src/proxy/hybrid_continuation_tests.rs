@@ -10,21 +10,36 @@ async fn send_continuation(client: &mut ClientWebSocket) -> io::Result<()> {
 }
 
 #[tokio::test]
-async fn continuation_waits_for_the_first_available_pooled_websocket() -> io::Result<()> {
+async fn continuation_without_handoff_returns_local_state_missing() -> io::Result<()> {
     let server = FixtureServer::start(FixtureConfig {
-        private: PrivateBehavior::FailOnce,
+        private: PrivateBehavior::Stateful,
         delay_http: false,
     })
     .await?;
-    let (proxy, _) = start_test_proxy(&server).await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
+    server.fixture.wait_ready(6).await?;
 
     send_continuation(&mut client).await?;
-    server.fixture.wait_private(7).await?;
-    server.fixture.wait_messages(1).await?;
-    assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts(server.fixture.counts().await, 7, 1, 0);
+    let error = next_event_value(&mut client).await?;
+    assert_eq!(error.get("type"), Some(&Value::from("error")));
+    assert_eq!(
+        error.pointer("/error/code"),
+        Some(&Value::from("previous_response_not_found"))
+    );
+    assert_eq!(
+        error.pointer("/error/message"),
+        Some(&Value::from(
+            "Previous response is not available on this websocket"
+        ))
+    );
+    assert_counts(server.fixture.counts().await, 6, 0, 0);
+    assert_eq!(metrics.snapshot().hybrid_ws, 0);
+    assert!(metrics.traffic_snapshot().recent_requests.is_empty());
+    let snapshot = proxy.connection_snapshot().await;
+    assert_eq!(snapshot.current_connections, 6);
+    assert_eq!(snapshot.prewarm, 6);
 
     client
         .send(Message::Ping(b"still-open".to_vec().into()))
@@ -52,7 +67,7 @@ async fn duplicate_terminal_tail_keeps_session_websocket_reusable() -> io::Resul
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(7).await?;
+    server.fixture.wait_ready(6).await?;
 
     for expected in 1..=3 {
         send_create(&mut client).await?;
@@ -64,6 +79,7 @@ async fn duplicate_terminal_tail_keeps_session_websocket_reusable() -> io::Resul
             Some(&Value::from(format!("response-{expected}")))
         );
     }
+    server.fixture.wait_ready(7).await?;
     assert_counts(server.fixture.counts().await, 7, 3, 0);
 
     drop(client);

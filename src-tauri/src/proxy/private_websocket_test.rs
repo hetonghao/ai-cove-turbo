@@ -134,8 +134,8 @@ async fn private_connections_reuse_shared_tls_config() -> io::Result<()> {
         .with_no_client_auth();
     let shared = PrivateTlsConfig::new(Arc::new(config));
     let headers = axum::http::HeaderMap::new();
-    let first = connect_private(&target, &headers, &shared).await.is_some();
-    let second = connect_private(&target, &headers, &shared).await.is_some();
+    let first = connect_private(&target, &headers, &shared).await.is_ok();
+    let second = connect_private(&target, &headers, &shared).await.is_ok();
     let server_result = server
         .join()
         .map_err(|_| io::Error::other("test server panicked"))?;

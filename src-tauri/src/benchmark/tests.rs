@@ -176,6 +176,7 @@ fn http_and_websocket_payloads_share_the_same_workload_contract() -> BenchmarkRe
 #[test]
 fn requires_complete_four_path_rotation_cycles() -> BenchmarkResult<()> {
     assert_eq!(super::settings::validate_runs(4)?, 4);
+    assert_eq!(super::settings::validate_runs(8)?, 8);
     assert_eq!(super::settings::validate_runs(12)?, 12);
     assert!(super::settings::validate_runs(3).is_err());
     assert!(super::settings::validate_runs(1).is_err());

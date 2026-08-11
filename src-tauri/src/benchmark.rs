@@ -6,6 +6,7 @@ mod calibration;
 mod live;
 mod report;
 mod settings;
+mod stability;
 
 pub(super) type BenchmarkResult<T> = Result<T, io::Error>;
 

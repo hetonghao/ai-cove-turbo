@@ -5,6 +5,8 @@
   // License: MIT + Commons Clause; see ../THIRD_PARTY_NOTICES.md.
   const MAX_STRANDS = 5;
   const MAX_COLORS = 3;
+  const BASE_INTENSITY = 0.4;
+  const PULSE_DURATION = 360;
   const VERTEX_SHADER = `#version 300 es
 in vec2 position;
 void main() {
@@ -146,6 +148,8 @@ void main() {
   let count = 0;
   let frame = 0;
   let sized = false;
+  let pulseStrength = 0;
+  let pulseStartedAt = 0;
 
   gl.clearColor(0, 0, 0, 0);
   gl.enable(gl.BLEND);
@@ -161,20 +165,29 @@ void main() {
   gl.uniform1f(uniforms.taper, 3);
   gl.uniform1f(uniforms.spread, 1);
   gl.uniform1f(uniforms.hueShift, 0);
-  gl.uniform1f(uniforms.intensity, 0.4);
+  gl.uniform1f(uniforms.intensity, BASE_INTENSITY);
   gl.uniform1f(uniforms.opacity, 1);
   gl.uniform1f(uniforms.scale, 1.875);
   gl.uniform1f(uniforms.saturation, 2);
 
   function draw(time = 0) {
     if (!sized) return;
+    if (pulseStrength && !pulseStartedAt) pulseStartedAt = time;
+    const pulseProgress = pulseStrength ? Math.min(1, Math.max(0, (time - pulseStartedAt) / PULSE_DURATION)) : 1;
+    const pulseEnergy = pulseStrength * (1 - pulseProgress) ** 2;
+    if (pulseProgress >= 1) pulseStrength = 0;
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform1f(uniforms.time, time * 0.001);
+    gl.uniform1f(uniforms.intensity, BASE_INTENSITY + pulseEnergy);
     gl.uniform1i(uniforms.strandCount, count);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
   function animate(time) {
+    if (document.hidden) {
+      frame = 0;
+      return;
+    }
     draw(time);
     frame = window.requestAnimationFrame(animate);
   }
@@ -182,6 +195,11 @@ void main() {
   function restart() {
     if (frame) window.cancelAnimationFrame(frame);
     frame = 0;
+    if (document.hidden) return;
+    if (reducedMotion.matches) {
+      pulseStrength = 0;
+      pulseStartedAt = 0;
+    }
     if (!count || reducedMotion.matches || !sized) draw();
     else frame = window.requestAnimationFrame(animate);
   }
@@ -208,18 +226,32 @@ void main() {
     restart();
   }
 
+  function pulse(value) {
+    if (document.hidden || reducedMotion.matches || canvas.closest?.("[hidden]")) return;
+    const ratio = Math.min(1, Math.max(0, Number(value) || 0));
+    pulseStrength = 0.08 + ratio * 0.22;
+    pulseStartedAt = 0;
+    restart();
+  }
+
   if (window.ResizeObserver) new window.ResizeObserver(resize).observe(canvas);
   else window.addEventListener("resize", resize, { passive: true });
   reducedMotion.addEventListener?.("change", restart);
   resize();
   setCount(canvas.dataset.count);
-  return { setCount };
+  return { pulse, restart, setCount };
   }).filter(Boolean);
 
   if (!renderers.length) return;
   window.TurboStrands = {
+    pulse(value) {
+      renderers.forEach((renderer) => renderer.pulse(value));
+    },
     setCount(value) {
       renderers.forEach((renderer) => renderer.setCount(value));
     },
   };
+  document.addEventListener?.("visibilitychange", () => {
+    renderers.forEach((renderer) => renderer.restart());
+  });
 })();

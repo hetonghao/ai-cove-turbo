@@ -27,7 +27,11 @@ pub(super) async fn start_legacy_response(
         )
         .await;
         session.state.metrics.record_websocket_closed();
-        session.state.hybrid_pool.discard(&session.pool_scope).await;
+        session
+            .state
+            .hybrid_pool
+            .release_session_connection(&session.pool_scope, session.pool_id, None)
+            .await;
         return false;
     }
 
@@ -65,7 +69,7 @@ async fn take_private(session: &mut Session) -> Option<PrivateWebSocket> {
     session
         .state
         .hybrid_pool
-        .checkout_wait(&session.pool_scope, Duration::from_secs(2))
+        .checkout_wait(&session.pool_scope, session.pool_id, Duration::from_secs(2))
         .await
 }
 

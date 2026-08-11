@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 #[cfg(test)]
 #[path = "private_websocket_test.rs"]
 mod tests;
@@ -11,7 +11,8 @@ use tokio::{net::TcpStream, task::JoinError};
 use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
     tungstenite::{
-        Bytes, client::IntoClientRequest, handshake::derive_accept_key, protocol::WebSocketConfig,
+        Bytes, Error as WebSocketError, client::IntoClientRequest, handshake::derive_accept_key,
+        protocol::WebSocketConfig,
     },
 };
 use url::Url;
@@ -78,6 +79,31 @@ impl PrivateTlsConfig {
 
 pub(in crate::proxy) type PrivateUpstream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrivateConnectFailure {
+    InvalidTarget,
+    Timeout,
+    Http(u16),
+    Network,
+    Tls,
+    Protocol,
+    PrivateProtocolRejected,
+}
+
+impl fmt::Display for PrivateConnectFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidTarget => formatter.write_str("目标地址无效"),
+            Self::Timeout => formatter.write_str("握手超时"),
+            Self::Http(status) => write!(formatter, "HTTP {status}"),
+            Self::Network => formatter.write_str("网络连接失败"),
+            Self::Tls => formatter.write_str("TLS 握手失败"),
+            Self::Protocol => formatter.write_str("WebSocket 协议失败"),
+            Self::PrivateProtocolRejected => formatter.write_str("上游未接受 Turbo 私有协议"),
+        }
+    }
+}
+
 pub(super) fn client_upgrade_response(
     headers: &HeaderMap,
 ) -> Result<Response<Body>, PrivateProtocolError> {
@@ -116,17 +142,20 @@ pub(super) async fn connect_private(
     target: &Url,
     client_headers: &HeaderMap,
     tls_config: &PrivateTlsConfig,
-) -> Option<PrivateUpstream> {
+) -> Result<PrivateUpstream, PrivateConnectFailure> {
     let mut target = target.clone();
     let websocket_scheme = match target.scheme() {
         "http" => "ws",
         "https" => "wss",
-        _ => return None,
+        _ => return Err(PrivateConnectFailure::InvalidTarget),
     };
-    if target.set_scheme(websocket_scheme).is_err() {
-        return None;
-    }
-    let mut request = target.as_str().into_client_request().ok()?;
+    target
+        .set_scheme(websocket_scheme)
+        .map_err(|()| PrivateConnectFailure::InvalidTarget)?;
+    let mut request = target
+        .as_str()
+        .into_client_request()
+        .map_err(|_| PrivateConnectFailure::InvalidTarget)?;
     let hop_by_hop = hop_by_hop_headers(client_headers);
     for (name, value) in client_headers {
         if !hop_by_hop.contains(name) && !is_client_handshake_header(name) {
@@ -147,8 +176,8 @@ pub(super) async fn connect_private(
         connect_async_tls_with_config(request, Some(config), false, Some(tls_config.connector())),
     )
     .await
-    .ok()?
-    .ok()?;
+    .map_err(|_| PrivateConnectFailure::Timeout)?
+    .map_err(classify_connect_failure)?;
     let (mut stream, response) = connected;
     let accepted = response
         .headers()
@@ -160,9 +189,26 @@ pub(super) async fn connect_private(
             .contains_key(header::SEC_WEBSOCKET_EXTENSIONS);
     if !accepted {
         let _ = tokio::time::timeout(PRIVATE_CLOSE_TIMEOUT, stream.close(None)).await;
-        return None;
+        return Err(PrivateConnectFailure::PrivateProtocolRejected);
     }
-    Some(stream)
+    Ok(stream)
+}
+
+fn classify_connect_failure(error: WebSocketError) -> PrivateConnectFailure {
+    match error {
+        WebSocketError::Http(response) => PrivateConnectFailure::Http(response.status().as_u16()),
+        WebSocketError::ConnectionClosed
+        | WebSocketError::AlreadyClosed
+        | WebSocketError::Io(_) => PrivateConnectFailure::Network,
+        WebSocketError::Tls(_) => PrivateConnectFailure::Tls,
+        WebSocketError::Capacity(_)
+        | WebSocketError::Protocol(_)
+        | WebSocketError::WriteBufferFull(_)
+        | WebSocketError::Utf8(_)
+        | WebSocketError::AttackAttempt
+        | WebSocketError::Url(_)
+        | WebSocketError::HttpFormat(_) => PrivateConnectFailure::Protocol,
+    }
 }
 
 pub(super) fn is_client_handshake_header(name: &header::HeaderName) -> bool {

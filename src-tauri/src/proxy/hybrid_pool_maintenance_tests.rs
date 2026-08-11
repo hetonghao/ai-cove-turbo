@@ -63,19 +63,35 @@ async fn checkout_remains_available_while_keepalive_probe_waits() -> io::Result<
     let pool = HybridPool::new(PrivateTlsConfig::new(Arc::new(tls_config)), metrics);
     let target = Url::parse(&format!("http://{address}/v1/responses")).map_err(io::Error::other)?;
     let scope = HybridScope::new(&target, &HeaderMap::new());
-    pool.inner.state.lock().await.scopes.insert(
-        scope.clone(),
-        ScopeState {
-            target,
-            headers: HeaderMap::new(),
-            initialized: true,
-            active_local: 0,
-            leased: 0,
-            connecting: 4,
-            probing: 0,
-            idle: vec![first_client, second_client],
-        },
-    );
+    let session_id = {
+        let mut state = pool.inner.state.lock().await;
+        let scope_fingerprint = scope.fingerprint(state.scopes.hasher());
+        let session_id = state.register_session(scope_fingerprint);
+        state.scopes.insert(
+            scope.clone(),
+            ScopeState {
+                target,
+                headers: HeaderMap::new(),
+                diagnostics: ScopeDiagnostics::default(),
+                initialized: true,
+                active_local: 0,
+                leased: HashMap::new(),
+                connecting: 4,
+                probing: 0,
+                idle: vec![
+                    PoolConnection {
+                        id: 1,
+                        upstream: first_client,
+                    },
+                    PoolConnection {
+                        id: 2,
+                        upstream: second_client,
+                    },
+                ],
+            },
+        );
+        session_id
+    };
     let maintaining = tokio::spawn({
         let pool = pool.clone();
         let scope = scope.clone();
@@ -85,7 +101,7 @@ async fn checkout_remains_available_while_keepalive_probe_waits() -> io::Result<
     });
     ping_wait.await.map_err(io::Error::other)?;
 
-    let available = pool.checkout(&scope).await.is_some();
+    let available = pool.checkout(&scope, session_id).await.is_some();
     let _ = release.send(());
     maintaining.await.map_err(io::Error::other)?;
     first_server_task.await.map_err(io::Error::other)??;

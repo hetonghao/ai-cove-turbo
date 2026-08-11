@@ -188,11 +188,12 @@ impl Metrics {
         }
     }
 
-    fn record_request_route(&self, route: traffic::TrafficRoute) {
-        self.traffic.record_route(route);
-    }
-
     fn record_http(&self, record: HttpRequestMetric<'_>) {
+        let result = if record.status >= 400 {
+            traffic::TrafficResult::Error
+        } else {
+            record.result
+        };
         self.requests.fetch_add(1, Ordering::Relaxed);
         self.raw_bytes
             .fetch_add(record.raw_bytes as u64, Ordering::Relaxed);
@@ -201,7 +202,7 @@ impl Metrics {
         if record.compressed {
             self.compression_verified.store(true, Ordering::Relaxed);
         }
-        if record.result == traffic::TrafficResult::Fallback {
+        if result == traffic::TrafficResult::Fallback {
             self.http_fallbacks.fetch_add(1, Ordering::Relaxed);
         }
         self.traffic.record(traffic::TrafficRecord {
@@ -211,11 +212,7 @@ impl Metrics {
             raw_bytes: record.raw_bytes as u64,
             sent_bytes: record.sent_bytes as u64,
             transport: traffic::TrafficTransport::Http,
-            result: if record.status >= 400 {
-                traffic::TrafficResult::Error
-            } else {
-                record.result
-            },
+            result,
             route: Some(record.route),
             failure_phase: None,
             failure_reason: None,
@@ -296,26 +293,36 @@ impl Metrics {
         compressed: bool,
         route: Option<traffic::TrafficRoute>,
     ) {
+        self.record_websocket_outcome(
+            traffic::TrafficRecord {
+                timestamp_ms: traffic::now_ms(),
+                status: StatusCode::SWITCHING_PROTOCOLS.as_u16(),
+                path,
+                raw_bytes: raw_bytes as u64,
+                sent_bytes: sent_bytes as u64,
+                transport: traffic::TrafficTransport::Ws,
+                result: traffic::TrafficResult::Success,
+                route,
+                failure_phase: None,
+                failure_reason: None,
+            },
+            compressed,
+        );
+    }
+
+    fn record_websocket_outcome(&self, record: traffic::TrafficRecord<'_>, compressed: bool) {
         self.websocket_messages.fetch_add(1, Ordering::Relaxed);
         self.websocket_raw_bytes
-            .fetch_add(raw_bytes as u64, Ordering::Relaxed);
+            .fetch_add(record.raw_bytes, Ordering::Relaxed);
         self.websocket_sent_bytes
-            .fetch_add(sent_bytes as u64, Ordering::Relaxed);
+            .fetch_add(record.sent_bytes, Ordering::Relaxed);
         if compressed {
             self.websocket_zstd_verified.store(true, Ordering::Relaxed);
         }
-        self.record_websocket_traffic(traffic::TrafficRecord {
-            timestamp_ms: traffic::now_ms(),
-            status: StatusCode::SWITCHING_PROTOCOLS.as_u16(),
-            path,
-            raw_bytes: raw_bytes as u64,
-            sent_bytes: sent_bytes as u64,
-            transport: traffic::TrafficTransport::Ws,
-            result: traffic::TrafficResult::Success,
-            route,
-            failure_phase: None,
-            failure_reason: None,
-        });
+        if record.result == traffic::TrafficResult::Error {
+            self.record_websocket_failure();
+        }
+        self.record_websocket_traffic(record);
     }
 
     fn record_websocket_traffic(&self, record: traffic::TrafficRecord<'_>) {
@@ -457,22 +464,10 @@ pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, Pr
         let _ = server.await;
     });
 
-    let health_url = format!("http://{address}/healthz");
-    let client = reqwest::Client::new();
-    let mut healthy = false;
-    for _ in 0..20 {
-        match client.get(&health_url).send().await {
-            Ok(response) if response.status().is_success() => {
-                healthy = true;
-                break;
-            }
-            _ => tokio::time::sleep(Duration::from_millis(10)).await,
-        }
-    }
-    if !healthy {
+    if let Err(error) = wait_for_health(address).await {
         let _ = shutdown_tx.send(());
         let _ = task.await;
-        return Err(ProxyError::HealthCheck);
+        return Err(error);
     }
 
     Ok(ProxyHandle {
@@ -498,6 +493,18 @@ async fn bind_preferred(ports: &[u16]) -> Result<TcpListener, ProxyError> {
     })))
 }
 
+async fn wait_for_health(address: SocketAddr) -> Result<(), ProxyError> {
+    let health_url = format!("http://{address}/healthz");
+    let client = reqwest::Client::new();
+    for _ in 0..20 {
+        match client.get(&health_url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            _ => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+    Err(ProxyError::HealthCheck)
+}
+
 async fn health() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -516,9 +523,6 @@ async fn proxy_request(
     if is_websocket_upgrade(request.headers()) {
         return proxy_websocket(state, &mut request).await;
     }
-    state
-        .metrics
-        .record_request_route(HttpTraffic::DIRECT.route);
     proxy_http(state, request, HttpTraffic::DIRECT).await
 }
 
@@ -870,22 +874,155 @@ mod tests {
     type CapturedPrivateMessages = (CapturedPrivateMessage, CapturedPrivateMessage);
 
     #[test]
-    fn persisted_routes_restore_metrics_snapshot() -> Result<(), Box<dyn Error>> {
+    fn one_http_outcome_updates_atomic_event_and_persisted_route_once() -> Result<(), Box<dyn Error>>
+    {
+        // Given: one direct HTTP outcome and no route side-channel write.
         let root = tempfile::tempdir()?;
         let path = root.path().join("traffic.jsonl");
         let metrics = Metrics::default();
-        metrics.record_request_route(traffic::TrafficRoute::HybridWs);
-        metrics.record_request_route(traffic::TrafficRoute::HybridColdStartHttp);
-        metrics.record_request_route(traffic::TrafficRoute::HybridRecoveryHttp);
-        metrics.record_request_route(traffic::TrafficRoute::DirectHttp);
+
+        // When: the existing Metrics seam records the completed outcome once.
+        metrics.record_http(HttpRequestMetric {
+            path: "/v1/responses",
+            status: 201,
+            raw_bytes: 100,
+            sent_bytes: 50,
+            compressed: true,
+            result: traffic::TrafficResult::Success,
+            route: traffic::TrafficRoute::DirectHttp,
+        });
         metrics.save_traffic(&path)?;
 
-        let snapshot = Metrics::load_traffic(&path).snapshot();
+        // Then: atomics, recent traffic, and persistence agree on one outcome.
+        let live = metrics.snapshot();
+        assert_eq!(live.requests, 1);
+        assert_eq!(live.direct_http, 1);
+        assert_eq!(metrics.traffic_snapshot().recent_requests.len(), 1);
+        assert_eq!(Metrics::load_traffic(&path).snapshot().direct_http, 1);
 
-        assert_eq!(snapshot.hybrid_ws, 1);
-        assert_eq!(snapshot.hybrid_cold_start_http, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_http_error_updates_route_without_incrementing_fallback()
+    -> Result<(), Box<dyn Error>> {
+        // Given: a Hybrid recovery request whose final HTTP status is an error.
+        let metrics = Metrics::default();
+
+        // When: the final outcome crosses the Metrics seam once.
+        metrics.record_http(HttpRequestMetric {
+            path: "/v1/responses",
+            status: 502,
+            raw_bytes: 100,
+            sent_bytes: 50,
+            compressed: false,
+            result: traffic::TrafficResult::Fallback,
+            route: traffic::TrafficRoute::HybridRecoveryHttp,
+        });
+
+        // Then: the route is retained without contradicting fallback telemetry.
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.http_fallbacks, 0);
         assert_eq!(snapshot.hybrid_recovery_http, 1);
-        assert_eq!(snapshot.direct_http, 1);
+        let event = metrics
+            .traffic_snapshot()
+            .recent_requests
+            .into_iter()
+            .next()
+            .ok_or("recovery HTTP traffic event missing")?;
+        let event = serde_json::to_value(event)?;
+        assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
+        Ok(())
+    }
+
+    #[test]
+    fn hybrid_http_success_outcomes_preserve_route_classification() -> Result<(), Box<dyn Error>> {
+        for (traffic, cold_start, recovery, fallbacks) in [
+            (HttpTraffic::HYBRID_COLD_START, 1, 0, 0),
+            (HttpTraffic::HYBRID_RECOVERY, 0, 1, 1),
+        ] {
+            // Given: one successful Hybrid HTTP outcome.
+            let metrics = Metrics::default();
+
+            // When: the final outcome crosses the Metrics seam once.
+            metrics.record_http(HttpRequestMetric {
+                path: "/v1/responses",
+                status: 201,
+                raw_bytes: 100,
+                sent_bytes: 50,
+                compressed: false,
+                result: traffic.result,
+                route: traffic.route,
+            });
+
+            // Then: its existing route and fallback classification remain intact.
+            let snapshot = metrics.snapshot();
+            assert_eq!(snapshot.requests, 1);
+            assert_eq!(snapshot.hybrid_cold_start_http, cold_start);
+            assert_eq!(snapshot.hybrid_recovery_http, recovery);
+            assert_eq!(snapshot.http_fallbacks, fallbacks);
+            let event = metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("Hybrid HTTP traffic event missing")?;
+            let event = serde_json::to_value(event)?;
+            assert_eq!(
+                event.get("result"),
+                Some(&serde_json::to_value(traffic.result)?)
+            );
+            assert_eq!(
+                event.get("route"),
+                Some(&serde_json::to_value(traffic.route)?)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn one_hybrid_ws_active_failure_records_one_final_outcome() -> Result<(), Box<dyn Error>> {
+        // Given: one sent Hybrid WS request that later fails while active.
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("traffic.jsonl");
+        let metrics = Metrics::default();
+
+        // When: its final outcome crosses the Metrics seam once.
+        metrics.record_websocket_outcome(
+            traffic::TrafficRecord {
+                timestamp_ms: traffic::now_ms(),
+                status: 1011,
+                path: "/v1/responses",
+                raw_bytes: 100,
+                sent_bytes: 50,
+                transport: traffic::TrafficTransport::Ws,
+                result: traffic::TrafficResult::Error,
+                route: Some(traffic::TrafficRoute::HybridWs),
+                failure_phase: Some(traffic::FailurePhase::HybridActive),
+                failure_reason: Some("upstream failed after send"),
+            },
+            true,
+        );
+        metrics.save_traffic(&path)?;
+
+        // Then: message, failure, event, and persisted route each advance once.
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.websocket_messages, 1);
+        assert_eq!(snapshot.websocket_failures, 1);
+        assert_eq!(snapshot.websocket_raw_bytes, 100);
+        assert_eq!(snapshot.websocket_sent_bytes, 50);
+        assert!(snapshot.websocket_zstd_verified);
+        assert_eq!(snapshot.hybrid_ws, 1);
+        let events = metrics.traffic_snapshot().recent_requests;
+        assert_eq!(events.len(), 1);
+        let event = serde_json::to_value(events.into_iter().next())?;
+        assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
+        assert_eq!(
+            event.get("failurePhase"),
+            Some(&serde_json::json!("hybridActive"))
+        );
+        assert_eq!(Metrics::load_traffic(&path).snapshot().hybrid_ws, 1);
         Ok(())
     }
 

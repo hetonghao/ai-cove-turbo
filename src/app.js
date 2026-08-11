@@ -12,6 +12,7 @@
   const ROLLING_WINDOWS = [1, 10, 60, 1440];
   const RECENT_CLOSED_LIMIT = 8;
   const CONNECTION_DENSITIES = ["full", "compact", "state-only"];
+  const CONNECTION_DRAG_THRESHOLD_PX = 36;
   const LIVE_TAIL_THRESHOLD_PX = 24;
   const invoke = window.__TAURI__?.core?.invoke;
   const telemetry = window.TurboTelemetry;
@@ -168,8 +169,8 @@
   let connectionError = "";
   const sessionNumbers = new Map();
   const connectionNumbers = new Map();
-  const sessionTitles = new Map();
-  const sessionTitleRequests = new Set();
+  const sessionInfos = new Map();
+  const sessionInfoRequests = new Set();
   const closedSessionLayouts = new Map();
 
   const actions = {
@@ -397,7 +398,7 @@
   function playMotion(target, keyframes, duration) {
     if (!target?.animate || reduceMotion()) return;
     cancelMotion(target);
-    target.animate(keyframes, { duration, easing: motion.easing });
+    return target.animate(keyframes, { duration, easing: motion.easing });
   }
 
   function setConditionalVisibility(target, visible) {
@@ -513,14 +514,15 @@
     const direction = previousIndex < 0 || previousIndex === nextIndex ? 0 : Math.sign(nextIndex - previousIndex);
     all("[data-panel]").forEach((panel) => {
       const active = panel.dataset.panel === state.tab;
+      const motionTarget = panel.dataset.panel === "live" ? panel.querySelector?.(".c-console") || panel : panel;
       if (!active) {
-        cancelMotion(panel);
+        cancelMotion(motionTarget);
         panel.hidden = true;
         return;
       }
       panel.hidden = false;
       if (direction) {
-        playMotion(panel, [
+        playMotion(motionTarget, [
           { opacity: 0.94, transform: `translate3d(${direction * motion.shiftPx}px, 0, 0)`, filter: `blur(${motion.blurPx}px)` },
           { opacity: 1, transform: "translate3d(0, 0, 0)", filter: "blur(0)" },
         ], motion.pageMs);
@@ -532,9 +534,6 @@
     if (!TABS.includes(tab)) return;
     const previousTab = state.tab;
     state.tab = tab;
-    if (tab !== "live" && connectionPanelOpen) {
-      setConnectionPanelOpen(false, { restoreFocus: false });
-    }
     renderTab({ ...options, previousTab });
     if (tab === "live") renderLiveStream({ animateNew: false });
     if (tab === "statistics") renderStatistics();
@@ -569,8 +568,12 @@
     return `<i class="c-ws-icon" data-connection-state="${escapeHtml(status)}" aria-hidden="true"></i>`;
   }
 
-  function sessionIcon(status) {
-    return `<svg class="c-session-icon" data-connection-state="${escapeHtml(status)}" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 1.75h8a2 2 0 0 1 2 2v4.5a2 2 0 0 1-2 2H7l-3.25 2v-2H3a2 2 0 0 1-2-2v-4.5a2 2 0 0 1 2-2Z" /></svg>`;
+  function sessionIcon(status, isSubagent = false) {
+    const branch = isSubagent
+      ? '<circle class="c-session-icon__badge" cx="10.75" cy="3.25" r="2.35" /><path class="c-session-icon__branch" d="M9.75 2.4v1.65h2m0 0V5.1" />'
+      : "";
+    const kind = isSubagent ? "subagent" : "primary";
+    return `<svg class="c-session-icon" data-connection-state="${escapeHtml(status)}" data-session-kind="${kind}" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 1.75h8a2 2 0 0 1 2 2v4.5a2 2 0 0 1-2 2H7l-3.25 2v-2H3a2 2 0 0 1-2-2v-4.5a2 2 0 0 1 2-2Z" />${branch}</svg>`;
   }
 
   function connectionThreadId(item) {
@@ -629,22 +632,35 @@
 
   function sessionTitle(threadId) {
     if (!invoke) return "Preview 会话";
-    if (!sessionTitles.has(threadId)) return "读取中…";
-    return sessionTitles.get(threadId) || "未命名会话";
+    if (!sessionInfos.has(threadId)) return "读取中…";
+    return sessionInfos.get(threadId)?.name || "-";
   }
 
-  function requestSessionTitles(snapshot, recentClosed) {
+  function sessionIdentityDetails(threadId) {
+    const info = sessionInfos.get(threadId);
+    const details = [["会话名称", sessionTitle(threadId)]];
+    if (info?.isSubagent) {
+      details.push(["会话类型", "子会话"], ["所属父会话", info.parentName || "-"]);
+    }
+    return details;
+  }
+
+  function requestSessionInfos(snapshot, recentClosed) {
     if (!invoke) return;
     const items = [...snapshot.boundThreads, ...snapshot.transitions, ...recentClosed];
     new Set(items.map(connectionThreadId).filter(Boolean)).forEach((threadId) => {
-      if (sessionTitleRequests.has(threadId)) return;
-      sessionTitleRequests.add(threadId);
-      void invoke("get_codex_thread_title", { threadId })
-        .then((title) => {
-          sessionTitles.set(threadId, String(title || "").trim());
+      if (sessionInfoRequests.has(threadId)) return;
+      sessionInfoRequests.add(threadId);
+      void invoke("get_codex_thread_info", { threadId })
+        .then((info) => {
+          sessionInfos.set(threadId, info && typeof info === "object" ? {
+            name: String(info.name || "").trim(),
+            parentName: String(info.parentName || "").trim(),
+            isSubagent: Boolean(info.isSubagent),
+          } : null);
           if (connectionPanelOpen) renderConnectionInspector();
         })
-        .catch(() => sessionTitles.set(threadId, ""));
+        .catch(() => sessionInfos.set(threadId, null));
     });
   }
 
@@ -716,6 +732,7 @@
 
   function renderBoundSession(group) {
     const items = sortConnectionsByNumber(group);
+    const info = sessionInfos.get(group.threadId);
     const counts = items.reduce((result, item) => {
       const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
       result[activity] += 1;
@@ -738,7 +755,6 @@
           ["状态", activityLabel],
           ["所属会话", name],
           ["连接 ID", connectionId],
-          ["线程 ID", group.threadId],
           ["回收", reclaim],
         ],
         glyph: connectionActivityGlyph(activity),
@@ -747,18 +763,18 @@
       });
     }).join("");
     const sessionDetails = [
-      ["会话名称", sessionTitle(group.threadId)],
-      ["会话 ID", group.threadId],
+      ...sessionIdentityDetails(group.threadId),
       ["连接", `${items.length} 条`],
       ["传输", `发送 ${counts.up} · 接收 ${counts.down} · 空闲 ${counts.idle}`],
     ];
-    const summary = `${name}，${items.length} 条连接，发送 ${counts.up}，接收 ${counts.down}，空闲 ${counts.idle}`;
-    return `<div class="c-connection-session c-connection-session--bound" role="group" data-connection-key="bound:${escapeHtml(group.threadId)}" data-density="${connectionDensity(items.length)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(boundSessionStatus(group))}<strong>${name}</strong><span class="c-connection-session__count">×${items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><span class="c-connection-session__separator" aria-hidden="true"></span><div class="c-connection-session__connections">${details}</div></div>`;
+    const summary = `${name}，${info?.isSubagent ? "子会话，" : ""}${items.length} 条连接，发送 ${counts.up}，接收 ${counts.down}，空闲 ${counts.idle}`;
+    return `<div class="c-connection-session c-connection-session--bound" role="group" data-connection-key="bound:${escapeHtml(group.threadId)}" data-density="${connectionDensity(items.length)}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(boundSessionStatus(group), Boolean(info?.isSubagent))}<strong>${name}</strong><span class="c-connection-session__count">×${items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><span class="c-connection-session__separator" aria-hidden="true"></span><div class="c-connection-session__connections">${details}</div></div>`;
   }
 
   function renderClosedSession(group, status) {
     const name = sessionName(group.threadId);
     const items = sortConnectionsByNumber(group);
+    const info = sessionInfos.get(group.threadId);
     const events = items.map((item) => {
       const connectionId = observedConnectionId(item);
       return renderConnectionChip({
@@ -770,7 +786,6 @@
           ["关闭于", `${formatConnectionAge(item.agoSeconds)}前`],
           ["所属会话", name],
           ["连接 ID", connectionId],
-          ["线程 ID", group.threadId],
         ],
         connectionId,
         eventId: item.id,
@@ -780,15 +795,14 @@
     const abnormalCount = items.filter((item) => !item.normal).length;
     const sessionState = status === "closed" ? "已释放" : status === "pending" ? "恢复中" : "仍在绑定";
     const sessionDetails = [
-      ["会话名称", sessionTitle(group.threadId)],
-      ["会话 ID", group.threadId],
+      ...sessionIdentityDetails(group.threadId),
       ["会话状态", sessionState],
       ["关闭记录", `${items.length} 条`],
       ["异常", `${abnormalCount} 条`],
     ];
-    const summary = `${name}，${sessionState}，${items.length} 条近期关闭记录，异常 ${abnormalCount}`;
+    const summary = `${name}，${info?.isSubagent ? "子会话，" : ""}${sessionState}，${items.length} 条近期关闭记录，异常 ${abnormalCount}`;
     const density = closedSessionLayouts.get(group.threadId)?.density || "full";
-    return `<div class="c-connection-session c-connection-session--closed" role="group" data-connection-key="closed:${escapeHtml(group.threadId)}" data-auto-density data-density="${density}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(status)}<strong>${name}</strong><span class="c-connection-session__count">×${items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><span class="c-connection-session__separator" aria-hidden="true"></span><div class="c-connection-session__connections">${events}</div></div>`;
+    return `<div class="c-connection-session c-connection-session--closed" role="group" data-connection-key="closed:${escapeHtml(group.threadId)}" data-auto-density data-density="${density}" data-thread-id="${escapeHtml(group.threadId)}" aria-label="${escapeHtml(summary)}"><div class="c-connection-session__summary" tabindex="0" aria-label="${escapeHtml(summary)}">${sessionIcon(status, Boolean(info?.isSubagent))}<strong>${name}</strong><span class="c-connection-session__count">×${items.length}</span>${renderHoverDetail(name, sessionDetails)}</div><span class="c-connection-session__separator" aria-hidden="true"></span><div class="c-connection-session__connections">${events}</div></div>`;
   }
 
   function closedConnectionsFit(connections) {
@@ -849,13 +863,13 @@
     return `<details class="c-connection-transition" data-connection-key="transition:${escapeHtml(item.id)}" data-transition-id="${escapeHtml(item.id)}"><summary>${connectionIcon("pending")}<strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.stage)}</span></summary>${renderTransitionDetails(item, item.id)}</details>`;
   }
 
-  function renderConnectionInspector() {
+  function renderConnectionInspector({ force = false } = {}) {
     const panel = $("[data-connection-panel]");
     if (!panel) return;
     const snapshot = normalizeConnectionSnapshot(connectionSnapshot);
     const recentClosed = snapshot.recentClosed.slice(0, RECENT_CLOSED_LIMIT);
     reconcileConnectionNumbers(snapshot, recentClosed);
-    requestSessionTitles(snapshot, recentClosed);
+    requestSessionInfos(snapshot, recentClosed);
     const activityCounts = snapshot.boundThreads.reduce((counts, item) => {
       const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
       counts[activity] += 1;
@@ -867,8 +881,14 @@
     });
     const summaryLabel = `发送 ${activityCounts.up}，接收 ${activityCounts.down}，休眠 ${activityCounts.idle}`;
     const summaryTrigger = $("[data-connection-summary-trigger]");
-    if (summaryTrigger) summaryTrigger.setAttribute("aria-label", `${summaryLabel}，${connectionPanelOpen ? "收起" : "打开"}连接检查器`);
-    if (!connectionPanelOpen) return;
+    if (summaryTrigger) {
+      const actionLabel = connectionPanelOpen
+        ? "点击或上拉收起连接检查器，左右拖动可移动"
+        : "打开连接检查器";
+      summaryTrigger.setAttribute("aria-label", `${summaryLabel}，${actionLabel}`);
+      summaryTrigger.setAttribute("title", connectionPanelOpen ? "左右拖动移动 · 点击或上拉收起" : "打开连接检查器");
+    }
+    if (!connectionPanelOpen && !force) return;
     const boundGroups = groupConnectionsByThread(snapshot.boundThreads);
     const sessionStatuses = new Map(
       boundGroups.map((group) => [group.threadId, boundSessionStatus(group)]),
@@ -945,29 +965,88 @@
           ? "正在读取当前 WebSocket 连接…"
           : "";
     }
-    panel.classList?.toggle?.("is-overflowing", Number(panel.scrollHeight) > Number(panel.clientHeight) + 1);
   }
 
-  function setConnectionPanelOpen(open, { restoreFocus = true, trigger = null } = {}) {
-    connectionPanelOpen = Boolean(open);
+  function setConnectionPanelOpen(open, { restoreFocus = true, trigger = null, fromProgress = null } = {}) {
+    const summary = $("[data-connection-summary-trigger]");
     const panel = $("[data-connection-panel]");
     const dock = $("[data-connection-dock]");
+    const nextOpen = Boolean(open);
+    const dragProgress = Number.isFinite(fromProgress) ? Math.max(0, Math.min(1, fromProgress)) : null;
+    const panelWasVisible = Boolean(panel && !panel.hidden);
+    const previousSummaryTop = summary?.getBoundingClientRect?.().top;
+    cancelMotion(summary);
+    cancelMotion(panel);
+    panel?.classList?.remove?.("is-closing");
+    panel?.classList?.remove?.("is-drag-preview");
+    if (summary?.style) summary.style.transform = "";
+    if (panel?.style) {
+      panel.style.clipPath = "";
+      panel.style.opacity = "";
+      panel.style.filter = "";
+    }
+    connectionPanelOpen = nextOpen;
     if (connectionPanelOpen && trigger) connectionPanelTrigger = trigger;
     all('[data-action="toggle-connections"]').forEach((control) => {
       control.setAttribute("aria-expanded", String(connectionPanelOpen));
     });
-    if (dock) dock.dataset.open = String(connectionPanelOpen);
-    if (panel) panel.hidden = !connectionPanelOpen;
+    if (panel && connectionPanelOpen) panel.hidden = false;
+    if (panel && !connectionPanelOpen && panelWasVisible) panel.classList?.add?.("is-closing");
+    panel?.setAttribute?.("aria-hidden", String(!connectionPanelOpen));
+    if (dock) {
+      dock.dataset.open = String(connectionPanelOpen);
+      dock.dataset.phase = connectionPanelOpen ? "opening" : panelWasVisible ? "closing" : "closed";
+    }
     renderConnectionInspector();
+    const nextSummaryTop = summary?.getBoundingClientRect?.().top;
+    if (Number.isFinite(previousSummaryTop) && Number.isFinite(nextSummaryTop)) {
+      const shift = previousSummaryTop - nextSummaryTop;
+      if (Math.abs(shift) > 0.5) {
+        playMotion(summary, [
+          { transform: `translate3d(0, ${shift}px, 0)` },
+          { transform: `translate3d(0, ${shift * 0.18}px, 0)`, offset: 0.78 },
+          { transform: "translate3d(0, 0, 0)" },
+        ], motion.pageMs);
+      }
+    }
     if (panel) {
       if (connectionPanelOpen) {
-        playMotion(panel, [
-          { opacity: 0.72, transform: "translate3d(0, -8px, 0)", clipPath: "inset(0 0 100% 0 round 14px)", filter: "blur(3px)" },
-          { opacity: 1, transform: "translate3d(0, 0, 0)", clipPath: "inset(0 0 0 0 round 14px)", filter: "blur(0)" },
-        ], motion.revealMs);
-        $('[data-action="close-connections"]')?.focus?.();
+        const keyframes = dragProgress === null ? [
+          { opacity: 0.56, clipPath: "inset(0 0 100% 0 round 14px)", filter: "blur(2px)" },
+          { opacity: 0.96, clipPath: "inset(0 0 18% 0 round 14px)", filter: "blur(0.5px)", offset: 0.78 },
+          { opacity: 1, clipPath: "inset(0 0 0 0 round 14px)", filter: "blur(0)" },
+        ] : [
+          { opacity: 0.45 + 0.55 * dragProgress, clipPath: `inset(0 0 ${(1 - dragProgress) * 100}% 0 round 14px)`, filter: `blur(${(1 - dragProgress) * 2}px)` },
+          { opacity: 1, clipPath: "inset(0 0 0 0 round 14px)", filter: "blur(0)" },
+        ];
+        const animation = playMotion(panel, keyframes, motion.pageMs);
+        const finishOpening = () => {
+          if (connectionPanelOpen && dock) dock.dataset.phase = "open";
+        };
+        if (animation) animation.onfinish = finishOpening;
+        else finishOpening();
+        summary?.focus?.();
+      } else if (panelWasVisible) {
+        const keyframes = dragProgress === null ? [
+          { opacity: 1, clipPath: "inset(0 0 0 0 round 14px)", filter: "blur(0)" },
+          { opacity: 0.7, clipPath: "inset(0 0 82% 0 round 14px)", filter: "blur(1px)", offset: 0.78 },
+          { opacity: 0.45, clipPath: "inset(0 0 100% 0 round 14px)", filter: "blur(2px)" },
+        ] : [
+          { opacity: 0.45 + 0.55 * dragProgress, clipPath: `inset(0 0 ${(1 - dragProgress) * 100}% 0 round 14px)`, filter: `blur(${(1 - dragProgress) * 2}px)` },
+          { opacity: 0.45, clipPath: "inset(0 0 100% 0 round 14px)", filter: "blur(2px)" },
+        ];
+        const animation = playMotion(panel, keyframes, motion.pageMs);
+        const finishClosing = () => {
+          if (connectionPanelOpen) return;
+          panel.hidden = true;
+          panel.classList?.remove?.("is-closing");
+          if (dock) dock.dataset.phase = "closed";
+        };
+        if (animation) animation.onfinish = finishClosing;
+        else finishClosing();
       } else {
-        cancelMotion(panel);
+        panel.hidden = true;
+        if (dock) dock.dataset.phase = "closed";
       }
     }
     if (!connectionPanelOpen && restoreFocus) connectionPanelTrigger?.focus?.();
@@ -990,6 +1069,33 @@
     let drag = null;
     let suppressClick = false;
 
+    const applyVerticalProgress = (progress) => {
+      const value = Math.max(0, Math.min(1, progress));
+      const hiddenPercent = Math.round((1 - value) * 1_000) / 10;
+      drag.progress = value;
+      grip.style.transform = `translate3d(0, ${Math.round(drag.panelHeight * value)}px, 0)`;
+      drag.panel.style.clipPath = `inset(0 0 ${hiddenPercent}% 0 round 14px)`;
+      drag.panel.style.opacity = String(0.45 + 0.55 * value);
+      drag.panel.style.filter = `blur(${(1 - value) * 2}px)`;
+    };
+
+    const startVerticalDrag = () => {
+      const panel = $("[data-connection-panel]");
+      if (!panel) return false;
+      cancelMotion(grip);
+      cancelMotion(panel);
+      panel.classList?.remove?.("is-closing");
+      panel.hidden = false;
+      renderConnectionInspector({ force: true });
+      drag.panel = panel;
+      drag.panelHeight = Math.max(1, Number(panel.getBoundingClientRect?.().height) || Number(panel.scrollHeight) || 1);
+      panel.classList?.add?.("is-drag-preview");
+      panel.setAttribute?.("aria-hidden", String(!drag.startedOpen));
+      dock.dataset.phase = drag.startedOpen ? "dragging-close" : "dragging-open";
+      applyVerticalProgress(drag.startedOpen ? 1 : 0);
+      return true;
+    };
+
     grip.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       drag = {
@@ -998,6 +1104,9 @@
         startY: event.clientY,
         lastY: event.clientY,
         startOffset: connectionDockOffset,
+        startedOpen: connectionPanelOpen,
+        axis: null,
+        progress: connectionPanelOpen ? 1 : 0,
         moved: false,
       };
       dock.classList.add("is-dragging");
@@ -1008,32 +1117,48 @@
       const deltaX = event.clientX - drag.startX;
       const deltaY = event.clientY - drag.startY;
       drag.lastY = event.clientY;
-      drag.moved ||= Math.hypot(deltaX, deltaY) > 3;
-      setConnectionDockOffset(drag.startOffset + deltaX);
+      if (!drag.axis && Math.hypot(deltaX, deltaY) > 3) {
+        drag.axis = Math.abs(deltaX) > Math.abs(deltaY) ? "x" : "y";
+        if (drag.axis === "y" && !startVerticalDrag()) drag.axis = "x";
+      }
+      if (!drag.axis) return;
+      drag.moved = true;
+      if (drag.axis === "x") setConnectionDockOffset(drag.startOffset + deltaX);
+      else applyVerticalProgress((drag.startedOpen ? 1 : 0) + deltaY / drag.panelHeight);
       event.preventDefault();
     });
     const finishDrag = (event) => {
       if (!drag || event.pointerId !== drag.pointerId) return;
-      const upwardDistance = drag.startY - (Number.isFinite(event.clientY) ? event.clientY : drag.lastY);
-      suppressClick = drag.moved;
+      const completed = drag;
+      const endY = Number.isFinite(event.clientY) ? event.clientY : completed.lastY;
+      suppressClick = completed.moved;
       if (suppressClick) window.setTimeout?.(() => { suppressClick = false; }, 0);
       dock.classList.remove("is-dragging");
       grip.releasePointerCapture?.(event.pointerId);
       drag = null;
-      if (upwardDistance >= 28) setConnectionPanelOpen(false);
+      if (completed.axis === "y") {
+        const distance = endY - completed.startY;
+        const targetOpen = event.type === "pointercancel"
+          ? completed.startedOpen
+          : completed.startedOpen
+            ? distance > -CONNECTION_DRAG_THRESHOLD_PX
+            : distance >= CONNECTION_DRAG_THRESHOLD_PX;
+        setConnectionPanelOpen(targetOpen, {
+          trigger: targetOpen && !completed.startedOpen ? grip : null,
+          fromProgress: completed.progress,
+        });
+      }
     };
     grip.addEventListener("pointerup", finishDrag);
     grip.addEventListener("pointercancel", finishDrag);
     grip.addEventListener("click", (event) => {
-      if (suppressClick) {
-        suppressClick = false;
-        event.preventDefault();
-        return;
-      }
-      setConnectionPanelOpen(false);
+      if (!suppressClick) return;
+      suppressClick = false;
+      event.preventDefault();
+      event.stopPropagation?.();
     });
     grip.addEventListener("keydown", (event) => {
-      if (event.key === "ArrowUp") setConnectionPanelOpen(false);
+      if (event.key === "ArrowUp" && connectionPanelOpen) setConnectionPanelOpen(false);
       else if (event.key === "ArrowLeft") setConnectionDockOffset(connectionDockOffset - 24);
       else if (event.key === "ArrowRight") setConnectionDockOffset(connectionDockOffset + 24);
       else if (event.key === "Home") setConnectionDockOffset(0);
@@ -1088,9 +1213,10 @@
     const status = Number(request.status) || 0;
     const fallback = request.result === "fallback";
     const recovering = request.failurePhase === "hybridIdle";
+    const releaseRebuild = recovering && status === 1012 && request.failureReason === "service restarting";
     const failed = request.result === "error" && !recovering;
     const route = REQUEST_ROUTE_LABELS[request.route];
-    const transport = recovering ? (status === 1012 ? "Hybrid WS · 发布重建" : `${route ?? request.transport} · 连接恢复`) : failed ? `${route ?? request.transport} · 失败` : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
+    const transport = releaseRebuild ? "Hybrid WS · 发布重建" : recovering ? `${route ?? request.transport} · 连接恢复` : failed ? `${route ?? request.transport} · 失败` : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
     const detail = recovering && request.failureReason ? ` title="${escapeHtml(request.failureReason)}"` : "";
     return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}"${detail}>${escapeHtml(transport)}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
   }
@@ -1304,10 +1430,6 @@
         setConnectionPanelOpen(true, { trigger: control });
         if (!connectionHydrated) await refreshConnectionSnapshot();
       }
-      return;
-    }
-    if (action === "close-connections") {
-      setConnectionPanelOpen(false);
       return;
     }
     if (action === "open-config") {

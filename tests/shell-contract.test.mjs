@@ -93,9 +93,20 @@ test("macOS 原生按钮覆盖在应用导航内且不再显示独立标题栏",
   assert.equal(mainWindow.titleBarStyle, "Overlay");
   assert.equal(mainWindow.hiddenTitle, true);
   assert.deepEqual(mainWindow.trafficLightPosition, { x: 16, y: 19 });
-  assert.match(html, /<header class="turbo-shell__header" data-tauri-drag-region>/);
+  assert.match(html, /<header class="turbo-shell__header" data-tauri-drag-region="deep">/);
+  assert.doesNotMatch(html, /<(?:a|button)[^>]*data-tauri-drag-region/);
   assert.match(html, /classList\.add\("is-macos-overlay"\)/);
   assert.match(css, /\.is-macos-overlay \.turbo-shell__brand\s*\{[^}]*margin-left: var\(--turbo-titlebar-controls-inset\)/);
+});
+
+test("macOS 导航拖拽显式开放主窗口权限", async () => {
+  const capability = JSON.parse(
+    await readFile(new URL("../src-tauri/capabilities/main.json", import.meta.url), "utf8"),
+  );
+
+  assert.deepEqual(capability.windows, ["main"]);
+  assert.ok(capability.permissions.includes("core:default"));
+  assert.ok(capability.permissions.includes("core:window:allow-start-dragging"));
 });
 
 test("实时页把同类路径计数收进一行并仅在需要时显示侧栏滚动条", async () => {
@@ -193,9 +204,10 @@ test("实时 Strands 打开紧凑的非模态 WebSocket 连接检查器", async 
   const livePanel = html.slice(html.indexOf('id="panel-live"'), html.indexOf('id="panel-statistics"'));
 
   assert.match(livePanel, /data-action="toggle-connections"[\s\S]*aria-controls="connection-inspector"/);
-  assert.match(livePanel, /data-connection-dock[\s\S]*data-connection-summary-trigger[\s\S]*id="connection-inspector"/);
+  assert.match(livePanel, /data-connection-dock[\s\S]*id="connection-inspector"[\s\S]*data-connection-summary-trigger[^>]*data-connection-grip/);
   assert.equal(livePanel.match(/data-connection-summary="(?:up|down|idle)"/g)?.length, 3);
-  assert.match(livePanel, /data-connection-grip[\s\S]*向左右拖动可移动面板，点击或向上拖动可收起/);
+  assert.match(app, /点击或上拉收起连接检查器，左右拖动可移动/);
+  assert.doesNotMatch(livePanel, /close-connections|class="c-connection-grip"/);
   assert.match(livePanel, /id="connection-inspector"[\s\S]*aria-modal="false"/);
   assert.doesNotMatch(livePanel, /connection-backdrop|aria-modal="true"/);
 
@@ -232,9 +244,28 @@ test("开机自启动保持后台且发布流程收集真实 updater 包", async
   assert.equal(tauriConfig.app.windows[0].minHeight, tauriConfig.app.windows[0].height);
   assert.match(rust, /args_os\(\)[\s\S]*--background/);
   assert.match(workflow, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD/);
-  assert.match(workflow, /test -n "\$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"/);
+  assert.doesNotMatch(workflow, /test -n "\$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"/);
+  assert.match(workflow, /npx tauri build --ci --config tauri-release-config\.json/);
+  assert.match(workflow, /createUpdaterArtifacts: true/);
+  assert.match(workflow, /updater signature mismatch/);
   assert.match(workflow, /\.exe\.zip/);
   assert.match(workflow, /\.exe\.zip\.sig/);
+});
+
+test("桌面版本和 updater endpoint 由同一编译期契约驱动", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const cargo = await readFile(new URL("../src-tauri/Cargo.toml", import.meta.url), "utf8");
+  const tauriConfig = JSON.parse(
+    await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+  );
+  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+
+  assert.equal(packageJson.version, "0.1.0-beta.1");
+  assert.match(cargo, /^version = "0\.1\.0-beta\.1"$/m);
+  assert.equal(tauriConfig.version, "0.1.0-beta.1");
+  assert.equal(packageJson.scripts["desktop:release:local"], "node scripts/desktop-release.mjs");
+  assert.match(rust, /option_env!\("TURBO_UPDATER_ENDPOINT"\)/);
+  assert.match(rust, /https:\/\/ai-cove\.com\/downloads\/turbo\/latest\.json/);
 });
 
 test("macOS 状态栏使用紧凑的 Turbo 模板剪影", async () => {

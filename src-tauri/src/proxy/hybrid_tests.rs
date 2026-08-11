@@ -3,7 +3,10 @@ use tokio_tungstenite::tungstenite::{Message, protocol::frame::coding::CloseCode
 
 use super::{
     flow, http,
-    sse::{HttpFallback, SseParser, http_request_payload, is_terminal_event},
+    sse::{
+        HttpFallback, SseParser, http_request_payload, idle_event_diagnostic,
+        is_internal_idle_request_error, is_terminal_event,
+    },
 };
 
 #[test]
@@ -30,6 +33,37 @@ fn recognizes_done_and_terminal_response_events() {
     assert!(!is_terminal_event(
         br#"{"type":"response.output_text.delta"}"#
     ));
+}
+
+#[test]
+fn idle_error_diagnostic_keeps_safe_error_code_without_message() {
+    let diagnostic = idle_event_diagnostic(
+        br#"{"type":"error","error":{"code":"invalid_request","message":"must-not-persist"}}"#,
+        None,
+    );
+
+    assert_eq!(
+        diagnostic,
+        "空闲上游 WebSocket 收到意外二进制消息；解码=成功；事件=error；响应ID=缺失；错误码=invalid_request"
+    );
+    assert!(!diagnostic.contains("must-not-persist"));
+}
+
+#[test]
+fn internal_idle_request_error_requires_exact_orphan_signature() {
+    assert!(is_internal_idle_request_error(
+        br#"{"type":"error","error":{"code":"do_request_failed"}}"#
+    ));
+    for payload in [
+        br#"{"type":"error","response":{"id":"response-1"},"error":{"code":"do_request_failed"}}"#
+            .as_slice(),
+        br#"{"type":"error","response_id":"response-1","error":{"code":"do_request_failed"}}"#
+            .as_slice(),
+        br#"{"type":"error","error":{"code":"invalid_request"}}"#.as_slice(),
+        br#"{"type":"response.failed","error":{"code":"do_request_failed"}}"#.as_slice(),
+    ] {
+        assert!(!is_internal_idle_request_error(payload));
+    }
 }
 
 #[test]
@@ -124,7 +158,6 @@ async fn idle_1012_wins_over_queued_response_create() {
             },
         ))))),
         std::future::pending(),
-        true,
     )
     .await;
 
@@ -145,7 +178,6 @@ async fn idle_keepalive_wins_over_queued_response_create() {
         )))),
         std::future::pending(),
         std::future::ready(()),
-        true,
     )
     .await;
 

@@ -87,6 +87,34 @@ fn recent_requests_keep_only_the_latest_hundred() {
 }
 
 #[test]
+fn hybrid_idle_diagnostic_stays_internal_without_entering_recent_requests() {
+    // Given: 一条发生在 Hybrid 空闲连接上的恢复诊断。
+    let store = TrafficStore::default();
+    let mut diagnostic = record(21_000, 0);
+    diagnostic.status = 1002;
+    diagnostic.transport = TrafficTransport::Ws;
+    diagnostic.result = TrafficResult::Error;
+    diagnostic.route = Some(TrafficRoute::HybridWs);
+    diagnostic.failure_phase = Some(FailurePhase::HybridIdle);
+    diagnostic.failure_reason = Some("unexpected idle upstream binary message");
+
+    // When: 诊断进入持久化流量存储。
+    store.record(diagnostic);
+    let snapshot = store.snapshot_at(21_000);
+
+    // Then: 空闲诊断不进入用户请求列表，统计窗口和路由计数也不增加。
+    assert!(snapshot.recent_requests.is_empty());
+    assert!(
+        snapshot
+            .windows
+            .iter()
+            .flat_map(|window| &window.buckets)
+            .all(|bucket| bucket.requests() == 0)
+    );
+    assert_eq!(store.route_counts(), TrafficRouteCounts::default());
+}
+
+#[test]
 fn persisted_traffic_round_trips() -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;
     let path = root.path().join("traffic.jsonl");
@@ -137,10 +165,16 @@ fn persisted_route_counts_round_trip() -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;
     let path = root.path().join("traffic.jsonl");
     let store = TrafficStore::default();
-    store.record_route(TrafficRoute::HybridWs);
-    store.record_route(TrafficRoute::HybridColdStartHttp);
-    store.record_route(TrafficRoute::HybridRecoveryHttp);
-    store.record_route(TrafficRoute::DirectHttp);
+    for route in [
+        TrafficRoute::HybridWs,
+        TrafficRoute::HybridColdStartHttp,
+        TrafficRoute::HybridRecoveryHttp,
+        TrafficRoute::DirectHttp,
+    ] {
+        let mut outcome = record(21_000, 0);
+        outcome.route = Some(route);
+        store.record(outcome);
+    }
     store.save(&path)?;
 
     let restored = TrafficStore::load_at(&path, 21_000);

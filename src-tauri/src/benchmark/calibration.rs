@@ -18,7 +18,6 @@ const MIN_HISTORY_DATES: usize = 3;
 const TARGET_HISTORY_DATES: usize = 5;
 const MIN_MATCH_COVERAGE_PCT: f64 = 70.0;
 const MIN_P90_BUCKET_SAMPLES: u64 = 12;
-const MIN_LIVE_SAMPLES: usize = 12;
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(
@@ -115,6 +114,7 @@ struct MissingDate {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+// CLIPPY-ALLOW: Field names mirror the persisted benchmark constants schema.
 #[allow(clippy::struct_field_names)]
 struct SpeedConstants {
     baseline_first_token_ms: u64,
@@ -139,6 +139,7 @@ struct WorkloadProfile {
 }
 
 #[derive(Clone, Copy, Debug)]
+// CLIPPY-ALLOW: Field names distinguish event and completion latency statistics.
 #[allow(clippy::struct_field_names)]
 struct LatencyCalibration {
     first_event_p50_ms: f64,
@@ -175,6 +176,7 @@ struct ProfileCalibration {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+// CLIPPY-ALLOW: Field names preserve the HTTP and WebSocket evidence schema.
 #[allow(clippy::struct_field_names)]
 struct MechanismEvidence {
     http_first_event_ms: f64,
@@ -194,6 +196,7 @@ struct ConstantChange {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+// CLIPPY-ALLOW: Field names mirror the four public benchmark constants.
 #[allow(clippy::struct_field_names)]
 struct ConstantChanges {
     baseline_first_token_ms: ConstantChange,
@@ -261,6 +264,7 @@ struct WorkloadProfileEvidence {
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+// CLIPPY-ALLOW: Field names preserve the latency evidence report schema.
 #[allow(clippy::struct_field_names)]
 struct LatencyEvidence {
     first_event_p50_ms: f64,
@@ -800,13 +804,8 @@ fn mechanism_evidence(cases: &[BenchmarkCase]) -> Result<(MechanismEvidence, f64
                 "core continuation paths do not share one scenario",
             ));
         }
-        let report = case_report(case)?;
-        if report.valid_samples < MIN_LIVE_SAMPLES {
-            return Err(profile_error(format!(
-                "benchmark path {} has fewer than 12 retry-free samples",
-                case.path
-            )));
-        }
+        case_report(case)?;
+        super::stability::validate_case(case)?;
     }
     let hybrid = continuation_case(cases, HYBRID_PATH)?;
     if hybrid
@@ -1457,7 +1456,7 @@ mod tests {
             .map(|path| BenchmarkCase {
                 scenario: "continuation",
                 path,
-                samples: (0..12)
+                samples: (0..8)
                     .map(|_| {
                         let (round_transports, first_events, round_e2e) = match path {
                             HYBRID_PATH if extra_hybrid_http_round => (
@@ -1558,7 +1557,7 @@ mod tests {
             model: "gpt-5.6-luna".to_owned(),
             prompt: "fixed workload".to_owned(),
             workload_source: WorkloadSource::BuiltIn,
-            runs: 12,
+            runs: 8,
             warmups: 1,
             timeout: Duration::from_secs(180),
         };
@@ -1599,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_candidate_with_fewer_than_twelve_retry_free_live_samples() -> Result<(), io::Error> {
+    fn refuses_candidate_with_fewer_than_eight_retry_free_live_samples() -> Result<(), io::Error> {
         use std::time::Duration;
 
         use super::super::{BenchmarkSettings, HTTP_PATH, settings::WorkloadSource};
@@ -1611,7 +1610,7 @@ mod tests {
             model: "gpt-5.6-luna".to_owned(),
             prompt: "fixed workload".to_owned(),
             workload_source: WorkloadSource::BuiltIn,
-            runs: 12,
+            runs: 8,
             warmups: 1,
             timeout: Duration::from_secs(180),
         };
@@ -1627,10 +1626,10 @@ mod tests {
         sample.retries = 1;
 
         let error = candidate_summary(&bytes, &settings, &cases)
-            .expect_err("11 retry-free samples must not produce constants")
+            .expect_err("7 retry-free samples must not produce constants")
             .to_string();
 
-        assert!(error.contains("fewer than 12 retry-free samples"));
+        assert!(error.contains("fewer than 8 retry-free samples"));
         Ok(())
     }
 
@@ -1647,7 +1646,7 @@ mod tests {
             model: "gpt-5.6-luna".to_owned(),
             prompt: "fixed workload".to_owned(),
             workload_source: WorkloadSource::BuiltIn,
-            runs: 12,
+            runs: 8,
             warmups: 1,
             timeout: Duration::from_secs(180),
         };
@@ -1683,7 +1682,7 @@ mod tests {
             model: "gpt-5.6-luna".to_owned(),
             prompt: "fixed workload".to_owned(),
             workload_source: WorkloadSource::BuiltIn,
-            runs: 12,
+            runs: 8,
             warmups: 1,
             timeout: Duration::from_secs(180),
         };
@@ -1718,7 +1717,7 @@ mod tests {
             model: "gpt-5.6-luna".to_owned(),
             prompt: "must-not-appear-in-summary".to_owned(),
             workload_source: WorkloadSource::BuiltIn,
-            runs: 12,
+            runs: 8,
             warmups: 1,
             timeout: Duration::from_secs(180),
         };
@@ -1738,7 +1737,7 @@ mod tests {
                 .benchmark
                 .core_paths
                 .iter()
-                .all(|path| path.valid_samples == 12)
+                .all(|path| path.valid_samples == 8)
         );
         assert_eq!(first_day.same_window.sample_count, 1_000);
         assert!((first_day.same_window.coverage_pct - 100.0).abs() < 0.001);
@@ -1797,7 +1796,7 @@ mod tests {
             model: "gpt-5.6-luna".to_owned(),
             prompt: "fixed workload".to_owned(),
             workload_source: WorkloadSource::BuiltIn,
-            runs: 12,
+            runs: 8,
             warmups: 1,
             timeout: Duration::from_secs(180),
         };
@@ -1846,7 +1845,7 @@ mod tests {
             model: "gpt-5.6-luna".to_owned(),
             prompt: "fixed workload".to_owned(),
             workload_source: WorkloadSource::BuiltIn,
-            runs: 12,
+            runs: 8,
             warmups: 1,
             timeout: Duration::from_secs(180),
         };

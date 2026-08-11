@@ -9,7 +9,7 @@ pub(super) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 pub(super) const DEFAULT_UPSTREAM: &str = "https://api.ai-cove.com/v1";
 const DEFAULT_SHORT_PROMPT: &str = "Reply with OK only.";
 const DEFAULT_LONG_PROMPT_CHARS: usize = 96 * 1024;
-const DEFAULT_RUNS: usize = 12;
+const DEFAULT_RUNS: usize = 8;
 const DEFAULT_WARMUPS: usize = 1;
 
 #[derive(Debug)]

@@ -12,13 +12,60 @@ use url::Url;
 pub(super) enum PrivateBehavior {
     Delay,
     Fail,
-    FailOnce,
+    FailFirstBatch,
     HoldResponse,
+    HoldResponseNoPong,
+    IdleError,
     IdleMessage,
     IdleRestart,
+    IdleRestartDelayedReconnect,
+    IdleUnexpectedEof,
     ActiveFailure,
+    ActiveReplayRequired,
+    Stateful,
+    CancelledTerminal,
     Persistent,
     TerminalTail,
+}
+
+impl PrivateBehavior {
+    pub(super) const fn holds_response(self) -> bool {
+        matches!(self, Self::HoldResponse | Self::HoldResponseNoPong)
+    }
+
+    pub(super) const fn keeps_connection_open(self) -> bool {
+        matches!(
+            self,
+            Self::HoldResponse
+                | Self::HoldResponseNoPong
+                | Self::IdleError
+                | Self::IdleMessage
+                | Self::Stateful
+                | Self::Persistent
+                | Self::CancelledTerminal
+                | Self::TerminalTail
+        )
+    }
+
+    pub(super) const fn idle_close(self) -> Option<(u16, &'static str)> {
+        match self {
+            Self::IdleRestart | Self::IdleRestartDelayedReconnect => Some((1012, "restart")),
+            Self::IdleUnexpectedEof => Some((1011, "unexpected EOF")),
+            Self::Delay
+            | Self::Fail
+            | Self::FailFirstBatch
+            | Self::HoldResponse
+            | Self::HoldResponseNoPong
+            | Self::IdleError
+            | Self::IdleMessage
+            | Self::ActiveFailure
+            | Self::ActiveReplayRequired
+            | Self::Stateful
+            | Self::CancelledTerminal
+            | Self::Persistent
+            | Self::TerminalTail => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -32,8 +79,11 @@ pub(super) struct Counts {
     pub(super) private_handshakes: usize,
     pub(super) private_ready: usize,
     pub(super) private_messages: usize,
+    pub(super) active_ready: usize,
+    pub(super) active_pings: usize,
+    pub(super) private_normal_closes: usize,
     pub(super) http_requests: usize,
-    pub(super) idle_restarts: usize,
+    pub(super) close_frames_sent: usize,
 }
 
 pub(super) struct FixtureState {
@@ -61,8 +111,10 @@ enum CountKind {
     PrivateHandshake,
     PrivateReady,
     PrivateMessage,
+    ActiveReady,
+    PrivateNormalClose,
     Http,
-    IdleRestart,
+    CloseFrame,
 }
 
 impl FixtureServer {
@@ -118,12 +170,34 @@ impl Fixture {
         self.wait_count(CountKind::PrivateMessage, expected).await
     }
 
+    pub(super) async fn wait_active_ready(&self, expected: usize) -> io::Result<()> {
+        self.wait_count(CountKind::ActiveReady, expected).await
+    }
+
+    pub(super) async fn wait_active_pings(&self, expected: usize) -> io::Result<()> {
+        for _ in 0..1_000 {
+            if self.state.counts.lock().await.active_pings >= expected {
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "active ping did not arrive",
+        ))
+    }
+
+    pub(super) async fn wait_normal_closes(&self, expected: usize) -> io::Result<()> {
+        self.wait_count(CountKind::PrivateNormalClose, expected)
+            .await
+    }
+
     pub(super) async fn wait_http(&self, expected: usize) -> io::Result<()> {
         self.wait_count(CountKind::Http, expected).await
     }
 
-    pub(super) async fn wait_restarts(&self, expected: usize) -> io::Result<()> {
-        self.wait_count(CountKind::IdleRestart, expected).await
+    pub(super) async fn wait_close_frames(&self, expected: usize) -> io::Result<()> {
+        self.wait_count(CountKind::CloseFrame, expected).await
     }
 
     pub(super) async fn counts(&self) -> CountsSnapshot {
@@ -131,6 +205,7 @@ impl Fixture {
         CountsSnapshot {
             private_handshakes: counts.private_handshakes,
             private_messages: counts.private_messages,
+            active_pings: counts.active_pings,
             http_requests: counts.http_requests,
         }
     }
@@ -159,8 +234,10 @@ impl Fixture {
                         CountKind::PrivateHandshake => counts.private_handshakes,
                         CountKind::PrivateReady => counts.private_ready,
                         CountKind::PrivateMessage => counts.private_messages,
+                        CountKind::ActiveReady => counts.active_ready,
+                        CountKind::PrivateNormalClose => counts.private_normal_closes,
                         CountKind::Http => counts.http_requests,
-                        CountKind::IdleRestart => counts.idle_restarts,
+                        CountKind::CloseFrame => counts.close_frames_sent,
                     }
                 };
                 if current >= expected {
@@ -179,5 +256,6 @@ impl Fixture {
 pub(super) struct CountsSnapshot {
     pub(super) private_handshakes: usize,
     pub(super) private_messages: usize,
+    pub(super) active_pings: usize,
     pub(super) http_requests: usize,
 }
