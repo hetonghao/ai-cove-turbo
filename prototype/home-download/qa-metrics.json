@@ -1,0 +1,542 @@
+[
+  {
+    "activePanel": "variant-a",
+    "aria": [
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-a",
+        "panel": "variant-a",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-b",
+        "panel": "variant-b",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-c",
+        "panel": "variant-c",
+        "targetRole": "tab"
+      }
+    ],
+    "firstActionRect": {
+      "bottom": 594,
+      "left": 32,
+      "right": 217,
+      "top": 546
+    },
+    "headingRect": {
+      "bottom": 444,
+      "left": 32,
+      "right": 504,
+      "top": 287
+    },
+    "height": 900,
+    "horizontalOverflow": false,
+    "markerRect": {
+      "bottom": 50,
+      "left": 540,
+      "right": 740,
+      "top": 25
+    },
+    "panelRect": {
+      "bottom": 693,
+      "left": 32,
+      "right": 1248,
+      "top": 193
+    },
+    "scrollWidth": 1280,
+    "selectedTabs": 1,
+    "switcherRect": {
+      "bottom": 900,
+      "left": 0,
+      "right": 1280,
+      "top": 819
+    },
+    "variant": "A",
+    "visiblePanels": 1,
+    "width": 1280
+  },
+  {
+    "activePanel": "variant-b",
+    "aria": [
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-a",
+        "panel": "variant-a",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-b",
+        "panel": "variant-b",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-c",
+        "panel": "variant-c",
+        "targetRole": "tab"
+      }
+    ],
+    "firstActionRect": {
+      "bottom": 470,
+      "left": 648,
+      "right": 1215,
+      "top": 394
+    },
+    "headingRect": {
+      "bottom": 423,
+      "left": 32,
+      "right": 551,
+      "top": 276
+    },
+    "height": 900,
+    "horizontalOverflow": false,
+    "markerRect": {
+      "bottom": 50,
+      "left": 540,
+      "right": 740,
+      "top": 25
+    },
+    "panelRect": {
+      "bottom": 656,
+      "left": 32,
+      "right": 1248,
+      "top": 229
+    },
+    "scrollWidth": 1280,
+    "selectedTabs": 1,
+    "switcherRect": {
+      "bottom": 900,
+      "left": 0,
+      "right": 1280,
+      "top": 819
+    },
+    "variant": "B",
+    "visiblePanels": 1,
+    "width": 1280
+  },
+  {
+    "activePanel": "variant-c",
+    "aria": [
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-a",
+        "panel": "variant-a",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-b",
+        "panel": "variant-b",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-c",
+        "panel": "variant-c",
+        "targetRole": "tab"
+      }
+    ],
+    "firstActionRect": {
+      "bottom": 649,
+      "left": 389,
+      "right": 802,
+      "top": 603
+    },
+    "headingRect": {
+      "bottom": 273,
+      "left": 32,
+      "right": 769,
+      "top": 204
+    },
+    "height": 900,
+    "horizontalOverflow": false,
+    "markerRect": {
+      "bottom": 50,
+      "left": 540,
+      "right": 740,
+      "top": 25
+    },
+    "panelRect": {
+      "bottom": 708,
+      "left": 32,
+      "right": 1248,
+      "top": 177
+    },
+    "scrollWidth": 1280,
+    "selectedTabs": 1,
+    "switcherRect": {
+      "bottom": 900,
+      "left": 0,
+      "right": 1280,
+      "top": 819
+    },
+    "variant": "C",
+    "visiblePanels": 1,
+    "width": 1280
+  },
+  {
+    "activePanel": "variant-a",
+    "aria": [
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-a",
+        "panel": "variant-a",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-b",
+        "panel": "variant-b",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-c",
+        "panel": "variant-c",
+        "targetRole": "tab"
+      }
+    ],
+    "firstActionRect": {
+      "bottom": 421,
+      "left": 31,
+      "right": 216,
+      "top": 373
+    },
+    "headingRect": {
+      "bottom": 270,
+      "left": 31,
+      "right": 703,
+      "top": 176
+    },
+    "height": 900,
+    "horizontalOverflow": false,
+    "markerRect": {
+      "bottom": 50,
+      "left": 284,
+      "right": 484,
+      "top": 25
+    },
+    "panelRect": {
+      "bottom": 933,
+      "left": 31,
+      "right": 737,
+      "top": 138
+    },
+    "scrollWidth": 768,
+    "selectedTabs": 1,
+    "switcherRect": {
+      "bottom": 900,
+      "left": 0,
+      "right": 768,
+      "top": 819
+    },
+    "variant": "A",
+    "visiblePanels": 1,
+    "width": 768
+  },
+  {
+    "activePanel": "variant-b",
+    "aria": [
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-a",
+        "panel": "variant-a",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-b",
+        "panel": "variant-b",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-c",
+        "panel": "variant-c",
+        "targetRole": "tab"
+      }
+    ],
+    "firstActionRect": {
+      "bottom": 760,
+      "left": 64,
+      "right": 704,
+      "top": 684
+    },
+    "headingRect": {
+      "bottom": 268,
+      "left": 31,
+      "right": 703,
+      "top": 176
+    },
+    "height": 900,
+    "horizontalOverflow": false,
+    "markerRect": {
+      "bottom": 50,
+      "left": 284,
+      "right": 484,
+      "top": 25
+    },
+    "panelRect": {
+      "bottom": 946,
+      "left": 31,
+      "right": 737,
+      "top": 138
+    },
+    "scrollWidth": 768,
+    "selectedTabs": 1,
+    "switcherRect": {
+      "bottom": 900,
+      "left": 0,
+      "right": 768,
+      "top": 819
+    },
+    "variant": "B",
+    "visiblePanels": 1,
+    "width": 768
+  },
+  {
+    "activePanel": "variant-c",
+    "aria": [
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-a",
+        "panel": "variant-a",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-b",
+        "panel": "variant-b",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-c",
+        "panel": "variant-c",
+        "targetRole": "tab"
+      }
+    ],
+    "firstActionRect": {
+      "bottom": 634,
+      "left": 250,
+      "right": 477,
+      "top": 588
+    },
+    "headingRect": {
+      "bottom": 258,
+      "left": 31,
+      "right": 475,
+      "top": 216
+    },
+    "height": 900,
+    "horizontalOverflow": false,
+    "markerRect": {
+      "bottom": 50,
+      "left": 284,
+      "right": 484,
+      "top": 25
+    },
+    "panelRect": {
+      "bottom": 693,
+      "left": 31,
+      "right": 737,
+      "top": 190
+    },
+    "scrollWidth": 768,
+    "selectedTabs": 1,
+    "switcherRect": {
+      "bottom": 900,
+      "left": 0,
+      "right": 768,
+      "top": 819
+    },
+    "variant": "C",
+    "visiblePanels": 1,
+    "width": 768
+  },
+  {
+    "activePanel": "variant-a",
+    "aria": [
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-a",
+        "panel": "variant-a",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-b",
+        "panel": "variant-b",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-c",
+        "panel": "variant-c",
+        "targetRole": "tab"
+      }
+    ],
+    "firstActionRect": {
+      "bottom": 441,
+      "left": 16,
+      "right": 359,
+      "top": 393
+    },
+    "headingRect": {
+      "bottom": 271,
+      "left": 16,
+      "right": 359,
+      "top": 170
+    },
+    "height": 820,
+    "horizontalOverflow": false,
+    "markerRect": {
+      "bottom": 75,
+      "left": 16,
+      "right": 217,
+      "top": 50
+    },
+    "panelRect": {
+      "bottom": 933,
+      "left": 16,
+      "right": 359,
+      "top": 132
+    },
+    "scrollWidth": 375,
+    "selectedTabs": 1,
+    "switcherRect": {
+      "bottom": 820,
+      "left": 0,
+      "right": 375,
+      "top": 732
+    },
+    "variant": "A",
+    "visiblePanels": 1,
+    "width": 375
+  },
+  {
+    "activePanel": "variant-b",
+    "aria": [
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-a",
+        "panel": "variant-a",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-b",
+        "panel": "variant-b",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-c",
+        "panel": "variant-c",
+        "targetRole": "tab"
+      }
+    ],
+    "firstActionRect": {
+      "bottom": 851,
+      "left": 37,
+      "right": 338,
+      "top": 781
+    },
+    "headingRect": {
+      "bottom": 322,
+      "left": 16,
+      "right": 359,
+      "top": 170
+    },
+    "height": 820,
+    "horizontalOverflow": false,
+    "markerRect": {
+      "bottom": 75,
+      "left": 16,
+      "right": 217,
+      "top": 50
+    },
+    "panelRect": {
+      "bottom": 1019,
+      "left": 16,
+      "right": 359,
+      "top": 132
+    },
+    "scrollWidth": 375,
+    "selectedTabs": 1,
+    "switcherRect": {
+      "bottom": 820,
+      "left": 0,
+      "right": 375,
+      "top": 732
+    },
+    "variant": "B",
+    "visiblePanels": 1,
+    "width": 375
+  },
+  {
+    "activePanel": "variant-c",
+    "aria": [
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-a",
+        "panel": "variant-a",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-b",
+        "panel": "variant-b",
+        "targetRole": "tab"
+      },
+      {
+        "controlsMatch": true,
+        "labelledby": "variant-tab-c",
+        "panel": "variant-c",
+        "targetRole": "tab"
+      }
+    ],
+    "firstActionRect": {
+      "bottom": 900,
+      "left": 33,
+      "right": 184,
+      "top": 854
+    },
+    "headingRect": {
+      "bottom": 259,
+      "left": 16,
+      "right": 359,
+      "top": 159
+    },
+    "height": 820,
+    "horizontalOverflow": false,
+    "markerRect": {
+      "bottom": 75,
+      "left": 16,
+      "right": 217,
+      "top": 50
+    },
+    "panelRect": {
+      "bottom": 959,
+      "left": 16,
+      "right": 359,
+      "top": 132
+    },
+    "scrollWidth": 375,
+    "selectedTabs": 1,
+    "switcherRect": {
+      "bottom": 820,
+      "left": 0,
+      "right": 375,
+      "top": 732
+    },
+    "variant": "C",
+    "visiblePanels": 1,
+    "width": 375
+  }
+]

@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="AI Cove Apps 首页嵌入式下载模块 throwaway 原型" />
+    <meta name="theme-color" content="#fdf9f5" />
+    <title>AI Cove Apps · Embedded Download Module</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body data-variant="A">
+    <a class="skip-link" href="#embedded-download">跳到嵌入式下载模块</a>
+
+    <div class="prototype-shell">
+      <header class="prototype-header" aria-label="AI Cove 首页模块原型导航">
+        <a class="brand" href="?variant=A" aria-label="AI Cove Apps 首页模块原型">
+          <span class="brand__mark brand__mark--cove" aria-hidden="true"><span>AI</span><b>C</b></span>
+          <span class="brand__copy">
+            <strong>AI Cove</strong>
+            <small>homepage module study</small>
+          </span>
+        </a>
+
+        <div class="prototype-flag" aria-label="AI Cove 首页下载入口研究">
+          <span class="prototype-flag__dot" aria-hidden="true"></span>
+          <span>AI COVE APPS · HOMEPAGE DOWNLOAD</span>
+        </div>
+
+      </header>
+
+      <main id="embedded-download" class="prototype-main">
+        <section class="module-context" aria-labelledby="module-title">
+          <div class="context-kicker">
+            <span class="eyebrow">AI COVE HOMEPAGE</span>
+            <span class="context-kicker__note">Design + Turbo · same app family</span>
+          </div>
+          <div class="context-heading">
+            <div>
+              <h1 id="module-title">AI Cove <em>扩展应用</em></h1>
+              <p>AI Cove Design 与 AI Cove Turbo 是<span class="context-relationship">同类桌面应用，</span>共用同一套账号、模型与计费。</p>
+            </div>
+            <div class="context-foundation" aria-label="共享基础">
+              <span>shared foundation</span>
+              <strong>Design + Turbo · same app family</strong>
+            </div>
+          </div>
+        </section>
+
+        <p class="sr-only" data-variant-status role="status" aria-live="polite"></p>
+
+        <section
+          id="variant-a"
+          class="variant-panel variant-panel--a"
+          data-variant-panel="A"
+          aria-labelledby="variant-tab-a"
+          role="tabpanel"
+          aria-label="A 共享应用行"
+        >
+          <div class="variant-header">
+            <div>
+              <p class="eyebrow">A / HOMEPAGE DOWNLOAD ROW</p>
+              <h2 id="variant-a-heading">两个入口，一组动作。</h2>
+            </div>
+            <span class="variant-tag">首页同款按钮语言</span>
+          </div>
+
+          <div class="homepage-download-preview">
+            <div class="homepage-download-preview__intro">
+              <span class="preview-label">AI COVE HOMEPAGE / APP FAMILY</span>
+              <p>把线上下载按钮的胶囊、图标和反馈语言，作为 Design 与 Turbo 共用的下载入口。</p>
+            </div>
+          </div>
+
+          <div class="family-divider" aria-hidden="true">
+            <span>旗下扩展应用</span>
+          </div>
+
+          <div class="homepage-app-actions" aria-label="AI Cove 旗下扩展应用桌面下载">
+            <a
+              class="homepage-app-action"
+              href="/downloads/ai-cove-design-desktop-macos.dmg"
+              data-download
+              data-home-download
+              data-product="AI Cove Design"
+              data-platform="macos"
+              data-macos-href="/downloads/ai-cove-design-desktop-macos.dmg"
+              data-windows-href="/downloads/ai-cove-design-desktop-windows.exe"
+              aria-label="下载 AI Cove Design macOS 桌面版"
+            >
+              <span class="app-mark app-mark--design" aria-hidden="true"><span>AI</span><b>C</b></span>
+              <span class="homepage-app-action__label" data-home-download-label>下载 AI Cove Design macOS 桌面版</span>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></svg>
+            </a>
+            <a
+              class="homepage-app-action"
+              href="#prototype-turbo-macos"
+              data-download
+              data-home-download
+              data-product="AI Cove Turbo"
+              data-platform="macos"
+              data-macos-href="#prototype-turbo-macos"
+              data-windows-href="#prototype-turbo-windows"
+              aria-label="下载 AI Cove Turbo macOS 桌面版"
+            >
+              <span class="app-mark app-mark--turbo" aria-hidden="true"><img src="../assets/turbo-icon.png" width="48" height="48" alt="" /></span>
+              <span class="homepage-app-action__label" data-home-download-label>下载 AI Cove Turbo macOS 桌面版</span>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></svg>
+            </a>
+          </div>
+          <p class="download-feedback homepage-download-feedback" data-download-feedback role="status" aria-live="polite">选择入口查看原型反馈。</p>
+
+          <div class="foundation-note" aria-label="AI Cove 共享基础">
+            <span class="foundation-note__line" aria-hidden="true"></span>
+            <span>AI Cove foundation</span>
+            <b>one family · two focused desktop entries</b>
+            <span class="foundation-note__line" aria-hidden="true"></span>
+          </div>
+        </section>
+
+        <section
+          id="variant-b"
+          class="variant-panel variant-panel--b"
+          data-variant-panel="B"
+          aria-labelledby="variant-tab-b"
+          role="tabpanel"
+          aria-label="B 安静展开模块"
+          hidden
+        >
+          <div class="variant-header">
+            <div>
+              <p class="eyebrow">B / CALM DISCLOSURE</p>
+              <h2 id="variant-b-heading">把桌面入口收进一个安静的模块。</h2>
+            </div>
+            <span class="variant-tag">Design + Turbo 共享展开</span>
+          </div>
+
+          <div class="disclosure-module" aria-label="AI Cove 旗下扩展应用下载">
+            <section class="app-disclosure" aria-labelledby="design-disclosure-title">
+              <button class="disclosure-toggle" type="button" aria-expanded="false" aria-controls="design-download-panel" data-disclosure-toggle data-product="AI Cove Design">
+                <div class="app-mark app-mark--design" aria-hidden="true"><span>AI</span><b>C</b></div>
+                <span class="disclosure-toggle__copy">
+                  <span class="entry-badge">AI Cove Apps · 同类应用</span>
+                  <strong id="design-disclosure-title">AI Cove Design</strong>
+                  <small>画布创作桌面入口，与 Turbo 共用 AI Cove 的模型、密钥与计费。</small>
+                </span>
+                <span class="disclosure-toggle__hint">展开下载</span>
+                <span class="disclosure-toggle__icon" aria-hidden="true">+</span>
+              </button>
+              <div id="design-download-panel" class="disclosure-panel" role="region" aria-labelledby="design-disclosure-title" hidden>
+                <p>选择平台下载 AI Cove Design 桌面入口；它与 Turbo 使用同一套 AI Cove 基础。</p>
+                <div class="disclosure-panel__actions">
+                  <span class="summary-label">AI Cove Design desktop download</span>
+                  <div class="platform-actions" aria-label="AI Cove Design 桌面入口">
+                    <a class="platform-action" href="/downloads/ai-cove-design-desktop-macos.dmg" data-download data-product="AI Cove Design" data-platform="macos"><span>macOS</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></svg></a>
+                    <a class="platform-action" href="/downloads/ai-cove-design-desktop-windows.exe" data-download data-product="AI Cove Design" data-platform="windows"><span>Windows</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></svg></a>
+                  </div>
+                  <p class="download-feedback" data-download-feedback role="status" aria-live="polite">选择平台查看原型反馈。</p>
+                </div>
+              </div>
+            </section>
+
+            <section class="app-disclosure" aria-labelledby="turbo-disclosure-title">
+              <button class="disclosure-toggle" type="button" aria-expanded="false" aria-controls="turbo-download-panel" data-disclosure-toggle data-product="AI Cove Turbo">
+                <div class="app-mark app-mark--turbo" aria-hidden="true"><img src="../assets/turbo-icon.png" width="48" height="48" alt="" /></div>
+                <span class="disclosure-toggle__copy">
+                  <span class="entry-badge">AI Cove Apps · 同类应用</span>
+                  <strong id="turbo-disclosure-title">AI Cove Turbo</strong>
+                  <small>本地连接桌面入口，与 Design 共用 AI Cove 的模型、密钥与计费。</small>
+                </span>
+                <span class="disclosure-toggle__hint">展开下载</span>
+                <span class="disclosure-toggle__icon" aria-hidden="true">+</span>
+              </button>
+              <div id="turbo-download-panel" class="disclosure-panel" role="region" aria-labelledby="turbo-disclosure-title" hidden>
+                <p>选择平台下载 AI Cove Turbo 桌面入口；它与 Design 使用同一套 AI Cove 基础。</p>
+                <div class="disclosure-panel__actions">
+                  <span class="summary-label">AI Cove Turbo desktop download</span>
+                  <div class="platform-actions" aria-label="AI Cove Turbo 桌面入口">
+                    <a class="platform-action" href="#prototype-turbo-macos" data-download data-product="AI Cove Turbo" data-platform="macos"><span>macOS</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></svg></a>
+                    <a class="platform-action" href="#prototype-turbo-windows" data-download data-product="AI Cove Turbo" data-platform="windows"><span>Windows</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></svg></a>
+                  </div>
+                  <p class="download-feedback" data-download-feedback role="status" aria-live="polite">选择平台查看原型反馈。</p>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section
+          id="variant-c"
+          class="variant-panel variant-panel--c"
+          data-variant-panel="C"
+          aria-labelledby="variant-tab-c"
+          role="tabpanel"
+          aria-label="C 共享基础连接条"
+          hidden
+        >
+          <div class="variant-header">
+            <div>
+              <p class="eyebrow">C / CONNECTED STRIP</p>
+              <h2 id="variant-c-heading">从同一基础，连接两个入口。</h2>
+            </div>
+            <span class="variant-tag">关系先于动作</span>
+          </div>
+
+          <div class="connected-strip">
+            <div class="connected-strip__foundation">
+              <span class="foundation-dot" aria-hidden="true"></span>
+              <span>AI Cove foundation</span>
+              <strong>same model · key · billing</strong>
+            </div>
+            <div class="connected-entries">
+              <article class="connected-entry connected-entry--design">
+                <div class="connected-entry__identity">
+                  <div class="app-mark app-mark--design" aria-hidden="true"><span>AI</span><b>C</b></div>
+                  <div><span class="entry-badge">AI Cove Apps · 同类应用</span><h3>AI Cove Design</h3></div>
+                </div>
+                <p>画布创作桌面入口，与 Turbo 共享 AI Cove 的模型、密钥与计费基础。</p>
+                <div class="platform-actions" aria-label="AI Cove Design 桌面入口">
+                  <a class="platform-action" href="/downloads/ai-cove-design-desktop-macos.dmg" data-download data-product="AI Cove Design" data-platform="macos"><span>macOS</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></svg></a>
+                  <a class="platform-action" href="/downloads/ai-cove-design-desktop-windows.exe" data-download data-product="AI Cove Design" data-platform="windows"><span>Windows</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></svg></a>
+                </div>
+                <p class="entry-note">选择 macOS 或 Windows 桌面入口</p>
+                <p class="download-feedback" data-download-feedback role="status" aria-live="polite">选择平台查看原型反馈。</p>
+              </article>
+
+              <div class="entry-connector" aria-hidden="true"><span></span><b></b><span></span></div>
+
+              <article class="connected-entry connected-entry--turbo">
+                <div class="connected-entry__identity">
+                  <div class="app-mark app-mark--turbo" aria-hidden="true"><img src="../assets/turbo-icon.png" width="48" height="48" alt="" /></div>
+                  <div><span class="entry-badge">AI Cove Apps · 同类应用</span><h3>AI Cove Turbo</h3></div>
+                </div>
+                <p>本地连接桌面入口，与 Design 共享 AI Cove 的模型、密钥与计费基础。</p>
+                <div class="platform-actions" aria-label="AI Cove Turbo 桌面入口">
+                  <a class="platform-action" href="#prototype-turbo-macos" data-download data-product="AI Cove Turbo" data-platform="macos"><span>macOS</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></svg></a>
+                  <a class="platform-action" href="#prototype-turbo-windows" data-download data-product="AI Cove Turbo" data-platform="windows"><span>Windows</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></svg></a>
+                </div>
+                <p class="entry-note">选择 macOS 或 Windows 桌面入口</p>
+                <p class="download-feedback" data-download-feedback role="status" aria-live="polite">选择平台查看原型反馈。</p>
+              </article>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="variant-switcher" aria-label="嵌入式模块原型切换">
+        <div class="variant-switcher__intro">
+          <span class="eyebrow">MODULE LAB</span>
+          <span>同一家庭关系 · 三种嵌入构图</span>
+        </div>
+        <div class="variant-tabs" role="tablist" aria-label="嵌入式模块变体">
+          <button id="variant-tab-a" class="variant-tab" type="button" role="tab" aria-selected="true" aria-controls="variant-a" tabindex="0" data-variant-switch="A">
+            <span>A</span><small>共享行</small>
+          </button>
+          <button id="variant-tab-b" class="variant-tab" type="button" role="tab" aria-selected="false" aria-controls="variant-b" tabindex="-1" data-variant-switch="B">
+            <span>B</span><small>展开</small>
+          </button>
+          <button id="variant-tab-c" class="variant-tab" type="button" role="tab" aria-selected="false" aria-controls="variant-c" tabindex="-1" data-variant-switch="C">
+            <span>C</span><small>连接条</small>
+          </button>
+        </div>
+        <div class="variant-switcher__keys" aria-label="键盘切换提示">
+          <kbd>←</kbd><kbd>→</kbd><span>切换</span>
+        </div>
+      </footer>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="96" viewBox="0 0 128 96">
+  <g fill="#000">
+    <!-- Airflow: two quiet cuts are enough to suggest speed at menu-bar size. -->
+    <path d="M4 36h21l-6 6H4z"/>
+    <path d="M1 50h17l-2 6H1z"/>
+
+    <!-- Volute and upper duct. -->
+    <path d="M17 47c0-23 19-39 45-39h40v13H62c-18 0-31 10-31 27 0 19 12 32 29 32 18 0 30-11 33-29l13 2c-4 26-21 42-46 42-26 0-43-19-43-48z"/>
+
+    <!-- Double-layer outlet. -->
+    <path fill-rule="evenodd" d="M98 8h12c8 0 14 7 14 17s-6 18-14 18H98V8zm11 7c-3 0-5 4-5 10s2 11 5 11 6-5 6-11-3-10-6-10z"/>
+    <path fill-rule="evenodd" d="M91 9h10c7 0 12 7 12 16s-5 17-12 17H91V9zm9 7c-2 0-4 4-4 9s2 10 4 10 5-4 5-10-3-9-5-9z"/>
+
+    <!-- Turbine ring. -->
+    <path fill-rule="evenodd" d="M60 27a29 29 0 1 1 0 58 29 29 0 0 1 0-58zm0 7a22 22 0 1 0 0 44 22 22 0 0 0 0-44z"/>
+
+    <!-- One curved blade, rotated into a six-blade wheel. -->
+    <path id="blade" d="M58 53c8-2 13-8 12-16-8 1-14 7-15 15z"/>
+    <use href="#blade" transform="rotate(60 60 56)"/>
+    <use href="#blade" transform="rotate(120 60 56)"/>
+    <use href="#blade" transform="rotate(180 60 56)"/>
+    <use href="#blade" transform="rotate(240 60 56)"/>
+    <use href="#blade" transform="rotate(300 60 56)"/>
+    <path fill-rule="evenodd" d="M60 50a6 6 0 1 1 0 12 6 6 0 0 1 0-12zm0 3.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/>
+
+    <!-- Electric boost mark. -->
+    <path d="m113 51-14 17h7l-9 21 27-25h-9l12-19z"/>
+  </g>
+</svg>

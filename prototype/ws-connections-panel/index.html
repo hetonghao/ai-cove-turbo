@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#080c0b" />
+    <meta name="description" content="AI Cove Turbo WebSocket 连接状态面板临时原型" />
+    <title>Turbo WS 连接面板原型</title>
+    <link rel="icon" type="image/png" href="../assets/turbo-icon.png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- PROTOTYPE ONLY — 4 个连接面板方案，通过 ?variant=A|B|C|D 切换。 -->
+    <div class="app-shell">
+      <header class="app-header">
+        <a class="brand" href="./?variant=C" aria-label="AI Cove Turbo">
+          <img src="../assets/turbo-icon.png" width="30" height="30" alt="" />
+          <span><strong>Turbo</strong><small>AI Cove</small></span>
+        </a>
+        <nav class="tabs" aria-label="Turbo 页面">
+          <button class="is-active" type="button">实时</button>
+          <button type="button">统计</button>
+          <button type="button">配置</button>
+        </nav>
+        <span class="prototype-tag">PROTOTYPE / WS CONNECTIONS</span>
+      </header>
+
+      <main class="live-page">
+        <header class="live-titlebar">
+          <div><span>LIVE / RELIABILITY</span><h1>实时传输</h1><p>查看当前路由、连接健康与最近请求。</p></div>
+          <div class="service-state"><i></i> 本地通道在线</div>
+        </header>
+
+        <div class="live-layout">
+          <aside class="sidebar">
+            <section class="route-card">
+              <span class="overline">ROUTE</span><h2>当前路径</h2>
+              <dl>
+                <div><dt>LOCAL</dt><dd>127.0.0.1:4317</dd></div>
+                <div><dt>UPSTREAM</dt><dd>api.ai-cove.com/v1</dd></div>
+              </dl>
+            </section>
+            <section class="health-card">
+              <header>
+                <div><span class="overline">HEALTH</span><h2>实时状态</h2></div>
+                <button class="strands-button" type="button" data-open-connections aria-haspopup="dialog" aria-expanded="false" aria-label="查看 WebSocket 连接状态">
+                  <span class="strand strand--one"></span><span class="strand strand--two"></span><span class="strand strand--three"></span>
+                  <em data-live-total>12</em>
+                </button>
+              </header>
+              <ul>
+                <li><span>服务</span><strong>正常</strong></li>
+                <li><span>Codex</span><strong>就绪</strong></li>
+                <li><span>HTTP 压缩</span><strong>已验证</strong></li>
+                <li><span>WebSocket 连接</span><strong>已验证</strong></li>
+                <li><span>WebSocket 压缩</span><strong>已验证</strong></li>
+              </ul>
+              <p class="health-hint">点击右上动画查看当前连接</p>
+            </section>
+          </aside>
+
+          <section class="terminal" aria-label="传输终端示意">
+            <header><div><span class="overline">TRANSFER STREAM</span><h2>传输终端</h2></div><span class="stream-state"><i></i> 实时更新</span></header>
+            <div class="terminal-table">
+              <div class="terminal-row terminal-row--head"><span>时间</span><span>状态</span><span>请求</span><span>原始 → 发送</span><span>方式</span><span>节省率</span></div>
+              <div class="terminal-row"><span>14:32:08</span><b>200</b><span>/v1/responses</span><span>142 KB → 81 KB</span><span>WS</span><b>43.0%</b></div>
+              <div class="terminal-row"><span>14:31:56</span><b>200</b><span>/v1/responses</span><span>96 KB → 59 KB</span><span>WS</span><b>38.5%</b></div>
+              <div class="terminal-row"><span>14:31:42</span><b>200</b><span>/v1/responses</span><span>108 KB → 66 KB</span><span>HTTP</span><b>38.9%</b></div>
+              <div class="terminal-row"><span>14:31:09</span><b>200</b><span>/v1/responses</span><span>73 KB → 43 KB</span><span>WS</span><b>41.1%</b></div>
+            </div>
+            <footer><span>内容与密钥不记录</span><span>自动保留最近 100 条</span></footer>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="connection-layer" data-layer hidden>
+      <button class="connection-backdrop" type="button" data-close-connections aria-label="关闭连接面板"></button>
+      <section class="connection-panel" data-panel role="dialog" aria-modal="true" aria-labelledby="connection-panel-title"></section>
+    </div>
+
+    <nav class="prototype-switcher" aria-label="原型方案切换">
+      <button type="button" data-previous aria-label="上一个方案">←</button>
+      <span data-variant-label>A — 右侧抽屉</span>
+      <button type="button" data-next aria-label="下一个方案">→</button>
+    </nav>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
