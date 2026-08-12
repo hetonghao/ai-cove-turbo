@@ -132,13 +132,16 @@ pub(super) async fn handle_idle_client_message(
 async fn reject_missing_continuation(
     client: &mut ClientWebSocket,
     session: &mut Session,
+    has_request_source: bool,
     previous_response_id: Option<&str>,
 ) -> bool {
-    let Some(previous_response_id) = previous_response_id else {
-        return false;
-    };
-    if session.last_terminal_response_id.as_deref() == Some(previous_response_id) {
-        return false;
+    if has_request_source {
+        let Some(previous_response_id) = previous_response_id else {
+            return false;
+        };
+        if session.last_terminal_response_id.as_deref() == Some(previous_response_id) {
+            return false;
+        }
     }
     session.response_started = false;
     let _ = send_error(
@@ -173,6 +176,9 @@ async fn start_response(
         .await;
         return true;
     };
+    if reject_missing_continuation(client, session, prepared.has_request_source, None).await {
+        return true;
+    }
     if !session.bind_thread_id(prepared.thread_id).await {
         return reject_thread_switch(client).await;
     }
@@ -194,7 +200,7 @@ async fn start_response(
         session.ready = Some(upstream);
         session.last_terminal_response_id = Some(response_id.to_owned());
     }
-    if reject_missing_continuation(client, session, previous_response_id.as_deref()).await {
+    if reject_missing_continuation(client, session, true, previous_response_id.as_deref()).await {
         return true;
     }
     if session.ready.is_none() {

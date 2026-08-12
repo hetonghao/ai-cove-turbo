@@ -9,6 +9,7 @@ pub(super) enum HttpFallback {
 
 pub(super) struct PreparedResponseCreate {
     pub(super) fallback: HttpFallback,
+    pub(super) has_request_source: bool,
     pub(super) thread_id: Option<String>,
     pub(super) previous_response_id: Option<String>,
 }
@@ -44,9 +45,14 @@ pub(super) fn http_request_payload(payload: &[u8]) -> Result<PreparedResponseCre
         .and_then(Value::as_str)
         .filter(|response_id| !response_id.is_empty())
         .map(str::to_owned);
+    let has_request_source = previous_response_id.is_some()
+        || ["input", "prompt", "conversation"]
+            .into_iter()
+            .any(|key| object.get(key).is_some_and(|value| !value.is_null()));
     if previous_response_id.is_some() {
         return Ok(PreparedResponseCreate {
             fallback: HttpFallback::WebSocketRequired,
+            has_request_source,
             thread_id,
             previous_response_id,
         });
@@ -56,6 +62,7 @@ pub(super) fn http_request_payload(payload: &[u8]) -> Result<PreparedResponseCre
     serde_json::to_vec(&value)
         .map(|payload| PreparedResponseCreate {
             fallback: HttpFallback::Request(payload),
+            has_request_source,
             thread_id,
             previous_response_id: None,
         })

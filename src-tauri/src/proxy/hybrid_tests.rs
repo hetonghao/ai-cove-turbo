@@ -88,6 +88,38 @@ fn converts_response_create_into_streaming_http_payload() -> std::io::Result<()>
 }
 
 #[test]
+fn classifies_supported_response_request_sources() -> std::io::Result<()> {
+    // Given: every upstream-supported source and the source-free boundary shapes.
+    let provided = [
+        br#"{"type":"response.create","input":[]}"#.as_slice(),
+        br#"{"type":"response.create","previous_response_id":"response-1"}"#.as_slice(),
+        br#"{"type":"response.create","prompt":{}}"#.as_slice(),
+        br#"{"type":"response.create","conversation":"conversation-1"}"#.as_slice(),
+    ];
+    let missing = [
+        br#"{"type":"response.create"}"#.as_slice(),
+        br#"{"type":"response.create","input":null,"prompt":null,"conversation":null}"#.as_slice(),
+        br#"{"type":"response.create","previous_response_id":""}"#.as_slice(),
+        br#"{"type":"response.create","previous_response_id":7}"#.as_slice(),
+    ];
+
+    // When: the response.create boundary parses each payload.
+    for payload in provided {
+        let prepared = http_request_payload(payload).map_err(std::io::Error::other)?;
+
+        // Then: every supported source is accepted independently.
+        assert!(prepared.has_request_source);
+    }
+    for payload in missing {
+        let prepared = http_request_payload(payload).map_err(std::io::Error::other)?;
+
+        // Then: absent, null, empty, and malformed continuation sources stay source-free.
+        assert!(!prepared.has_request_source);
+    }
+    Ok(())
+}
+
+#[test]
 fn reads_canonical_thread_id_from_response_create() -> std::io::Result<()> {
     let request = serde_json::json!({
         "type": "response.create",
