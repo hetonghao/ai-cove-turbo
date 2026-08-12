@@ -24,9 +24,11 @@ jobs:
           - platform: darwin-aarch64
             os: macos-14
             bundles: app,dmg
+            apple_signing_identity: "-"
           - platform: windows-x86_64
             os: windows-latest
             bundles: nsis
+            apple_signing_identity: ""
 
     steps:
       - name: Checkout
@@ -55,6 +57,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.AI_COVE_TURBO_TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.AI_COVE_TURBO_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           TURBO_UPDATER_PUBLIC_KEY: ${{ vars.AI_COVE_TURBO_TAURI_SIGNING_PUBLIC_KEY }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.apple_signing_identity }}
         run: |
           test -n "$TAURI_SIGNING_PRIVATE_KEY"
           test -n "$TURBO_UPDATER_PUBLIC_KEY"
@@ -66,6 +69,12 @@ jobs:
           }));
           NODE
           npx tauri build --ci --bundles "${{ matrix.bundles }}" --config tauri-release-config.json
+
+          if [ "${{ matrix.platform }}" = "darwin-aarch64" ]; then
+            app="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+            test -n "$app"
+            codesign --verify --deep --strict --verbose=4 "$app"
+          fi
 
       - name: Collect release artifacts
         shell: bash
