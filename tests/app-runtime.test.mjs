@@ -42,6 +42,65 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
+test("产品图标气泡支持轻触关闭并打开 AI Cove", async () => {
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  const trigger = element({ action: "toggle-ai-cove-bubble", aiCoveTrigger: "" });
+  const bubble = element({ action: "open-ai-cove", aiCoveBubble: "" });
+  const popover = element({ aiCovePopover: "" });
+  bubble.hidden = true;
+  trigger.focused = false;
+  trigger.focus = () => { trigger.focused = true; };
+  const target = (action) => ({
+    closest(selector) {
+      if (selector === "[data-action]") return action;
+      if (selector === "[data-ai-cove-popover]") return popover;
+      return null;
+    },
+  });
+  let onClick;
+  let onKeydown;
+  const document = {
+    hidden: false,
+    readyState: "complete",
+    body: element(),
+    addEventListener(type, handler) {
+      if (type === "click") onClick = handler;
+      if (type === "keydown") onKeydown = handler;
+    },
+    querySelector(selector) {
+      if (selector === "[data-ai-cove-trigger]") return trigger;
+      if (selector === "[data-ai-cove-bubble]") return bubble;
+      return null;
+    },
+    querySelectorAll(selector) { return selector === "[data-action]" ? [trigger, bubble] : []; },
+  };
+  const opened = [];
+  const window = {
+    location: { href: "file:///turbo/src/index.html?tab=live" },
+    history: { replaceState() {} },
+    matchMedia: () => ({ matches: false }),
+    addEventListener() {},
+    setInterval() {},
+    open(...args) { opened.push(args); },
+  };
+
+  await runApp(source, { document, window, URL, Intl, Error });
+  onClick({ target: target(trigger) });
+  assert.equal(bubble.hidden, false);
+  assert.equal(trigger.attributes.get("aria-expanded"), "true");
+
+  onKeydown({ key: "Escape" });
+  assert.equal(bubble.hidden, true);
+  assert.equal(trigger.attributes.get("aria-expanded"), "false");
+  assert.equal(trigger.focused, true);
+
+  onClick({ target: target(trigger) });
+  onClick({ target: target(bubble) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(opened, [["https://ai-cove.com", "_blank", "noopener,noreferrer"]]);
+  assert.equal(bubble.hidden, true);
+});
+
 function textNode(value) {
   return {
     nodeType: 3,
@@ -271,6 +330,40 @@ test("Tauri 首帧在真实状态返回前保持未验证", async () => {
   assert.equal(states[1].textContent, "等待首次连接验证");
   assert.equal(states[2].textContent, "0");
   assert.deepEqual(invoked, ["get_app_status"]);
+});
+
+test("仅观察到 WebSocket 握手时 Codex 已生效使用成功态", async () => {
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  const codex = element({ state: "restart-runtime", status: "waiting" });
+  const document = {
+    readyState: "complete",
+    body: element(),
+    addEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll(selector) { return selector === "[data-state]" ? [codex] : []; },
+  };
+  const window = {
+    __TAURI__: {
+      core: {
+        invoke: async () => ({
+          serviceHealthy: true,
+          configState: "managed",
+          restartRequired: false,
+          websocketHandshakes: 1,
+        }),
+      },
+    },
+    location: { href: "tauri://localhost/?tab=live" },
+    history: { replaceState() {} },
+    addEventListener() {},
+    setInterval() {},
+  };
+
+  await runApp(source, { document, window, URL, Intl });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(codex.textContent, "已生效");
+  assert.equal(codex.dataset.status, "verified");
 });
 
 test("Codex 待重启时只显示行内动作和 hover 提示", async () => {
@@ -703,6 +796,8 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.equal(summaryUp.textContent, "2");
   assert.equal(summaryDown.textContent, "2");
   assert.equal(summaryIdle.textContent, "2");
+  assert.equal(summaryTrigger.dataset.tooltip, "左右拖动移动 · 点击或下拉展开");
+  assert.match(summaryTrigger.attributes.get("aria-label"), /点击或下拉展开连接检查器/);
 
   gripHandlers.get("pointerdown")({ button: 0, pointerId: 0, clientX: 100, clientY: 100, preventDefault() {} });
   gripHandlers.get("pointermove")({ pointerId: 0, clientX: 140, clientY: 100, preventDefault() {} });
@@ -952,6 +1047,7 @@ test("绑定会话双列且近期关闭保持单列", async () => {
   assert.match(html, /c-connection-inspector__header[^>]*>[\s\S]*?<h2[^>]*><span class="c-connection-inspector__live">LIVE<\/span><span>WebSocket 连接<\/span><em>当前 <strong data-connection-total>0<\/strong> 条<\/em><\/h2>/);
   assert.match(css, /\.c-connection-dock\[data-open="true"\] \.c-connection-summary,\s*\.c-connection-dock\[data-phase="dragging-open"\] \.c-connection-summary,\s*\.c-connection-dock\[data-phase="dragging-close"\] \.c-connection-summary\s*{[^}]*gap:\s*7px[^}]*min-height:\s*var\(--turbo-connection-summary-open-height\)[^}]*padding:\s*0 9px 6px/s);
   assert.match(css, /\.c-connection-summary::after\s*{[^}]*width:\s*28px[^}]*height:\s*2px[^}]*opacity:\s*0[^}]*content:\s*""/s);
+  assert.match(css, /data-open="false"\]\[data-phase="closed"\] \.c-connection-summary:hover::before[^}]*opacity:\s*1[^}]*visibility:\s*visible/s);
   assert.match(css, /data-open="true"\] \.c-connection-summary:hover::after[^}]*background:\s*var\(--c-accent\)[^}]*opacity:\s*1/s);
   assert.match(css, /\.c-connection-inspector\.is-closing,\s*\.c-connection-inspector\.is-drag-preview\s*{[^}]*position:\s*absolute[^}]*pointer-events:\s*none/s);
   assert.match(source, /previousSummaryTop[\s\S]*nextSummaryTop[\s\S]*translate3d\(0, \$\{shift\}px, 0\)/);

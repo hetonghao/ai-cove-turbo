@@ -109,6 +109,22 @@ test("macOS 导航拖拽显式开放主窗口权限", async () => {
   assert.ok(capability.permissions.includes("core:window:allow-start-dragging"));
 });
 
+test("产品图标显示临时 AI Cove 入口而不再刷新页面", async () => {
+  const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const css = await readFile(new URL("styles.css", sourceUrl), "utf8");
+  const app = await readFile(new URL("app.js", sourceUrl), "utf8");
+  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+
+  assert.doesNotMatch(html, /turbo-shell__brand" href=/);
+  assert.match(html, /data-action="toggle-ai-cove-bubble"[^>]*data-ai-cove-trigger/);
+  assert.match(html, /data-action="open-ai-cove"[^>]*data-ai-cove-bubble[^>]*hidden/);
+  assert.match(css, /\.turbo-shell__brand-bubble\s*{[^}]*position:\s*absolute[^}]*top:\s*calc\(100% \+ 9px\)[^}]*left:\s*0/s);
+  assert.match(css, /@keyframes turbo-brand-bubble-in\s*{[^}]*transform:\s*translateY\(-5px\)/s);
+  assert.match(app, /invoke\("open_ai_cove"\)/);
+  assert.match(rust, /OPEN_AI_COVE_MENU_ID => \{\s*let _open_result = open_ai_cove_url\(\);/s);
+  assert.match(rust, /#\[tauri::command\]\s*fn open_ai_cove\(\) -> Result<\(\), String>/s);
+});
+
 test("实时页把同类路径计数收进一行并仅在需要时显示侧栏滚动条", async () => {
   // Given: 默认桌面窗口中的实时页侧栏。
   const html = await readFile(new URL("index.html", sourceUrl), "utf8");
@@ -125,6 +141,7 @@ test("实时页把同类路径计数收进一行并仅在需要时显示侧栏�
   assert.match(metrics, />压缩 <small>HTTP<\/small>/);
   assert.match(css, /\.c-route-metrics\s*{[\s\S]*?grid-template-columns:\s*repeat\(4,/);
   assert.match(css, /\.c-sidebar--live\s*{[\s\S]*?scrollbar-gutter:\s*auto;/);
+  assert.match(css, /@media \(max-width: 520px\)\s*{[^}]*\.c-console--live > \.c-titlebar\s*{[^}]*padding-top:\s*calc\(var\(--turbo-connection-summary-height\) \+ 20px\)/s);
 });
 
 test("实时页只保留一处配置生效状态", async () => {
@@ -142,6 +159,7 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
   const app = await readFile(new URL("app.js", sourceUrl), "utf8");
   const commands = [
     "get_app_status",
+    "open_ai_cove",
     "set_compression",
     "set_websocket",
     "set_autostart",
@@ -268,9 +286,9 @@ test("桌面版本和 updater endpoint 由同一编译期契约驱动", async ()
   );
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 
-  assert.equal(packageJson.version, "0.1.0-beta.2");
-  assert.match(cargo, /^version = "0\.1\.0-beta\.2"$/m);
-  assert.equal(tauriConfig.version, "0.1.0-beta.2");
+  assert.equal(packageJson.version, "0.1.0-beta.3");
+  assert.match(cargo, /^version = "0\.1\.0-beta\.3"$/m);
+  assert.equal(tauriConfig.version, "0.1.0-beta.3");
   assert.equal(packageJson.scripts["desktop:release:local"], "node scripts/desktop-release.mjs");
   assert.match(rust, /option_env!\("TURBO_UPDATER_ENDPOINT"\)/);
   assert.match(rust, /https:\/\/ai-cove\.com\/downloads\/turbo\/latest\.json/);
@@ -300,4 +318,14 @@ test("macOS Dock 点击会重新显示被隐藏的主窗口", async () => {
     /RunEvent::Reopen \{ \.\. \} => show_main_window\(app_handle\)/,
     "Dock reopen 事件必须恢复主窗口",
   );
+});
+
+test("macOS 升级后首次显示 Dock 且后续尊重用户选择", async () => {
+  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const runtime = await readFile(new URL("../src-tauri/src/runtime.rs", import.meta.url), "utf8");
+
+  assert.match(rust, /if !runtime\.dock_initialized\(\) \{\s*runtime\.set_dock_state\(true\);\s*\}/s);
+  assert.match(runtime, /dock_visible:\s*true/);
+  assert.match(runtime, /dock_initialized:\s*false/);
+  assert.match(runtime, /preferences\.dock_visible = visible;\s*preferences\.dock_initialized = true;/s);
 });

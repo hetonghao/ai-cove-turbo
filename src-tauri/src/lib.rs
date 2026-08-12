@@ -88,6 +88,7 @@ pub fn run() -> tauri::Result<()> {
             get_app_status,
             get_connection_snapshot,
             get_codex_thread_info,
+            open_ai_cove,
             set_compression,
             set_websocket,
             set_autostart,
@@ -193,14 +194,7 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             OPEN_MENU_ID => show_main_window(app),
             OPEN_AI_COVE_MENU_ID => {
-                #[cfg(target_os = "macos")]
-                let _open_result = Command::new("open").arg(AI_COVE_URL).spawn();
-                #[cfg(target_os = "windows")]
-                let _open_result = Command::new("cmd")
-                    .args(["/C", "start", "", AI_COVE_URL])
-                    .spawn();
-                #[cfg(all(unix, not(target_os = "macos")))]
-                let _open_result = Command::new("xdg-open").arg(AI_COVE_URL).spawn();
+                let _open_result = open_ai_cove_url();
             }
             QUIT_MENU_ID => quit_after_restore(app),
             _ => {}
@@ -220,6 +214,25 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+fn open_ai_cove_url() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    Command::new("open")
+        .arg(AI_COVE_URL)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "windows")]
+    Command::new("cmd")
+        .args(["/C", "start", "", AI_COVE_URL])
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Command::new("xdg-open")
+        .arg(AI_COVE_URL)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn initialize_desktop_preferences(app: &AppHandle, runtime: &Arc<AppRuntime>) {
     let autolaunch = app.autolaunch();
     let enabled = if runtime.autostart_initialized() {
@@ -231,6 +244,9 @@ fn initialize_desktop_preferences(app: &AppHandle, runtime: &Arc<AppRuntime>) {
 
     #[cfg(target_os = "macos")]
     {
+        if !runtime.dock_initialized() {
+            runtime.set_dock_state(true);
+        }
         let visible = runtime.dock_visible();
         let policy = if visible {
             tauri::ActivationPolicy::Regular
@@ -288,6 +304,11 @@ async fn get_codex_thread_info(
     let codex_home = std::env::var_os("CODEX_HOME")
         .map_or_else(|| home.join(".codex"), std::path::PathBuf::from);
     codex_thread_title::read(codex_home.join("state_5.sqlite"), thread_id).await
+}
+
+#[tauri::command]
+fn open_ai_cove() -> Result<(), String> {
+    open_ai_cove_url()
 }
 
 #[tauri::command]

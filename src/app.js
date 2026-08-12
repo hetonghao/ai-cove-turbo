@@ -14,6 +14,7 @@
   const CONNECTION_DENSITIES = ["full", "compact", "state-only"];
   const CONNECTION_DRAG_THRESHOLD_PX = 36;
   const LIVE_TAIL_THRESHOLD_PX = 24;
+  const AI_COVE_URL = "https://ai-cove.com";
   const HTTP_DEGRADATION_WINDOW_MS = 5 * 60_000;
   const HTTP_DEGRADATION_MIN_SPAN_MS = 30_000;
   const HTTP_DEGRADATION_MIN_REQUESTS = 5;
@@ -51,7 +52,7 @@
     hybridRecoveryHttp: 0,
     directHttp: 0,
     autostartEnabled: true,
-    dockVisible: false,
+    dockVisible: true,
     dockControlAvailable: true,
     restartRequired: false,
     desktopRestarted: false,
@@ -163,6 +164,7 @@
   let connectionPanelOpen = false;
   let connectionPanelTrigger = null;
   let connectionDockOffset = 0;
+  let aiCoveBubbleOpen = false;
   let connectionSnapshot = invoke
     ? { currentConnections: 0, prewarm: 0, boundThreads: [], transitions: [], recentClosed: [] }
     : previewConnectionSnapshot;
@@ -202,6 +204,15 @@
     url.searchParams.delete("variant");
     url.searchParams.set("tab", state.tab);
     window.history.replaceState({}, "", url);
+  }
+
+  function setAiCoveBubbleOpen(open, { restoreFocus = false } = {}) {
+    const trigger = $("[data-ai-cove-trigger]");
+    const bubble = $("[data-ai-cove-bubble]");
+    aiCoveBubbleOpen = Boolean(open);
+    trigger?.setAttribute("aria-expanded", String(aiCoveBubbleOpen));
+    if (bubble) bubble.hidden = !aiCoveBubbleOpen;
+    if (!aiCoveBubbleOpen && restoreFocus) trigger?.focus?.();
   }
 
   function formatConfigState() {
@@ -271,10 +282,14 @@
     return (Number(state.requests) || 0) + (Number(state.websocketMessages) || 0);
   }
 
+  function runtimeObserved() {
+    return totalRequests() > 0 || Number(state.websocketHandshakes) > 0;
+  }
+
   function formatState(key) {
     const configState = String(state.configState ?? "unknown").toUpperCase();
     const starting = configState === "STARTING";
-    const observed = totalRequests() > 0 || Number(state.websocketHandshakes) > 0;
+    const observed = runtimeObserved();
     const values = {
       "runtime-mode": invoke ? "DESKTOP" : "PREVIEW",
       "service-label": `${invoke ? "AI Cove" : "PREVIEW"} / ${starting ? "正在读取状态" : state.serviceHealthy ? "本地服务正常" : "本地服务异常"}`,
@@ -330,7 +345,7 @@
   function statusFor(key) {
     if (key.startsWith("service")) return state.serviceHealthy ? "verified" : String(state.configState).toLowerCase() === "starting" ? "waiting" : "blocked";
     if (key.startsWith("config")) return configReady() ? "verified" : String(state.configState).toLowerCase() === "starting" ? "waiting" : "blocked";
-    if (key.startsWith("restart")) return state.restartRequired ? "required" : totalRequests() > 0 || state.desktopRestarted ? "verified" : "waiting";
+    if (key.startsWith("restart")) return state.restartRequired ? "required" : runtimeObserved() || state.desktopRestarted ? "verified" : "waiting";
     if (key.startsWith("http-zstd")) return !state.compressionEnabled ? "disabled" : state.compressionVerified ? "verified" : "waiting";
     if (key === "http-status") return state.serviceHealthy ? "verified" : "blocked";
     if (key.startsWith("websocket-zstd")) return !state.websocketEnabled ? "disabled" : state.websocketZstdVerified ? "verified" : "waiting";
@@ -906,9 +921,11 @@
     if (summaryTrigger) {
       const actionLabel = connectionPanelOpen
         ? "点击或上拉收起连接检查器，左右拖动可移动"
-        : "打开连接检查器";
+        : "左右拖动移动，点击或下拉展开连接检查器";
       summaryTrigger.setAttribute("aria-label", `${summaryLabel}，${actionLabel}`);
-      summaryTrigger.setAttribute("title", connectionPanelOpen ? "左右拖动移动 · 点击或上拉收起" : "打开连接检查器");
+      summaryTrigger.dataset.tooltip = "左右拖动移动 · 点击或下拉展开";
+      if (connectionPanelOpen) summaryTrigger.setAttribute("title", "左右拖动移动 · 点击或上拉收起");
+      else summaryTrigger.removeAttribute?.("title");
     }
     if (!connectionPanelOpen && !force) return;
     const boundGroups = groupConnectionsByThread(snapshot.boundThreads);
@@ -1445,6 +1462,22 @@
   }
 
   async function handleAction(action, control) {
+    if (action === "toggle-ai-cove-bubble") {
+      setAiCoveBubbleOpen(!aiCoveBubbleOpen);
+      return;
+    }
+    if (action === "open-ai-cove") {
+      setAiCoveBubbleOpen(false);
+      try {
+        if (invoke) await invoke("open_ai_cove");
+        else window.open?.(AI_COVE_URL, "_blank", "noopener,noreferrer");
+      } catch (error) {
+        state.configMessage = "无法打开 AI Cove，请在浏览器访问 ai-cove.com。";
+        state.technicalDetail = error instanceof Error ? error.message : String(error);
+        renderState();
+      }
+      return;
+    }
     if (action === "toggle-connections") {
       if (connectionPanelOpen) {
         setConnectionPanelOpen(false);
@@ -1648,10 +1681,15 @@
     document.addEventListener("click", (event) => {
       const action = event.target.closest?.("[data-action]");
       if (action) void handleAction(action.dataset.action, action);
+      if (aiCoveBubbleOpen && !event.target.closest?.("[data-ai-cove-popover]")) setAiCoveBubbleOpen(false);
       const tab = event.target.closest?.("[data-tab]");
       if (tab) selectTab(tab.dataset.tab);
     });
     document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && aiCoveBubbleOpen) {
+        setAiCoveBubbleOpen(false, { restoreFocus: true });
+        return;
+      }
       if (event.key === "Escape" && connectionPanelOpen) {
         setConnectionPanelOpen(false);
         return;

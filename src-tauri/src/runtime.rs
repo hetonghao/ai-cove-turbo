@@ -65,6 +65,7 @@ struct Preferences {
     websocket_enabled: bool,
     autostart_initialized: bool,
     dock_visible: bool,
+    dock_initialized: bool,
     last_port: Option<u16>,
     confirmed_non_ai_cove_upstream: Option<String>,
 }
@@ -75,7 +76,8 @@ impl Default for Preferences {
             compression_enabled: true,
             websocket_enabled: true,
             autostart_initialized: false,
-            dock_visible: false,
+            dock_visible: true,
+            dock_initialized: false,
             last_port: None,
             confirmed_non_ai_cove_upstream: None,
         }
@@ -454,6 +456,7 @@ impl AppRuntime {
         let preferences = {
             let mut preferences = lock_mutex(&self.preferences);
             preferences.dock_visible = visible;
+            preferences.dock_initialized = true;
             preferences.clone()
         };
         let _ = save_preferences(&self.paths.preferences_path(), &preferences);
@@ -462,6 +465,10 @@ impl AppRuntime {
 
     pub(crate) fn dock_visible(&self) -> bool {
         lock_mutex(&self.preferences).dock_visible
+    }
+
+    pub(crate) fn dock_initialized(&self) -> bool {
+        lock_mutex(&self.preferences).dock_initialized
     }
 
     pub(crate) fn mark_desktop_restarted(&self) {
@@ -818,6 +825,31 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn dock_default_migrates_once_then_preserves_the_saved_choice() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let path = root.path().join("preferences.json");
+
+        assert!(load_preferences(&path).dock_visible);
+        fs::write(&path, br#"{"dockVisible":false}"#)?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: root.path().join("config.toml"),
+            data_dir: root.path().to_path_buf(),
+        });
+        assert!(!runtime.dock_visible());
+        assert!(!runtime.dock_initialized());
+
+        runtime.set_dock_state(true);
+        assert!(runtime.dock_visible());
+        assert!(runtime.dock_initialized());
+
+        runtime.set_dock_state(false);
+        let saved = load_preferences(&path);
+        assert!(!saved.dock_visible);
+        assert!(saved.dock_initialized);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn lifecycle_exposes_health_then_restores_codex_on_shutdown() -> Result<(), Box<dyn Error>>
