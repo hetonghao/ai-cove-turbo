@@ -14,6 +14,9 @@
   const CONNECTION_DENSITIES = ["full", "compact", "state-only"];
   const CONNECTION_DRAG_THRESHOLD_PX = 36;
   const LIVE_TAIL_THRESHOLD_PX = 24;
+  const HTTP_DEGRADATION_WINDOW_MS = 5 * 60_000;
+  const HTTP_DEGRADATION_MIN_SPAN_MS = 30_000;
+  const HTTP_DEGRADATION_MIN_REQUESTS = 5;
   const invoke = window.__TAURI__?.core?.invoke;
   const telemetry = window.TurboTelemetry;
   const connectionDom = window.TurboConnectionDOM;
@@ -383,6 +386,25 @@
         label: "查看配置",
         detail: state.technicalDetail,
       };
+    }
+    if (state.websocketEnabled && !state.restartRequired) {
+      const cutoff = Date.now() - HTTP_DEGRADATION_WINDOW_MS;
+      const responses = (Array.isArray(state.recentRequests) ? state.recentRequests : [])
+        .filter((request) => request.path === "/v1/responses" && Number(request.timestampMs) >= cutoff);
+      const directHttp = responses.filter((request) => request.route === "directHttp");
+      const timestamps = directHttp.map((request) => Number(request.timestampMs));
+      const sustained = directHttp.length >= HTTP_DEGRADATION_MIN_REQUESTS
+        && responses.at(-1)?.route === "directHttp"
+        && directHttp.length / responses.length >= 0.8
+        && Math.max(...timestamps) - Math.min(...timestamps) >= HTTP_DEGRADATION_MIN_SPAN_MS;
+      if (sustained) {
+        return {
+          title: "Codex 可能仍在使用 HTTP",
+          message: "Turbo 配置正常，但部分任务近期持续未建立 WebSocket。建议完成当前任务后重启 Codex。",
+          action: "restart-codex",
+          label: "重启 Codex",
+        };
+      }
     }
     return null;
   }

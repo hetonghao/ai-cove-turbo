@@ -204,6 +204,38 @@ async function liveTailHarness() {
   };
 }
 
+async function liveRecoveryHarness(status) {
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  const recovery = motionElement({}, true);
+  const title = element();
+  const message = element();
+  const action = element({ action: "open-config" });
+  const selectors = new Map([
+    ["[data-live-recovery]", recovery],
+    ["[data-live-recovery-title]", title],
+    ["[data-live-recovery-message]", message],
+    ["[data-live-recovery-action]", action],
+  ]);
+  const document = {
+    readyState: "complete",
+    body: element(),
+    addEventListener() {},
+    querySelector(selector) { return selectors.get(selector) ?? null; },
+    querySelectorAll() { return []; },
+  };
+  const window = {
+    __TAURI__: { core: { invoke: async () => status } },
+    location: { href: "tauri://localhost/?tab=live" },
+    history: { replaceState() {} },
+    addEventListener() {},
+    setInterval() {},
+  };
+
+  await runApp(source, { document, window, URL, Intl });
+  await new Promise((resolve) => setImmediate(resolve));
+  return { action, message, recovery, title };
+}
+
 test("Tauri 首帧在真实状态返回前保持未验证", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const states = [
@@ -275,6 +307,105 @@ test("Codex 待重启时只显示行内动作和 hover 提示", async () => {
   assert.equal(restart.dataset.required, "true");
   assert.equal(restart.attributes.get("title"), "配置已写入，重启后会重新验证传输通道。");
   assert.match(restart.attributes.get("aria-label"), /重启 Codex/);
+  assert.equal(recovery.hidden, true);
+});
+
+test("配置正常但 Responses 持续直连 HTTP 时提示重启 Codex", async () => {
+  // Given: 最近五分钟内至少五次直连 HTTP，且占 Responses 请求的八成以上并持续超过三十秒。
+  const now = Date.now();
+  const recentRequests = [
+    { id: 1, timestampMs: now - 55_000, path: "/v1/responses", route: "hybridWs" },
+    ...[50, 40, 30, 20, 10].map((ageSeconds, index) => ({
+      id: index + 2,
+      timestampMs: now - ageSeconds * 1_000,
+      path: "/v1/responses",
+      route: "directHttp",
+    })),
+  ];
+
+  // When: Turbo 渲染已验证且健康的运行状态。
+  const { action, message, recovery, title } = await liveRecoveryHarness({
+    serviceHealthy: true,
+    configState: "managed",
+    websocketEnabled: true,
+    websocketVerified: true,
+    websocketState: "connected",
+    recentRequests,
+  });
+
+  // Then: 提示部分任务可能保留旧 HTTP 状态，并提供现有的重启操作。
+  assert.equal(recovery.hidden, false);
+  assert.equal(title.textContent, "Codex 可能仍在使用 HTTP");
+  assert.match(message.textContent, /部分任务/);
+  assert.equal(action.dataset.action, "restart-codex");
+});
+
+test("最新 Responses 请求已恢复 WebSocket 时不再提示重启", async () => {
+  // Given: 一段持续 HTTP 降级之后，最新请求已经通过 Hybrid WS 完成。
+  const now = Date.now();
+  const recentRequests = [50, 40, 30, 20, 10].map((ageSeconds, index) => ({
+    id: index + 1,
+    timestampMs: now - ageSeconds * 1_000,
+    path: "/v1/responses",
+    route: "directHttp",
+  }));
+  recentRequests.push({ id: 6, timestampMs: now - 5_000, path: "/v1/responses", route: "hybridWs" });
+
+  // When: Turbo 渲染当前状态。
+  const { recovery } = await liveRecoveryHarness({
+    serviceHealthy: true,
+    configState: "managed",
+    websocketEnabled: true,
+    websocketState: "connected",
+    recentRequests,
+  });
+
+  // Then: 已恢复的通道不再提示用户重复重启。
+  assert.equal(recovery.hidden, true);
+});
+
+test("少量直连 HTTP 不提示重启 Codex", async () => {
+  // Given: 配置正常，但最近只有四次 Responses 直连 HTTP。
+  const now = Date.now();
+  const recentRequests = [240, 180, 120, 60].map((ageSeconds, index) => ({
+    id: index + 1,
+    timestampMs: now - ageSeconds * 1_000,
+    path: "/v1/responses",
+    route: "directHttp",
+  }));
+
+  // When: Turbo 渲染当前状态。
+  const { recovery } = await liveRecoveryHarness({
+    serviceHealthy: true,
+    configState: "managed",
+    websocketEnabled: true,
+    websocketState: "connected",
+    recentRequests,
+  });
+
+  // Then: 冷启动或零散 HTTP 不产生恢复提示。
+  assert.equal(recovery.hidden, true);
+});
+
+test("WebSocket 已关闭时不把直连 HTTP 误判为降级", async () => {
+  // Given: 用户主动关闭 WebSocket，最近请求自然全部使用 HTTP。
+  const now = Date.now();
+  const recentRequests = [60, 50, 40, 30, 20, 10].map((ageSeconds, index) => ({
+    id: index + 1,
+    timestampMs: now - ageSeconds * 1_000,
+    path: "/v1/responses",
+    route: "directHttp",
+  }));
+
+  // When: Turbo 渲染当前状态。
+  const { recovery } = await liveRecoveryHarness({
+    serviceHealthy: true,
+    configState: "managed",
+    websocketEnabled: false,
+    recentRequests,
+  });
+
+  // Then: 不提示重启 Codex。
   assert.equal(recovery.hidden, true);
 });
 
