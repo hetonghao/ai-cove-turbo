@@ -131,14 +131,17 @@ pub fn run() -> tauri::Result<()> {
         })
         .build(tauri::generate_context!())?;
 
-    app.run(|app_handle, event| {
-        if let RunEvent::ExitRequested { api, .. } = event {
+    app.run(|app_handle, event| match event {
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => show_main_window(app_handle),
+        RunEvent::ExitRequested { api, .. } => {
             let runtime = Arc::clone(app_handle.state::<Arc<AppRuntime>>().inner());
             if tauri::async_runtime::block_on(runtime.shutdown()).is_err() {
                 api.prevent_exit();
                 show_main_window(app_handle);
             }
         }
+        _ => {}
     });
     Ok(())
 }

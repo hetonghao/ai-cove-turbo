@@ -291,3 +291,13 @@ test("macOS 状态栏使用紧凑的 Turbo 模板剪影", async () => {
   assert.doesNotMatch(traySetup, /\.title\("T"\)/);
   assert.match(traySetup, /#\[cfg\(not\(target_os = "macos"\)\)\][\s\S]*default_window_icon\(\)/);
 });
+
+test("macOS Dock 点击会重新显示被隐藏的主窗口", async () => {
+  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+
+  assert.match(
+    rust,
+    /RunEvent::Reopen \{ \.\. \} => show_main_window\(app_handle\)/,
+    "Dock reopen 事件必须恢复主窗口",
+  );
+});
