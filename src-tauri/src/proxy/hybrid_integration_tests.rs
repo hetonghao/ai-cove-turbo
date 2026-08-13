@@ -18,6 +18,9 @@ type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[path = "hybrid_continuation_tests.rs"]
 mod continuation_tests;
 
+#[path = "hybrid_legacy_integration_tests.rs"]
+mod legacy_integration_tests;
+
 #[path = "hybrid_observability_integration_tests.rs"]
 mod observability_integration_tests;
 

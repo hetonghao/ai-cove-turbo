@@ -403,11 +403,11 @@ test("Codex 待重启时只显示行内动作和 hover 提示", async () => {
   assert.equal(recovery.hidden, true);
 });
 
-test("配置正常但 Responses 持续直连 HTTP 时提示重启 Codex", async () => {
-  // Given: 最近五分钟内至少五次直连 HTTP，且占 Responses 请求的八成以上并持续超过三十秒。
+test("WebSocket 已恢复但 Responses 持续直连 HTTP 时提示旧任务重启 Codex", async () => {
+  // Given: 最近有成功 Hybrid WS，随后五次直连 HTTP 占八成以上并持续超过三十秒。
   const now = Date.now();
   const recentRequests = [
-    { id: 1, timestampMs: now - 55_000, path: "/v1/responses", route: "hybridWs" },
+    { id: 1, timestampMs: now - 55_000, path: "/v1/responses", route: "hybridWs", result: "success" },
     ...[50, 40, 30, 20, 10].map((ageSeconds, index) => ({
       id: index + 2,
       timestampMs: now - ageSeconds * 1_000,
@@ -426,10 +426,37 @@ test("配置正常但 Responses 持续直连 HTTP 时提示重启 Codex", async 
     recentRequests,
   });
 
-  // Then: 提示部分任务可能保留旧 HTTP 状态，并提供现有的重启操作。
+  // Then: 明确说明 Turbo WebSocket 已恢复，仅旧任务保留 HTTP，并提供现有重启操作。
+  assert.equal(recovery.hidden, false);
+  assert.equal(title.textContent, "部分旧任务仍在使用 HTTP");
+  assert.equal(message.textContent, "Turbo 的 WebSocket 已恢复，但部分旧任务仍停留在 HTTP。建议完成当前操作后重启 Codex。");
+  assert.equal(action.dataset.action, "restart-codex");
+});
+
+test("没有近期 WebSocket 成功证据时保留通用 HTTP 降级提示", async () => {
+  // Given: 最近只有持续超过三十秒的 Responses 直连 HTTP，没有成功 Hybrid WS。
+  const now = Date.now();
+  const recentRequests = [60, 50, 40, 30, 20, 10].map((ageSeconds, index) => ({
+    id: index + 1,
+    timestampMs: now - ageSeconds * 1_000,
+    path: "/v1/responses",
+    route: "directHttp",
+    result: "success",
+  }));
+
+  // When: Turbo 渲染已验证且健康的运行状态。
+  const { action, message, recovery, title } = await liveRecoveryHarness({
+    serviceHealthy: true,
+    configState: "managed",
+    websocketEnabled: true,
+    websocketState: "connected",
+    recentRequests,
+  });
+
+  // Then: 保留通用提示，不声称 WebSocket 已经恢复。
   assert.equal(recovery.hidden, false);
   assert.equal(title.textContent, "Codex 可能仍在使用 HTTP");
-  assert.match(message.textContent, /部分任务/);
+  assert.match(message.textContent, /部分任务近期持续未建立 WebSocket/);
   assert.equal(action.dataset.action, "restart-codex");
 });
 

@@ -413,9 +413,12 @@
         && directHttp.length / responses.length >= 0.8
         && Math.max(...timestamps) - Math.min(...timestamps) >= HTTP_DEGRADATION_MIN_SPAN_MS;
       if (sustained) {
+        const websocketRecovered = responses.some((request) => request.route === "hybridWs" && request.result === "success");
         return {
-          title: "Codex 可能仍在使用 HTTP",
-          message: "Turbo 配置正常，但部分任务近期持续未建立 WebSocket。建议完成当前任务后重启 Codex。",
+          title: websocketRecovered ? "部分旧任务仍在使用 HTTP" : "Codex 可能仍在使用 HTTP",
+          message: websocketRecovered
+            ? "Turbo 的 WebSocket 已恢复，但部分旧任务仍停留在 HTTP。建议完成当前操作后重启 Codex。"
+            : "Turbo 配置正常，但部分任务近期持续未建立 WebSocket。建议完成当前任务后重启 Codex。",
           action: "restart-codex",
           label: "重启 Codex",
         };
