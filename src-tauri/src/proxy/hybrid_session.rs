@@ -112,6 +112,7 @@ impl Session {
             .hybrid_pool
             .discard(&self.pool_scope, self.pool_id, retirement)
             .await;
+        self.last_terminal_response_id = None;
         self.observed_activity = None;
     }
 
