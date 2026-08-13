@@ -19,6 +19,8 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   const versionBarIndex = configPanel.indexOf('class="b-version-bar"');
   const configStageIndex = configPanel.indexOf('class="b-stage"');
   const configCardIndex = configPanel.indexOf('class="b-popover b-popover--wide"');
+  const versionBarEndIndex = configPanel.indexOf("</header>", versionBarIndex);
+  const updateProgressIndex = configPanel.indexOf('class="b-progress', versionBarIndex);
 
   // Then: 实时、统计和配置页可访问，业务控制仍只出现在配置页。
   assert.equal(tabs.length, 3);
@@ -62,6 +64,11 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.ok(configPanel.includes(`>v${packageJson.version}</span>`));
   assert.equal(configPanel.match(/data-action="check-for-updates"/g)?.length, 1);
   assert.equal(configPanel.match(/data-state="update-state"/g)?.length, 1);
+  assert.ok(updateProgressIndex > versionBarIndex && updateProgressIndex < versionBarEndIndex);
+  assert.match(configPanel, /class="b-version-bar__percent[^>]*data-state="update-progress"/);
+  assert.match(css, /\.b-version-bar \.b-progress\s*\{[^}]*position: absolute;/s);
+  assert.match(css, /transform: scaleX\(var\(--progress, 0\)\)/);
+  assert.doesNotMatch(css, /\.b-progress\s*\{[^}]*height: 18px;/s);
   assert.doesNotMatch(configPanel.slice(configCardIndex), /data-action="check-for-updates"|data-state="update-state"/);
   assert.doesNotMatch(html, /00:09:42|STREAMING/);
   assert.match(`${html}\n${css}\n${app}`, /扩展由上游协商/);

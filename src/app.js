@@ -468,14 +468,15 @@
 
   function renderVisibility() {
     const configState = String(state.configState).toLowerCase();
+    const updateState = String(state.updateState).toLowerCase();
     const visible = {
       dock: Boolean(state.dockControlAvailable),
       "non-ai-cove": !state.aiCoveUpstream && !state.aiCoveUpstreamFixAvailable,
       "ai-cove-upstream": Boolean(state.aiCoveUpstreamFixAvailable),
       "confirm-non-ai-cove": configState === "warning" && !state.nonAiCoveConfirmed,
       retry: !state.aiCoveUpstreamFixAvailable && (configState === "blocked" || (configState === "conflict" && !state.serviceHealthy)),
-      "install-update": ["available", "downloaded"].includes(String(state.updateState).toLowerCase()),
-      "update-progress": ["downloading", "installing"].includes(String(state.updateState).toLowerCase()),
+      "install-update": ["available", "downloaded", "downloading", "installing", "error"].includes(updateState),
+      "update-progress": ["downloading", "installing"].includes(updateState),
     };
     all("[data-visible]").forEach((target) => {
       setConditionalVisibility(target, Boolean(visible[target.dataset.visible]));
@@ -483,6 +484,8 @@
   }
 
   function renderControls() {
+    const updateState = String(state.updateState).toLowerCase();
+    const updateBusy = ["downloading", "installing"].includes(updateState);
     const pressed = {
       "toggle-compression": state.compressionEnabled,
       "toggle-websocket": state.websocketEnabled,
@@ -493,9 +496,15 @@
       const action = control.dataset.action;
       const managed = Object.hasOwn(actions, action);
       if (managed) {
-        control.disabled = Boolean(pendingAction);
-        control.dataset.status = pendingAction === action ? "pending" : "idle";
-        control.setAttribute("aria-busy", String(pendingAction === action));
+        const actionPending = pendingAction === action || (action === "install-update" && updateBusy);
+        control.disabled = Boolean(pendingAction) || actionPending;
+        control.dataset.status = actionPending ? "pending" : "idle";
+        control.setAttribute("aria-busy", String(actionPending));
+      }
+      if (action === "install-update") {
+        control.textContent = pendingAction === action || updateBusy
+          ? "更新中"
+          : updateState === "error" ? "重新下载" : "安装更新";
       }
       if (action === "restart-codex") {
         control.dataset.required = String(Boolean(state.restartRequired));
@@ -519,11 +528,12 @@
       const status = statusFor(key);
       if (status) target.dataset.status = status;
     });
+    const updateProgress = Math.max(0, Math.min(100, Number(state.updateProgress) || 0));
     all("[data-state-progress]").forEach((target) => {
-      target.style.setProperty("--progress", `${Math.max(0, Math.min(100, Number(state.updateProgress) || 0))}%`);
+      target.style.setProperty("--progress", String(updateProgress / 100));
     });
     all('[role="progressbar"]').forEach((target) => {
-      target.setAttribute("aria-valuenow", String(Math.max(0, Math.min(100, Number(state.updateProgress) || 0))));
+      target.setAttribute("aria-valuenow", String(updateProgress));
     });
     const count = activationVerifiedCount();
     all("[data-strands]").forEach((strands) => {
@@ -1530,12 +1540,16 @@
     }
   }
 
+  function canRefreshStatus() {
+    return !pendingAction || pendingAction === "install-update";
+  }
+
   async function refreshStatus() {
-    if (!invoke || pendingAction || refreshing || document.hidden) return;
+    if (!invoke || !canRefreshStatus() || refreshing || document.hidden) return;
     refreshing = true;
     try {
       const status = await invoke("get_app_status");
-      if (!pendingAction) {
+      if (canRefreshStatus()) {
         const animateNew = statusHydrated;
         statusHydrated = true;
         applyStatus(status, { animateNew });

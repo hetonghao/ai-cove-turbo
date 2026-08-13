@@ -1330,6 +1330,85 @@ test("条件区域从隐藏变为可见时播放轻量反馈", async () => {
   );
 });
 
+test("安装更新期间持续读取并展示下载进度", async () => {
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  let status = {
+    updateState: "available",
+    updateMessage: "发现新版本 v0.1.0-beta.4",
+    updateProgress: 0,
+  };
+  let statusPolls = 0;
+  let onClick;
+  let onTick;
+  const installUpdate = element({ action: "install-update", visible: "install-update" });
+  installUpdate.closest = (selector) => selector === "[data-action]" ? installUpdate : null;
+  const updateState = element({ state: "update-state" });
+  const updateMessage = element({ state: "update-message" });
+  const updatePercent = motionElement({ state: "update-progress", visible: "update-progress" }, true);
+  const progressTrack = motionElement({ visible: "update-progress" }, true);
+  const progressFill = element({ stateProgress: "update-progress" });
+  let progressScale = "";
+  progressFill.style.setProperty = (name, value) => {
+    if (name === "--progress") progressScale = value;
+  };
+  const document = {
+    hidden: false,
+    readyState: "complete",
+    body: element(),
+    addEventListener(type, handler) {
+      if (type === "click") onClick = handler;
+    },
+    querySelector() { return null; },
+    querySelectorAll(selector) {
+      if (selector === "[data-action]") return [installUpdate];
+      if (selector === "[data-state]") return [updateState, updateMessage, updatePercent];
+      if (selector === "[data-state-progress]") return [progressFill];
+      if (selector === "[data-visible]") return [installUpdate, updatePercent, progressTrack];
+      if (selector === '[role="progressbar"]') return [progressTrack];
+      return [];
+    },
+  };
+  const window = {
+    __TAURI__: { core: { invoke(command) {
+      if (command === "install_update") return new Promise(() => {});
+      if (command === "get_app_status") {
+        statusPolls += 1;
+        return Promise.resolve(status);
+      }
+      return Promise.resolve({});
+    } } },
+    location: { href: "tauri://localhost/?tab=config" },
+    history: { replaceState() {} },
+    matchMedia: () => ({ matches: false }),
+    addEventListener() {},
+    setInterval(handler) { onTick = handler; },
+  };
+
+  await runApp(source, { document, window, URL, Intl });
+  await new Promise((resolve) => setImmediate(resolve));
+  onClick({ target: installUpdate });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  status = {
+    updateState: "downloading",
+    updateMessage: "正在下载签名更新",
+    updateProgress: 68,
+  };
+  await onTick();
+
+  assert.equal(statusPolls, 2);
+  assert.equal(updateState.textContent, "下载中");
+  assert.equal(updateMessage.textContent, "正在下载签名更新");
+  assert.equal(updatePercent.textContent, "68%");
+  assert.equal(updatePercent.hidden, false);
+  assert.equal(progressTrack.hidden, false);
+  assert.equal(progressTrack.attributes.get("aria-valuenow"), "68");
+  assert.equal(progressScale, "0.68");
+  assert.equal(installUpdate.textContent, "更新中");
+  assert.equal(installUpdate.disabled, true);
+  assert.equal(installUpdate.attributes.get("aria-busy"), "true");
+});
+
 test("实时终端只增量追加新请求并同步触发传输脉冲", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   let status = {
