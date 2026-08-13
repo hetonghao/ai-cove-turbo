@@ -78,6 +78,7 @@ pub(crate) struct ProxyOptions {
 #[derive(Debug, Default)]
 pub(crate) struct Metrics {
     requests: AtomicU64,
+    successful_responses: AtomicU64,
     raw_bytes: AtomicU64,
     sent_bytes: AtomicU64,
     compression_verified: AtomicBool,
@@ -99,6 +100,7 @@ pub(crate) struct Metrics {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MetricsSnapshot {
     pub(crate) requests: u64,
+    pub(crate) successful_responses: u64,
     pub(crate) raw_bytes: u64,
     pub(crate) sent_bytes: u64,
     pub(crate) compression_verified: bool,
@@ -169,6 +171,7 @@ impl Metrics {
         let route_counts = self.traffic.route_counts();
         MetricsSnapshot {
             requests: self.requests.load(Ordering::Relaxed),
+            successful_responses: self.successful_responses.load(Ordering::Relaxed),
             raw_bytes: self.raw_bytes.load(Ordering::Relaxed),
             sent_bytes: self.sent_bytes.load(Ordering::Relaxed),
             compression_verified: self.compression_verified.load(Ordering::Relaxed),
@@ -195,6 +198,12 @@ impl Metrics {
             record.result
         };
         self.requests.fetch_add(1, Ordering::Relaxed);
+        if record.path == "/v1/responses"
+            && (200..300).contains(&record.status)
+            && result != traffic::TrafficResult::Error
+        {
+            self.successful_responses.fetch_add(1, Ordering::Relaxed);
+        }
         self.raw_bytes
             .fetch_add(record.raw_bytes as u64, Ordering::Relaxed);
         self.sent_bytes
@@ -293,7 +302,7 @@ impl Metrics {
         compressed: bool,
         route: Option<traffic::TrafficRoute>,
     ) {
-        self.record_websocket_outcome(
+        self.record_websocket_message(
             traffic::TrafficRecord {
                 timestamp_ms: traffic::now_ms(),
                 status: StatusCode::SWITCHING_PROTOCOLS.as_u16(),
@@ -311,6 +320,13 @@ impl Metrics {
     }
 
     fn record_websocket_outcome(&self, record: traffic::TrafficRecord<'_>, compressed: bool) {
+        if record.path == "/v1/responses" && record.result == traffic::TrafficResult::Success {
+            self.successful_responses.fetch_add(1, Ordering::Relaxed);
+        }
+        self.record_websocket_message(record, compressed);
+    }
+
+    fn record_websocket_message(&self, record: traffic::TrafficRecord<'_>, compressed: bool) {
         self.websocket_messages.fetch_add(1, Ordering::Relaxed);
         self.websocket_raw_bytes
             .fetch_add(record.raw_bytes, Ordering::Relaxed);
@@ -348,6 +364,32 @@ impl Metrics {
             route: None,
             failure_phase: None,
             failure_reason: None,
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_successful_response_for_test(&self) {
+        self.record_http(HttpRequestMetric {
+            path: "/v1/responses",
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            result: traffic::TrafficResult::Success,
+            route: traffic::TrafficRoute::DirectHttp,
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_failed_response_for_test(&self) {
+        self.record_http(HttpRequestMetric {
+            path: "/v1/responses",
+            status: StatusCode::BAD_GATEWAY.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            result: traffic::TrafficResult::Success,
+            route: traffic::TrafficRoute::DirectHttp,
         });
     }
 }
@@ -901,6 +943,84 @@ mod tests {
         assert_eq!(Metrics::load_traffic(&path).snapshot().direct_http, 1);
 
         Ok(())
+    }
+
+    #[test]
+    fn only_successful_responses_advance_activation_evidence() {
+        let metrics = Metrics::default();
+
+        metrics.record_http(HttpRequestMetric {
+            path: "/v1/responses",
+            status: 200,
+            raw_bytes: 100,
+            sent_bytes: 50,
+            compressed: true,
+            result: traffic::TrafficResult::Success,
+            route: traffic::TrafficRoute::DirectHttp,
+        });
+        metrics.record_http(HttpRequestMetric {
+            path: "/v1/responses",
+            status: 502,
+            raw_bytes: 100,
+            sent_bytes: 50,
+            compressed: false,
+            result: traffic::TrafficResult::Success,
+            route: traffic::TrafficRoute::DirectHttp,
+        });
+        metrics.record_http(HttpRequestMetric {
+            path: "/v1/models",
+            status: 200,
+            raw_bytes: 100,
+            sent_bytes: 50,
+            compressed: false,
+            result: traffic::TrafficResult::Success,
+            route: traffic::TrafficRoute::DirectHttp,
+        });
+        metrics.record_http(HttpRequestMetric {
+            path: "/v1/responses",
+            status: 200,
+            raw_bytes: 100,
+            sent_bytes: 50,
+            compressed: false,
+            result: traffic::TrafficResult::Error,
+            route: traffic::TrafficRoute::DirectHttp,
+        });
+        metrics.record_websocket_connected();
+        metrics.record_websocket_outcome(
+            traffic::TrafficRecord {
+                timestamp_ms: traffic::now_ms(),
+                status: 1011,
+                path: "/v1/responses",
+                raw_bytes: 100,
+                sent_bytes: 50,
+                transport: traffic::TrafficTransport::Ws,
+                result: traffic::TrafficResult::Error,
+                route: Some(traffic::TrafficRoute::HybridWs),
+                failure_phase: Some(traffic::FailurePhase::HybridActive),
+                failure_reason: Some("upstream failed after send"),
+            },
+            true,
+        );
+
+        assert_eq!(metrics.snapshot().successful_responses, 1);
+
+        metrics.record_websocket_outcome(
+            traffic::TrafficRecord {
+                timestamp_ms: traffic::now_ms(),
+                status: StatusCode::SWITCHING_PROTOCOLS.as_u16(),
+                path: "/v1/responses",
+                raw_bytes: 100,
+                sent_bytes: 50,
+                transport: traffic::TrafficTransport::Ws,
+                result: traffic::TrafficResult::Success,
+                route: Some(traffic::TrafficRoute::HybridWs),
+                failure_phase: None,
+                failure_reason: None,
+            },
+            true,
+        );
+
+        assert_eq!(metrics.snapshot().successful_responses, 2);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -22,9 +22,9 @@ use url::Url;
 use crate::{
     config::{
         AI_COVE_UPSTREAM, ConfigError, ManagedConfig, ManagedOwnership, RestoreOutcome,
-        UpstreamCompatibility, managed_ownership, preflight, recover_stale, relinquish_websocket,
-        restore, set_ai_cove_upstream as replace_loopback_upstream, set_managed_websocket,
-        take_over,
+        StaleRecovery, UpstreamCompatibility, managed_ownership, preflight, recover_stale,
+        relinquish_websocket, restore, set_ai_cove_upstream as replace_loopback_upstream,
+        set_managed_websocket, take_over,
     },
     proxy::{
         ConnectionSnapshot, Metrics, ProxyHandle, ProxyOptions, start_proxy,
@@ -117,6 +117,7 @@ pub(crate) struct AppStatus {
     pub(crate) autostart_enabled: bool,
     pub(crate) dock_visible: bool,
     pub(crate) dock_control_available: bool,
+    pub(crate) codex_state: String,
     pub(crate) restart_required: bool,
     pub(crate) desktop_restarted: bool,
     pub(crate) requests: u64,
@@ -163,6 +164,7 @@ impl AppStatus {
             autostart_enabled: true,
             dock_visible: preferences.dock_visible,
             dock_control_available: cfg!(target_os = "macos"),
+            codex_state: "checking".to_owned(),
             restart_required: false,
             desktop_restarted: false,
             requests: 0,
@@ -189,6 +191,7 @@ pub(crate) struct AppRuntime {
     traffic_persistence: AsyncMutex<Option<TrafficPersistence>>,
     lifecycle_lock: AsyncMutex<()>,
     codex_pid_before_restart: Mutex<Option<u32>>,
+    activation_baseline: AtomicU64,
     shutting_down: AtomicBool,
 }
 
@@ -215,6 +218,7 @@ impl AppRuntime {
             traffic_persistence: AsyncMutex::new(None),
             lifecycle_lock: AsyncMutex::new(()),
             codex_pid_before_restart: Mutex::new(None),
+            activation_baseline: AtomicU64::new(0),
             shutting_down: AtomicBool::new(false),
         })
     }
@@ -234,16 +238,13 @@ impl AppRuntime {
         });
 
         let recovery_path = self.paths.recovery_path();
-        match recover_stale(&recovery_path) {
-            Ok(RestoreOutcome::Conflict) => self.update_status(|status| {
-                status.config_message = "检测到外部配置修改，已放弃旧接管值".to_owned();
-            }),
-            Ok(RestoreOutcome::Restored | RestoreOutcome::NoRecord) => {}
+        let stale_recovery = match self.recover_stale_config(&recovery_path) {
+            Ok(recovery) => recovery,
             Err(error) => {
                 self.block(&error.to_string());
                 return;
             }
-        }
+        };
 
         let check = match preflight(&self.paths.config_path) {
             Ok(check) => check,
@@ -305,13 +306,17 @@ impl AppRuntime {
         self.remember_port(&endpoint);
         *lock_mutex(&self.managed) = Some(managed);
         *self.proxy.lock().await = Some(proxy);
-        *lock_mutex(&self.codex_pid_before_restart) = codex_desktop_process_id();
+        let codex_pid = codex_desktop_process_id();
+        let config_changed = !stale_recovery.matches_effective_config(&endpoint, websocket_enabled);
+        let (codex_state, restart_required, config_message) =
+            self.prepare_codex_activation(config_changed, codex_pid);
         self.update_status(|status| {
             status.service_healthy = true;
             status.endpoint = endpoint;
             status.config_state = "managed".to_owned();
-            status.config_message = "本地服务已就绪，等待 Codex 首次请求验证".to_owned();
-            status.restart_required = true;
+            status.config_message = config_message.to_owned();
+            status.codex_state = codex_state.to_owned();
+            status.restart_required = restart_required;
             status.desktop_restarted = false;
             status.websocket_enabled = websocket_enabled;
             status.websocket_state = if websocket_enabled {
@@ -325,6 +330,15 @@ impl AppRuntime {
     pub(crate) async fn status(&self) -> AppStatus {
         self.refresh_ownership().await;
         let metrics = self.metrics.snapshot();
+        if metrics.successful_responses > self.activation_baseline.load(Ordering::Relaxed)
+            && read_lock(&self.status).config_state == "managed"
+        {
+            self.update_status(|status| {
+                status.codex_state = "active".to_owned();
+                status.restart_required = false;
+                status.config_message = "已观察到本次配置后的成功 Responses 请求".to_owned();
+            });
+        }
         let mut status = read_lock(&self.status).clone();
         status.requests = metrics.requests;
         status.raw_bytes = metrics.raw_bytes;
@@ -365,12 +379,6 @@ impl AppRuntime {
             let basis_points = saved.saturating_mul(10_000) / metrics.raw_bytes;
             f64::from(u32::try_from(basis_points).unwrap_or_default()) / 100.0
         };
-        if (metrics.requests > 0 || metrics.websocket_handshakes > 0)
-            && status.config_state == "managed"
-        {
-            status.restart_required = false;
-            status.config_message = "已观察到 Codex 请求经过 Turbo".to_owned();
-        }
         status
     }
 
@@ -417,7 +425,9 @@ impl AppRuntime {
             preferences.clone()
         };
         let _ = save_preferences(&self.paths.preferences_path(), &preferences);
-        *lock_mutex(&self.codex_pid_before_restart) = codex_desktop_process_id();
+        let codex_pid = codex_desktop_process_id();
+        let (codex_state, restart_required, config_message) =
+            self.prepare_codex_activation(true, codex_pid);
         self.update_status(|status| {
             status.websocket_enabled = enabled;
             status.websocket_verified = false;
@@ -427,13 +437,10 @@ impl AppRuntime {
             } else {
                 "disabled".to_owned()
             };
-            status.restart_required = true;
+            status.codex_state = codex_state.to_owned();
+            status.restart_required = restart_required;
             status.desktop_restarted = false;
-            status.config_message = if enabled {
-                "WebSocket 已开启，重启 Codex 后等待首次握手验证".to_owned()
-            } else {
-                "WebSocket 已关闭，重启 Codex 后生效；HTTP 压缩保持独立".to_owned()
-            };
+            status.config_message = config_message.to_owned();
         });
         Ok(())
     }
@@ -471,8 +478,32 @@ impl AppRuntime {
         lock_mutex(&self.preferences).dock_initialized
     }
 
-    pub(crate) fn mark_desktop_restarted(&self) {
+    pub(crate) fn mark_desktop_restarting(&self) {
         self.update_status(|status| {
+            status.codex_state = "restarting".to_owned();
+            status.restart_required = true;
+            status.desktop_restarted = false;
+            status.config_message = "正在等待 Codex 完成退出并重新启动".to_owned();
+        });
+    }
+
+    pub(crate) fn mark_desktop_restart_failed(&self, message: &str) {
+        self.update_status(|status| {
+            status.codex_state = "restart_failed".to_owned();
+            status.restart_required = true;
+            status.desktop_restarted = false;
+            status.config_message = message.to_owned();
+        });
+    }
+
+    pub(crate) fn mark_desktop_restarted(&self, pid: Option<u32>) {
+        self.activation_baseline.store(
+            self.metrics.snapshot().successful_responses,
+            Ordering::Relaxed,
+        );
+        *lock_mutex(&self.codex_pid_before_restart) = pid;
+        self.update_status(|status| {
+            status.codex_state = "waiting_request".to_owned();
             status.desktop_restarted = true;
             status.restart_required = false;
             status.config_message = "已检测到 Codex 重新启动，等待首次请求验证".to_owned();
@@ -480,7 +511,10 @@ impl AppRuntime {
     }
 
     pub(crate) async fn verify_codex_restart(&self) {
-        if !read_lock(&self.status).restart_required {
+        if !matches!(
+            read_lock(&self.status).codex_state.as_str(),
+            "restart_required" | "waiting_start" | "restart_failed"
+        ) {
             return;
         }
         let previous = *lock_mutex(&self.codex_pid_before_restart);
@@ -489,7 +523,7 @@ impl AppRuntime {
             .ok()
             .flatten();
         if codex_restart_observed(previous, current) {
-            self.mark_desktop_restarted();
+            self.mark_desktop_restarted(current);
         }
     }
 
@@ -656,6 +690,7 @@ impl AppRuntime {
             status.config_state = "blocked".to_owned();
             status.config_message = message.to_owned();
             status.endpoint = "—".to_owned();
+            status.codex_state = "checking".to_owned();
             status.restart_required = false;
             status.ai_cove_upstream_fix_available = false;
         });
@@ -694,9 +729,57 @@ impl AppRuntime {
             == Some(upstream)
     }
 
+    fn prepare_codex_activation(
+        &self,
+        config_changed: bool,
+        codex_pid: Option<u32>,
+    ) -> (&'static str, bool, &'static str) {
+        self.activation_baseline.store(
+            self.metrics.snapshot().successful_responses,
+            Ordering::Relaxed,
+        );
+        *lock_mutex(&self.codex_pid_before_restart) = codex_pid;
+        initial_codex_state(config_changed, codex_pid)
+    }
+
+    fn recover_stale_config(&self, recovery_path: &Path) -> Result<StaleRecovery, ConfigError> {
+        let recovery = recover_stale(recovery_path)?;
+        if recovery.outcome == RestoreOutcome::Conflict {
+            self.update_status(|status| {
+                status.config_message = "检测到外部配置修改，已放弃旧接管值".to_owned();
+            });
+        }
+        Ok(recovery)
+    }
+
     fn update_status(&self, update: impl FnOnce(&mut AppStatus)) {
         update(&mut write_lock(&self.status));
     }
+}
+
+const fn initial_codex_state(
+    config_changed: bool,
+    codex_pid: Option<u32>,
+) -> (&'static str, bool, &'static str) {
+    if codex_pid.is_none() {
+        return (
+            "waiting_start",
+            false,
+            "本地服务已就绪，等待 Codex 启动后加载配置",
+        );
+    }
+    if config_changed {
+        return (
+            "restart_required",
+            true,
+            "本地服务已就绪，需要重启 Codex 加载新配置",
+        );
+    }
+    (
+        "waiting_request",
+        false,
+        "Codex 已加载相同配置，等待首次真实请求验证",
+    )
 }
 
 async fn persist_traffic(
@@ -766,7 +849,7 @@ const fn codex_restart_observed(previous: Option<u32>, current: Option<u32>) -> 
 }
 
 #[cfg(all(not(test), target_os = "macos"))]
-fn codex_desktop_process_id() -> Option<u32> {
+pub(crate) fn codex_desktop_process_id() -> Option<u32> {
     let script = r#"tell application "System Events" to get unix id of first application process whose bundle identifier is "com.openai.codex""#;
     let output = Command::new("/usr/bin/osascript")
         .args(["-e", script])
@@ -780,7 +863,7 @@ fn codex_desktop_process_id() -> Option<u32> {
 }
 
 #[cfg(all(not(test), target_os = "windows"))]
-fn codex_desktop_process_id() -> Option<u32> {
+pub(crate) fn codex_desktop_process_id() -> Option<u32> {
     let output = crate::windows_process::hidden_command("powershell.exe")
         .args([
             "-NoProfile",
@@ -798,7 +881,7 @@ fn codex_desktop_process_id() -> Option<u32> {
 }
 
 #[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]
-const fn codex_desktop_process_id() -> Option<u32> {
+pub(crate) const fn codex_desktop_process_id() -> Option<u32> {
     None
 }
 
@@ -897,6 +980,58 @@ supports_websockets = false
         assert!(restored.contains("supports_websockets = false"));
         assert!(!restored.contains("http://127.0.0.1:"));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn activation_requires_a_successful_response_after_the_current_baseline()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_path = root.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.ai-cove.com/v1"
+"#,
+        )?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path,
+            data_dir: root.path().join("data"),
+        });
+        runtime.metrics.record_successful_response_for_test();
+        runtime.initialize().await;
+
+        let waiting = runtime.status().await;
+        assert_eq!(waiting.codex_state, "waiting_start");
+        assert!(!waiting.restart_required);
+
+        runtime.metrics.record_failed_response_for_test();
+        assert_eq!(runtime.status().await.codex_state, "waiting_start");
+
+        runtime.metrics.record_successful_response_for_test();
+        let active = runtime.status().await;
+        assert_eq!(active.codex_state, "active");
+        assert!(!active.restart_required);
+
+        runtime.mark_desktop_restarted(Some(42));
+        assert_eq!(runtime.status().await.codex_state, "waiting_request");
+        runtime.metrics.record_failed_response_for_test();
+        assert_eq!(runtime.status().await.codex_state, "waiting_request");
+        runtime.metrics.record_successful_response_for_test();
+        assert_eq!(runtime.status().await.codex_state, "active");
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[test]
+    fn initial_activation_state_distinguishes_restart_and_startup() {
+        assert_eq!(initial_codex_state(true, Some(41)).0, "restart_required");
+        assert!(initial_codex_state(true, Some(41)).1);
+        assert_eq!(initial_codex_state(true, None).0, "waiting_start");
+        assert!(!initial_codex_state(true, None).1);
+        assert_eq!(initial_codex_state(false, Some(41)).0, "waiting_request");
+        assert!(!initial_codex_state(false, Some(41)).1);
     }
 
     #[tokio::test]

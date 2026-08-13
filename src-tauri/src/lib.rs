@@ -375,10 +375,21 @@ async fn set_dock_visible(
 
 #[tauri::command]
 async fn restart_codex(runtime: State<'_, Arc<AppRuntime>>) -> Result<AppStatus, String> {
-    tauri::async_runtime::spawn_blocking(restart_codex_desktop)
-        .await
-        .map_err(|error| error.to_string())??;
-    runtime.mark_desktop_restarted();
+    runtime.mark_desktop_restarting();
+    let restarted = tauri::async_runtime::spawn_blocking(restart_codex_desktop).await;
+    let pid = match restarted {
+        Ok(Ok(pid)) => pid,
+        Ok(Err(error)) => {
+            runtime.mark_desktop_restart_failed(&error);
+            return Err(error);
+        }
+        Err(error) => {
+            let error = error.to_string();
+            runtime.mark_desktop_restart_failed(&error);
+            return Err(error);
+        }
+    };
+    runtime.mark_desktop_restarted(pid);
     Ok(runtime.status().await)
 }
 
@@ -499,30 +510,152 @@ fn updater_public_key() -> Option<&'static str> {
 }
 
 #[cfg(target_os = "macos")]
-fn restart_codex_desktop() -> Result<(), String> {
+fn restart_codex_desktop() -> Result<Option<u32>, String> {
+    const EXIT_ATTEMPTS: usize = 150;
+    const LAUNCH_ATTEMPTS: usize = 300;
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
     let script = r#"if application id "com.openai.codex" is running then
 tell application id "com.openai.codex" to quit
 end if"#;
-    let status = Command::new("/usr/bin/osascript")
-        .args(["-e", script])
-        .status()
-        .map_err(|error| error.to_string())?;
-    if !status.success() {
-        return Err("无法优雅退出 Codex Desktop".to_owned());
+    let old_pid = runtime::codex_desktop_process_id();
+    restart_codex_desktop_with(
+        old_pid,
+        || {
+            Command::new("/usr/bin/osascript")
+                .args(["-e", script])
+                .status()
+                .map_err(|error| error.to_string())?
+                .success()
+                .then_some(())
+                .ok_or_else(|| "无法优雅退出 Codex Desktop".to_owned())
+        },
+        |pid| {
+            Command::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|status| status.success())
+        },
+        || {
+            Command::new("/usr/bin/open")
+                .args(["-b", "com.openai.codex"])
+                .status()
+                .map_err(|error| error.to_string())?
+                .success()
+                .then_some(())
+                .ok_or_else(|| "无法请求系统重新打开 Codex Desktop".to_owned())
+        },
+        runtime::codex_desktop_process_id,
+        (EXIT_ATTEMPTS, LAUNCH_ATTEMPTS, POLL_INTERVAL),
+    )
+    .map(Some)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn restart_codex_desktop_with<Q, E, O, P>(
+    old_pid: Option<u32>,
+    mut quit: Q,
+    mut pid_exists: E,
+    mut open: O,
+    mut current_pid: P,
+    limits: (usize, usize, Duration),
+) -> Result<u32, String>
+where
+    Q: FnMut() -> Result<(), String>,
+    E: FnMut(u32) -> bool,
+    O: FnMut() -> Result<(), String>,
+    P: FnMut() -> Option<u32>,
+{
+    if let Some(old_pid) = old_pid {
+        quit()?;
+        let mut exited = false;
+        for _ in 0..limits.0 {
+            if !pid_exists(old_pid) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(limits.2);
+        }
+        if !exited {
+            return Err("Codex Desktop 未能退出，请稍后重试".to_owned());
+        }
     }
-    std::thread::sleep(Duration::from_millis(500));
-    let status = Command::new("/usr/bin/open")
-        .args(["-b", "com.openai.codex"])
-        .status()
-        .map_err(|error| error.to_string())?;
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| "无法重新打开 Codex Desktop".to_owned())
+
+    open()?;
+    for _ in 0..limits.1 {
+        if let Some(pid) = current_pid()
+            && Some(pid) != old_pid
+        {
+            return Ok(pid);
+        }
+        std::thread::sleep(limits.2);
+    }
+    Err("Codex Desktop 未能重新启动，请手动打开后重试".to_owned())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod restart_codex_tests {
+    use std::{
+        cell::{Cell, RefCell},
+        collections::VecDeque,
+    };
+
+    use super::restart_codex_desktop_with;
+    use std::time::Duration;
+
+    #[test]
+    fn old_pid_must_exit_before_opening_codex() {
+        let open_calls = Cell::new(0);
+
+        let result = restart_codex_desktop_with(
+            Some(41),
+            || Ok(()),
+            |_| true,
+            || {
+                open_calls.set(open_calls.get() + 1);
+                Ok(())
+            },
+            || None,
+            (2, 2, Duration::ZERO),
+        );
+
+        assert!(result.is_err_and(|error| error.contains("未能退出")));
+        assert_eq!(open_calls.get(), 0);
+    }
+
+    #[test]
+    fn accepted_open_without_a_new_pid_is_a_failure() {
+        let result = restart_codex_desktop_with(
+            Some(41),
+            || Ok(()),
+            |_| false,
+            || Ok(()),
+            || None,
+            (2, 2, Duration::ZERO),
+        );
+
+        assert!(result.is_err_and(|error| error.contains("未能重新启动")));
+    }
+
+    #[test]
+    fn a_different_new_pid_completes_the_restart() {
+        let pids = RefCell::new(VecDeque::from([Some(41), Some(42)]));
+
+        let result = restart_codex_desktop_with(
+            Some(41),
+            || Ok(()),
+            |_| false,
+            || Ok(()),
+            || pids.borrow_mut().pop_front().flatten(),
+            (2, 2, Duration::ZERO),
+        );
+
+        assert_eq!(result, Ok(42));
+    }
 }
 
 #[cfg(target_os = "windows")]
-fn restart_codex_desktop() -> Result<(), String> {
+fn restart_codex_desktop() -> Result<Option<u32>, String> {
     let script = r#"$path = Join-Path $env:LOCALAPPDATA 'Programs\Codex\Codex.exe'
 if (-not (Test-Path $path)) { throw '未找到 Codex Desktop 可执行文件' }
 $processes = Get-Process -Name Codex -ErrorAction SilentlyContinue | Where-Object { $_.Path -and [string]::Equals($_.Path, $path, [System.StringComparison]::OrdinalIgnoreCase) }
@@ -537,11 +670,11 @@ Start-Process -FilePath $path"#;
         .map_err(|error| error.to_string())?;
     status
         .success()
-        .then_some(())
+        .then_some(None)
         .ok_or_else(|| "无法重启 Codex Desktop".to_owned())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn restart_codex_desktop() -> Result<(), String> {
+fn restart_codex_desktop() -> Result<Option<u32>, String> {
     Err("当前平台不支持重启 Codex Desktop".to_owned())
 }

@@ -332,7 +332,7 @@ test("Tauri 首帧在真实状态返回前保持未验证", async () => {
   assert.deepEqual(invoked, ["get_app_status"]);
 });
 
-test("仅观察到 WebSocket 握手时 Codex 已生效使用成功态", async () => {
+test("仅观察到 WebSocket 握手时保持后端的等待请求状态", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const codex = element({ state: "restart-runtime", status: "waiting" });
   const document = {
@@ -348,8 +348,44 @@ test("仅观察到 WebSocket 握手时 Codex 已生效使用成功态", async ()
         invoke: async () => ({
           serviceHealthy: true,
           configState: "managed",
+          codexState: "waiting_request",
           restartRequired: false,
           websocketHandshakes: 1,
+        }),
+      },
+    },
+    location: { href: "tauri://localhost/?tab=live" },
+    history: { replaceState() {} },
+    addEventListener() {},
+    setInterval() {},
+  };
+
+  await runApp(source, { document, window, URL, Intl });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(codex.textContent, "等待请求");
+  assert.equal(codex.dataset.status, "waiting");
+});
+
+test("Codex 生效状态完全由后端驱动", async () => {
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  const codex = element({ state: "restart-runtime", status: "waiting" });
+  const document = {
+    readyState: "complete",
+    body: element(),
+    addEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll(selector) { return selector === "[data-state]" ? [codex] : []; },
+  };
+  const window = {
+    __TAURI__: {
+      core: {
+        invoke: async () => ({
+          serviceHealthy: true,
+          configState: "managed",
+          codexState: "active",
+          requests: 0,
+          websocketHandshakes: 0,
         }),
       },
     },
@@ -385,7 +421,7 @@ test("Codex 待重启时只显示行内动作和 hover 提示", async () => {
     },
   };
   const window = {
-    __TAURI__: { core: { invoke: async () => ({ serviceHealthy: true, configState: "managed", restartRequired: true }) } },
+    __TAURI__: { core: { invoke: async () => ({ serviceHealthy: true, configState: "managed", codexState: "restart_required", restartRequired: true }) } },
     location: { href: "tauri://localhost/?tab=live" },
     history: { replaceState() {} },
     addEventListener() {},
@@ -420,6 +456,7 @@ test("WebSocket 已恢复但 Responses 持续直连 HTTP 时提示旧任务重�
   const { action, message, recovery, title } = await liveRecoveryHarness({
     serviceHealthy: true,
     configState: "managed",
+    codexState: "active",
     websocketEnabled: true,
     websocketVerified: true,
     websocketState: "connected",
@@ -448,6 +485,7 @@ test("没有近期 WebSocket 成功证据时保留通用 HTTP 降级提示", asy
   const { action, message, recovery, title } = await liveRecoveryHarness({
     serviceHealthy: true,
     configState: "managed",
+    codexState: "active",
     websocketEnabled: true,
     websocketState: "connected",
     recentRequests,
@@ -475,6 +513,7 @@ test("最新 Responses 请求已恢复 WebSocket 时不再提示重启", async (
   const { recovery } = await liveRecoveryHarness({
     serviceHealthy: true,
     configState: "managed",
+    codexState: "active",
     websocketEnabled: true,
     websocketState: "connected",
     recentRequests,
@@ -498,6 +537,7 @@ test("少量直连 HTTP 不提示重启 Codex", async () => {
   const { recovery } = await liveRecoveryHarness({
     serviceHealthy: true,
     configState: "managed",
+    codexState: "active",
     websocketEnabled: true,
     websocketState: "connected",
     recentRequests,
@@ -521,6 +561,7 @@ test("WebSocket 已关闭时不把直连 HTTP 误判为降级", async () => {
   const { recovery } = await liveRecoveryHarness({
     serviceHealthy: true,
     configState: "managed",
+    codexState: "active",
     websocketEnabled: false,
     recentRequests,
   });
@@ -579,6 +620,7 @@ test("Strands 数量跟随五项聚合状态转绿", async () => {
   let status = {
     serviceHealthy: true,
     configState: "managed",
+    codexState: "active",
     desktopRestarted: true,
     restartRequired: false,
     compressionEnabled: true,

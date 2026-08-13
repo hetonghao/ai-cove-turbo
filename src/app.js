@@ -54,6 +54,7 @@
     autostartEnabled: true,
     dockVisible: true,
     dockControlAvailable: true,
+    codexState: "checking",
     restartRequired: false,
     desktopRestarted: false,
     requests: 0,
@@ -116,6 +117,7 @@
     endpoint: "http://127.0.0.1:44175/v1",
     configState: "managed",
     configMessage: "Preview：配置已生效",
+    codexState: "active",
     provider: "ai-cove",
     upstream: "https://api.ai-cove.com/v1",
     compressionVerified: true,
@@ -271,7 +273,16 @@
   function activationSummary() {
     if (!state.serviceHealthy) return "本地通道尚未就绪";
     if (!configReady()) return "等待 Turbo 完成配置";
-    if (state.restartRequired) return "需要重启 Codex 才会生效";
+    const codex = String(state.codexState).toLowerCase();
+    const pending = {
+      checking: "正在检查 Codex 状态",
+      restart_required: "需要重启 Codex 才会生效",
+      waiting_start: "等待启动 Codex",
+      restarting: "正在重启 Codex",
+      waiting_request: "Codex 已启动，等待真实请求验证",
+      restart_failed: "Codex 重启失败，可重试",
+    };
+    if (pending[codex]) return pending[codex];
     const httpReady = !state.compressionEnabled || state.compressionVerified;
     const websocketReady = !state.websocketEnabled || (state.websocketVerified && state.websocketZstdVerified);
     if (httpReady && websocketReady) return "HTTP / WebSocket 均已生效";
@@ -284,6 +295,27 @@
 
   function runtimeObserved() {
     return totalRequests() > 0 || Number(state.websocketHandshakes) > 0;
+  }
+
+  function formatCodexState() {
+    const labels = {
+      checking: "检查中",
+      restart_required: "需要重启",
+      waiting_start: "等待启动",
+      restarting: "正在重启",
+      waiting_request: "等待请求",
+      active: "已生效",
+      restart_failed: "重启失败",
+    };
+    return labels[String(state.codexState).toLowerCase()] ?? "待确认";
+  }
+
+  function codexStatus() {
+    const codex = String(state.codexState).toLowerCase();
+    if (codex === "active") return "verified";
+    if (codex === "restart_required") return "required";
+    if (codex === "restart_failed") return "blocked";
+    return "waiting";
   }
 
   function formatState(key) {
@@ -312,7 +344,10 @@
       "direct-http": numberFormatter.format(Number(state.directHttp) || 0),
       autostart: state.autostartEnabled ? "开" : "关",
       dock: state.dockVisible ? "开" : "关",
-      restart: pendingAction === "restart-codex" ? "正在重启…" : state.restartRequired ? "重启 Codex" : "重新启动 Codex",
+      restart: pendingAction === "restart-codex" || state.codexState === "restarting"
+        ? "正在重启…"
+        : state.codexState === "waiting_start" ? "启动 Codex"
+          : state.codexState === "restart_failed" ? "重试启动 Codex" : "重启 Codex",
       requests: numberFormatter.format(totalRequests()),
       "raw-bytes": telemetry.formatBytes((Number(state.rawBytes) || 0) + (Number(state.websocketRawBytes) || 0)),
       "sent-bytes": telemetry.formatBytes((Number(state.sentBytes) || 0) + (Number(state.websocketSentBytes) || 0)),
@@ -324,13 +359,13 @@
       "update-message": state.updateMessage || "—",
       "update-progress": `${Math.max(0, Math.min(100, Number(state.updateProgress) || 0))}%`,
       "service-runtime": starting ? "正在读取" : state.serviceHealthy ? "正常" : "离线",
-      "restart-runtime": state.restartRequired ? "需要重启" : observed || state.desktopRestarted ? "已生效" : "待确认",
+      "restart-runtime": formatCodexState(),
       "http-zstd-runtime": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "已验证" : "待验证",
       "websocket-runtime": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "已验证" : String(state.websocketState).toLowerCase() === "failed" ? "连接失败" : "待验证",
       "websocket-zstd-runtime": !state.websocketEnabled ? "已关闭" : state.websocketZstdVerified ? "已验证" : "待验证",
       "service-prerequisite": starting ? "检查中" : state.serviceHealthy ? "正常" : "异常",
       "config-prerequisite": starting ? "检查中" : configReady() ? "已生效" : formatConfigState(),
-      "restart-prerequisite": state.restartRequired ? "需要重启" : observed || state.desktopRestarted ? "已生效" : "待确认",
+      "restart-prerequisite": formatCodexState(),
       "http-status": state.serviceHealthy ? "通道可用" : "通道不可用",
       "http-zstd-status": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "压缩已验证" : "等待验证",
       "websocket-handshake-status": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "连接已验证" : "等待连接",
@@ -345,7 +380,7 @@
   function statusFor(key) {
     if (key.startsWith("service")) return state.serviceHealthy ? "verified" : String(state.configState).toLowerCase() === "starting" ? "waiting" : "blocked";
     if (key.startsWith("config")) return configReady() ? "verified" : String(state.configState).toLowerCase() === "starting" ? "waiting" : "blocked";
-    if (key.startsWith("restart")) return state.restartRequired ? "required" : runtimeObserved() || state.desktopRestarted ? "verified" : "waiting";
+    if (key.startsWith("restart")) return codexStatus();
     if (key.startsWith("http-zstd")) return !state.compressionEnabled ? "disabled" : state.compressionVerified ? "verified" : "waiting";
     if (key === "http-status") return state.serviceHealthy ? "verified" : "blocked";
     if (key.startsWith("websocket-zstd")) return !state.websocketEnabled ? "disabled" : state.websocketZstdVerified ? "verified" : "waiting";
@@ -402,7 +437,7 @@
         detail: state.technicalDetail,
       };
     }
-    if (state.websocketEnabled && !state.restartRequired) {
+    if (state.websocketEnabled && state.codexState === "active") {
       const cutoff = Date.now() - HTTP_DEGRADATION_WINDOW_MS;
       const responses = (Array.isArray(state.recentRequests) ? state.recentRequests : [])
         .filter((request) => request.path === "/v1/responses" && Number(request.timestampMs) >= cutoff);
@@ -510,10 +545,16 @@
           : updateState === "error" ? "重新下载" : "安装更新";
       }
       if (action === "restart-codex") {
-        control.dataset.required = String(Boolean(state.restartRequired));
+        const codex = String(state.codexState).toLowerCase();
+        control.dataset.required = String(["restart_required", "waiting_start", "restart_failed"].includes(codex));
         if (Object.hasOwn(control.dataset, "restartHint")) {
-          control.setAttribute("title", "配置已写入，重启后会重新验证传输通道。");
-          control.setAttribute("aria-label", "重启 Codex：配置已写入，重启后会重新验证传输通道。");
+          const title = codex === "waiting_start"
+            ? "Codex 尚未运行，启动后会加载 Turbo 配置。"
+            : codex === "restart_failed"
+              ? "上次启动未完成，可以重试或手动打开 Codex。"
+              : "配置已写入，重启后会重新验证传输通道。";
+          control.setAttribute("title", title);
+          control.setAttribute("aria-label", `${formatState("restart")}：${title}`);
         }
       }
       if (Object.hasOwn(pressed, action)) {
@@ -1444,12 +1485,14 @@
       state.websocketVerified = false;
       state.websocketZstdVerified = false;
       state.websocketState = args.enabled ? "waiting" : "disabled";
+      state.codexState = "restart_required";
       state.restartRequired = true;
     }
     if (command === "set_autostart") state.autostartEnabled = args.enabled;
     if (command === "set_dock_visible") state.dockVisible = args.visible;
     if (command === "restart_codex") {
       state.desktopRestarted = true;
+      state.codexState = "waiting_request";
       state.restartRequired = false;
     }
     if (command === "retry_takeover") state.configState = "managed";
@@ -1535,7 +1578,15 @@
         applyStatus(status);
       } else applyPreviewAction(command, args);
     } catch (error) {
-      state.configMessage = "操作未完成，请按提示重试。";
+      if (command === "restart_codex" && invoke) {
+        try {
+          applyStatus(await invoke("get_app_status"));
+        } catch {
+          state.configMessage = "Codex 重启未完成，请重试。";
+        }
+      } else {
+        state.configMessage = "操作未完成，请按提示重试。";
+      }
       state.technicalDetail = error instanceof Error ? error.message : String(error);
     } finally {
       pendingAction = "";
