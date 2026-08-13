@@ -63,8 +63,10 @@
     });
 
     all("[data-update-action]").forEach((button) => {
+      const busy = scenario.stage >= 0 && scenario.stage < 3 && scenario.tone !== "error";
       button.textContent = actionCopy(scenario);
-      button.disabled = scenario.stage >= 0 && scenario.stage < 3 && scenario.tone !== "error";
+      button.disabled = busy;
+      button.setAttribute("aria-busy", String(busy));
     });
     all("[data-scenario-button]").forEach((button) => {
       button.setAttribute("aria-pressed", String(button.dataset.scenarioButton === scenarioKey));

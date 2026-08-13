@@ -21,6 +21,7 @@
   --progress: 0.68;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --speed: 220ms;
+  --speed-standard: 240ms;
 }
 
 * { box-sizing: border-box; }
@@ -114,7 +115,9 @@ a:focus-visible {
   background: rgba(20, 29, 26, 0.82);
 }
 
-.tabs button {
+.tabs span {
+  display: grid;
+  place-items: center;
   min-width: 64px;
   min-height: 32px;
   padding: 0 15px;
@@ -125,7 +128,6 @@ a:focus-visible {
   font-weight: 700;
 }
 
-.tabs button:hover { color: var(--ink); background: rgba(112, 216, 238, 0.06); }
 .tabs .is-active { color: #071012; background: var(--accent); }
 
 .shell-note { color: var(--faint); font: 0.625rem var(--font-mono); letter-spacing: 0.06em; }
@@ -209,7 +211,7 @@ a:focus-visible {
   box-shadow: 0 2px 12px rgba(112, 216, 238, 0.24);
   transform: scaleX(var(--progress));
   transform-origin: left;
-  transition: transform 500ms var(--ease-out), background var(--speed) var(--ease-out);
+  transition: transform var(--speed-standard) var(--ease-out), background var(--speed) var(--ease-out);
 }
 
 .update-variant--migration {
@@ -303,7 +305,7 @@ a:focus-visible {
 .pipeline-stage b { font-size: 0.6875rem; }
 .pipeline-stage small { overflow: hidden; color: var(--faint); font-size: 0.58rem; text-overflow: ellipsis; white-space: nowrap; }
 .pipeline-stage em { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; background: rgba(112, 216, 238, 0.07); }
-.pipeline-stage em::after { display: block; width: 100%; height: 100%; background: var(--accent); content: ""; transform: scaleX(var(--stage-progress, 0)); transform-origin: left; transition: transform 500ms var(--ease-out); }
+.pipeline-stage em::after { display: block; width: 100%; height: 100%; background: var(--accent); content: ""; transform: scaleX(var(--stage-progress, 0)); transform-origin: left; transition: transform var(--speed-standard) var(--ease-out); }
 .pipeline-stage[data-stage-state="active"] i { border-color: var(--accent); color: #071012; background: var(--accent); }
 .pipeline-stage[data-stage-state="done"] i { border-color: var(--success); color: #071012; background: var(--success); }
 .pipeline-stage[data-stage-state="done"] em::after { background: var(--success); transform: scaleX(1); }
@@ -434,7 +436,7 @@ body[data-tone="success"] .migration-track i { background: var(--success); box-s
   .traffic-lights, .brand span, .shell-note { display: none; }
   .brand img { width: 28px; height: 28px; }
   .tabs { justify-self: stretch; }
-  .tabs button { flex: 1; min-width: 0; padding-inline: 10px; }
+  .tabs span { flex: 1; min-width: 0; padding-inline: 10px; }
   .update-variant--rail,
   .update-variant--migration,
   .update-variant--pipeline { padding-inline: 12px; }

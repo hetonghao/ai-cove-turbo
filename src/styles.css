@@ -43,6 +43,7 @@
   --turbo-type-brand-small: 0.625rem;
   --turbo-type-tab: 0.75rem;
   --turbo-type-meta: 0.625rem;
+  --turbo-type-status: 0.75rem;
   --turbo-tab-weight: 700;
   --turbo-brand-tracking: -0.02em;
   --turbo-meta-tracking: 0.08em;
@@ -2332,7 +2333,7 @@ body[data-active-tab="statistics"] {
 .b-version-bar__status {
   min-width: 0;
   gap: 8px;
-  font-size: 0.6875rem;
+  font-size: var(--turbo-type-status);
 }
 
 .b-version-bar__status strong {
@@ -2352,7 +2353,7 @@ body[data-active-tab="statistics"] {
   flex: 0 0 auto;
   color: var(--b-ink);
   font-family: var(--font-mono);
-  font-size: 0.6875rem;
+  font-size: var(--turbo-type-status);
   font-variant-numeric: tabular-nums;
 }
 

@@ -191,6 +191,15 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
   assert.match(app, /"set-ai-cove-upstream": \["set_ai_cove_upstream"\]/);
 });
 
+test("更新下载失败后进入可重试状态", async () => {
+  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+
+  assert.match(
+    rust,
+    /Err\(error\)\s*=>\s*\{\s*runtime\.set_update_status\(\s*"error",\s*&format!\("下载失败，可重新下载：\{error\}"\),\s*0,?\s*\);/s,
+  );
+});
+
 test("顶部 Tab 使用单一滑动指示器表达当前位置", async () => {
   const css = await readFile(new URL("styles.css", sourceUrl), "utf8");
 

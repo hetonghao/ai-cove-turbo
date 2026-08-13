@@ -451,7 +451,7 @@ async fn install_update(
     let progress_runtime = Arc::clone(runtime.inner());
     let downloaded = Arc::new(AtomicU64::new(0));
     let progress_downloaded = Arc::clone(&downloaded);
-    let bytes = update
+    let bytes = match update
         .download(
             move |chunk, total| {
                 let downloaded =
@@ -464,7 +464,13 @@ async fn install_update(
             || {},
         )
         .await
-        .map_err(|error| error.to_string())?;
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            runtime.set_update_status("error", &format!("下载失败，可重新下载：{error}"), 0);
+            return Err(error.to_string());
+        }
+    };
     runtime.set_update_status("installing", "签名已验证，正在安装", 100);
     if let Err(error) = runtime.shutdown().await {
         runtime.set_update_status(
