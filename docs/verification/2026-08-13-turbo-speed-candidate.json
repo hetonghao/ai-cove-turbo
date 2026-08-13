@@ -1,0 +1,59 @@
+{
+  "status": "candidate_not_applied",
+  "measurementDate": "2026-08-13",
+  "model": "gpt-5.6-sol",
+  "runs": 8,
+  "warmups": 1,
+  "profile": {
+    "fingerprint": "fnv1a64:f53e84f8581cd1fd",
+    "currentSamples": 824,
+    "httpRequests": 1,
+    "websocketRequests": 823,
+    "historyDates": [
+      "2026-07-29",
+      "2026-07-30",
+      "2026-07-31",
+      "2026-08-01",
+      "2026-08-02"
+    ],
+    "matchCoveragePct": [86.9, 99.6, 86.9, 87.5, 87.3],
+    "sameWindow": "full-day matched distribution (09:50 cutoff on measurement day)"
+  },
+  "oldConstants": {
+    "baselineFirstTokenMs": 1661,
+    "baselineCompleteMs": 2273,
+    "websocketFirstTokenSavedMs": 469,
+    "websocketCompleteSavedMs": 274
+  },
+  "candidateConstants": {
+    "baselineFirstTokenMs": 1669,
+    "baselineCompleteMs": 11184,
+    "websocketFirstTokenSavedMs": 521,
+    "websocketCompleteSavedMs": 0
+  },
+  "mechanism": {
+    "httpFirstEventMs": 1197.0,
+    "hybridFirstEventMs": 608.5,
+    "pairedFirstEventSavedMs": 521.1,
+    "pairedFirstEventDriftPct": 3.0,
+    "httpCompleteMs": 1790.9,
+    "hybridCompleteMs": 2439.1,
+    "pairedCompleteSavedMs": -399.4,
+    "completeConstantQualified": false,
+    "hybridLifecycle": "cold HTTP evidence excluded; formal samples WS-only; zero reconnects"
+  },
+  "historicalObservation": {
+    "currentFirstEventP50Ms": 210.9,
+    "baselineFirstEventP50Ms": 1668.9,
+    "firstEventGainPct": 87.4,
+    "currentCompleteP50Ms": 8488.3,
+    "baselineCompleteP50Ms": 11184.5,
+    "completeGainPct": 24.1,
+    "attribution": "cross-check only; not wholly attributable to Turbo"
+  },
+  "compressionAt10Mbps": {
+    "uploadSavedMs": 10.9,
+    "estimatedFirstEventGainPct": 31.8,
+    "estimatedCompleteGainPct": 0.1
+  }
+}

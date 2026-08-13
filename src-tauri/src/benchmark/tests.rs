@@ -29,6 +29,19 @@ fn recognizes_responses_completion_events_only() {
 }
 
 #[test]
+fn preserves_failure_code_and_message_from_response_events() -> BenchmarkResult<()> {
+    let event = br#"{"type":"error","error":{"code":"previous_response_not_found","message":"Previous response is not available in this session"}}"#;
+    let Completion::Failed(failure) = completion_response_id(event) else {
+        return Err(io::Error::other("failure event was not recognized"));
+    };
+    let error = response_failure_error(&failure).to_string();
+
+    assert!(error.contains("previous_response_not_found"));
+    assert!(error.contains("Previous response is not available in this session"));
+    Ok(())
+}
+
+#[test]
 fn builds_http_and_websocket_responses_urls_from_the_same_base() -> BenchmarkResult<()> {
     assert_eq!(
         responses_url("https://api.ai-cove.com/v1", false)?,

@@ -2,13 +2,12 @@
   "use strict";
 
   const numberFormatter = new Intl.NumberFormat("zh-CN");
-  // 2026-08-09 公网 12 轮基准：5 轮直连中位数与 Turbo HTTP 到 Hybrid 的中位数差。
   const SPEED_ESTIMATE = Object.freeze({
     uplinkBitsPerSecond: 10_000_000,
-    baselineFirstTokenMs: 1_661,
-    baselineCompleteMs: 2_273,
-    websocketFirstTokenSavedMs: 469,
-    websocketCompleteSavedMs: 274,
+    baselineFirstTokenMs: 1_669,
+    baselineCompleteMs: 11_184,
+    websocketFirstTokenSavedMs: 521,
+    websocketCompleteSavedMs: 0,
   });
 
   function formatBytes(value) {

@@ -6,9 +6,10 @@ use std::{
 use url::Url;
 
 use crate::proxy::{
-    Metrics, ProxyOptions, private_websocket_benchmark::start as start_private_websocket_proxy,
-    start_proxy,
+    Metrics, ProxyHandle, ProxyOptions,
+    private_websocket_benchmark::start as start_private_websocket_proxy, start_proxy,
 };
+use tokio::sync::OnceCell;
 
 use super::{
     BenchmarkResult, BenchmarkSettings, DIRECT_PATH, HTTP_PATH, HYBRID_PATH, Sample,
@@ -87,50 +88,96 @@ struct LiveContext<'a> {
     authorization: &'a str,
     upstream: &'a Url,
     direct_url: &'a str,
+    http_proxy: OnceCell<SharedProxy>,
+    hybrid_proxy: OnceCell<SharedProxy>,
+}
+
+struct SharedProxy {
+    metrics: Arc<Metrics>,
+    proxy: ProxyHandle,
 }
 
 impl LiveContext<'_> {
-    async fn collect_websocket_sample(
-        &self,
-        mode: websocket::Mode,
-        payloads: &[String],
-    ) -> BenchmarkResult<Sample> {
-        let metrics = Arc::new(Metrics::default());
-        let proxy = match mode {
-            websocket::Mode::PrivateWebSocket => {
-                start_private_websocket_proxy(self.upstream.clone(), Arc::clone(&metrics))
-                    .await
-                    .map_err(benchmark_error)?
+    async fn shared_proxy(&self, path: BenchmarkPath) -> BenchmarkResult<&SharedProxy> {
+        let cell = match path {
+            BenchmarkPath::Http => &self.http_proxy,
+            BenchmarkPath::Hybrid => &self.hybrid_proxy,
+            BenchmarkPath::Direct | BenchmarkPath::WebSocket => {
+                return Err(io::Error::other(format!(
+                    "{} does not use a shared Turbo proxy",
+                    path.label()
+                )));
             }
-            websocket::Mode::Hybrid => start_proxy(ProxyOptions {
+        };
+        cell.get_or_try_init(|| async move {
+            let metrics = Arc::new(Metrics::default());
+            let websocket_enabled = path == BenchmarkPath::Hybrid;
+            let proxy = start_proxy(ProxyOptions {
                 upstream: self.upstream.clone(),
                 compression_enabled: Arc::new(AtomicBool::new(true)),
-                websocket_enabled: Arc::new(AtomicBool::new(true)),
-                ai_cove_private_websocket_zstd: true,
+                websocket_enabled: Arc::new(AtomicBool::new(websocket_enabled)),
+                ai_cove_private_websocket_zstd: websocket_enabled,
                 metrics: Arc::clone(&metrics),
                 preferred_ports: vec![0],
                 max_request_body_bytes: 128 * 1024 * 1024,
             })
             .await
-            .map_err(benchmark_error)?,
-        };
-        let result = async {
-            let url = super::responses_url(proxy.endpoint(), true)?;
-            websocket::collect_sample(
-                &websocket::Case {
-                    url: &url,
-                    authorization: self.authorization,
-                    payloads,
-                    metrics: Some(metrics.as_ref()),
-                    mode,
-                },
-                self.settings,
-            )
-            .await
+            .map_err(benchmark_error)?;
+            Ok(SharedProxy { metrics, proxy })
+        })
+        .await
+    }
+
+    async fn stop(self) {
+        if let Some(shared) = self.http_proxy.into_inner() {
+            shared.proxy.stop().await;
         }
-        .await;
-        proxy.stop().await;
-        result
+        if let Some(shared) = self.hybrid_proxy.into_inner() {
+            shared.proxy.stop().await;
+        }
+    }
+
+    async fn collect_websocket_sample(
+        &self,
+        mode: websocket::Mode,
+        payloads: &[String],
+    ) -> BenchmarkResult<Sample> {
+        match mode {
+            websocket::Mode::PrivateWebSocket => {
+                let metrics = Arc::new(Metrics::default());
+                let proxy =
+                    start_private_websocket_proxy(self.upstream.clone(), Arc::clone(&metrics))
+                        .await
+                        .map_err(benchmark_error)?;
+                let result = websocket::collect_sample(
+                    &websocket::Case {
+                        url: &super::responses_url(proxy.endpoint(), true)?,
+                        authorization: self.authorization,
+                        payloads,
+                        metrics: Some(metrics.as_ref()),
+                        mode,
+                    },
+                    self.settings,
+                )
+                .await;
+                proxy.stop().await;
+                result
+            }
+            websocket::Mode::Hybrid => {
+                let shared = self.shared_proxy(BenchmarkPath::Hybrid).await?;
+                websocket::collect_sample(
+                    &websocket::Case {
+                        url: &super::responses_url(shared.proxy.endpoint(), true)?,
+                        authorization: self.authorization,
+                        payloads,
+                        metrics: Some(shared.metrics.as_ref()),
+                        mode,
+                    },
+                    self.settings,
+                )
+                .await
+            }
+        }
     }
 
     async fn collect_sample(
@@ -173,36 +220,19 @@ impl LiveContext<'_> {
                 .await
             }
             BenchmarkPath::Http => {
-                let metrics = Arc::new(Metrics::default());
-                let proxy = start_proxy(ProxyOptions {
-                    upstream: self.upstream.clone(),
-                    compression_enabled: Arc::new(AtomicBool::new(true)),
-                    websocket_enabled: Arc::new(AtomicBool::new(false)),
-                    ai_cove_private_websocket_zstd: false,
-                    metrics: Arc::clone(&metrics),
-                    preferred_ports: vec![0],
-                    max_request_body_bytes: 128 * 1024 * 1024,
-                })
+                let shared = self.shared_proxy(BenchmarkPath::Http).await?;
+                let client = fresh_http_client().map_err(benchmark_error)?;
+                http::collect_sample(
+                    &http::Case {
+                        client: &client,
+                        url: &super::responses_url(shared.proxy.endpoint(), false)?,
+                        authorization: self.authorization,
+                        payloads: payloads.http,
+                        metrics: Some(shared.metrics.as_ref()),
+                    },
+                    self.settings,
+                )
                 .await
-                .map_err(benchmark_error)?;
-                let result = async {
-                    let client = fresh_http_client().map_err(benchmark_error)?;
-                    let url = super::responses_url(proxy.endpoint(), false)?;
-                    http::collect_sample(
-                        &http::Case {
-                            client: &client,
-                            url: &url,
-                            authorization: self.authorization,
-                            payloads: payloads.http,
-                            metrics: Some(metrics.as_ref()),
-                        },
-                        self.settings,
-                    )
-                    .await
-                }
-                .await;
-                proxy.stop().await;
-                result
             }
             BenchmarkPath::WebSocket => {
                 self.collect_websocket_sample(websocket::Mode::PrivateWebSocket, payloads.websocket)

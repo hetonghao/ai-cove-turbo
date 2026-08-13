@@ -68,8 +68,14 @@ fn accepts_not_ready_hybrid_turns_over_http() -> BenchmarkResult<()> {
 }
 
 #[test]
-fn rejects_hybrid_lifecycle_without_http_or_with_missing_messages() {
-    assert!(validate_hybrid_lifecycle(0, 5, 5).is_err());
+fn accepts_warmed_hybrid_turns_over_websocket() -> BenchmarkResult<()> {
+    validate_hybrid_lifecycle(0, 5, 5)?;
+    validate_hybrid_round_transports(&[RoundTransport::WebSocket; 5])?;
+    Ok(())
+}
+
+#[test]
+fn rejects_hybrid_lifecycle_with_missing_messages() {
     assert!(validate_hybrid_lifecycle(2, 2, 5).is_err());
 }
 

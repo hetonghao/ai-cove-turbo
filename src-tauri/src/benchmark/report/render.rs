@@ -200,7 +200,7 @@ fn write_report_header(output: &mut impl Write, settings: &BenchmarkSettings) ->
     )?;
     writeln!(
         output,
-        "Hybrid 生命周期：首轮使用 HTTP；后续就绪轮次使用 WS；未就绪轮次仍使用 HTTP。"
+        "Hybrid 生命周期：冷启动 HTTP 单独取证；正式样本等待池 ready 后全部使用 WS。"
     )?;
     writeln!(
         output,
@@ -339,7 +339,7 @@ mod tests {
 
         let output = String::from_utf8(output).map_err(io::Error::other)?;
         assert!(output.contains(
-            "Hybrid 生命周期：首轮使用 HTTP；后续就绪轮次使用 WS；未就绪轮次仍使用 HTTP。"
+            "Hybrid 生命周期：冷启动 HTTP 单独取证；正式样本等待池 ready 后全部使用 WS。"
         ));
         Ok(())
     }

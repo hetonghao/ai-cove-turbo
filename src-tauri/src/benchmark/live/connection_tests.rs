@@ -15,6 +15,7 @@ use axum::{
     http::StatusCode,
     routing::post,
 };
+use tokio::sync::OnceCell;
 use url::Url;
 
 use super::{
@@ -50,7 +51,7 @@ async fn transient_then_complete(
 }
 
 #[tokio::test]
-async fn reuses_http_connection_within_sample_but_not_between_samples() -> BenchmarkResult<()> {
+async fn reuses_persistent_turbo_http_connection_between_samples() -> BenchmarkResult<()> {
     // Given
     let peers = Peers::default();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -77,12 +78,13 @@ async fn reuses_http_connection_within_sample_but_not_between_samples() -> Bench
         warmups: 0,
         timeout: Duration::from_secs(1),
     };
-    // Proxy state is intentionally absent: every benchmark sample owns its session state.
     let context = LiveContext {
         settings: &settings,
         authorization: "test-key",
         upstream: &upstream,
         direct_url: &url,
+        http_proxy: OnceCell::new(),
+        hybrid_proxy: OnceCell::new(),
     };
     let http = vec![
         "{\"input\":\"one\"}".to_owned(),
@@ -106,9 +108,10 @@ async fn reuses_http_connection_within_sample_but_not_between_samples() -> Bench
         .lock()
         .map_err(|_| io::Error::other("peer set lock poisoned"))?
         .len();
-    assert_eq!(peer_count, 2);
+    assert_eq!(peer_count, 1);
     assert_eq!(first.warm_round_e2e.len(), 1);
     assert_eq!(second.warm_round_e2e.len(), 1);
+    context.stop().await;
     server.abort();
     Ok(())
 }
@@ -144,6 +147,8 @@ async fn records_one_retry_for_a_transient_upstream_sample() -> BenchmarkResult<
         authorization: "test-key",
         upstream: &upstream,
         direct_url: &url,
+        http_proxy: OnceCell::new(),
+        hybrid_proxy: OnceCell::new(),
     };
     let http = vec!["{\"input\":\"one\"}".to_owned()];
     let payloads = PayloadSet {
@@ -159,6 +164,7 @@ async fn records_one_retry_for_a_transient_upstream_sample() -> BenchmarkResult<
     assert_eq!(sample.retries, 1);
     assert_eq!(sample.logical_requests, 1);
     assert_eq!(sample.http_requests, 1);
+    context.stop().await;
     server.abort();
     Ok(())
 }

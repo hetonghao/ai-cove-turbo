@@ -157,12 +157,13 @@ pub(super) fn validate_hybrid_lifecycle(
     websocket_messages: u64,
     logical_requests: u64,
 ) -> BenchmarkResult<()> {
-    if http_requests >= 1 && http_requests.checked_add(websocket_messages) == Some(logical_requests)
+    if logical_requests > 0
+        && http_requests.checked_add(websocket_messages) == Some(logical_requests)
     {
         return Ok(());
     }
     Err(io::Error::other(format!(
-        "Hybrid lifecycle requires at least one HTTP request and exact request/message conservation; http_requests={http_requests}, websocket_messages={websocket_messages}, logical_requests={logical_requests}",
+        "Hybrid lifecycle requires exact request/message conservation; http_requests={http_requests}, websocket_messages={websocket_messages}, logical_requests={logical_requests}",
     )))
 }
 
@@ -213,11 +214,16 @@ pub(super) const fn reported_reconnects(
 pub(super) fn validate_hybrid_round_transports(
     transports: &[RoundTransport],
 ) -> BenchmarkResult<()> {
-    if transports.first() == Some(&RoundTransport::Http) {
+    if transports.first() == Some(&RoundTransport::Http)
+        || (!transports.is_empty()
+            && transports
+                .iter()
+                .all(|transport| *transport == RoundTransport::WebSocket))
+    {
         return Ok(());
     }
     Err(io::Error::other(
-        "Hybrid lifecycle requires the first round to use HTTP",
+        "Hybrid lifecycle requires a cold HTTP first round or an already-warmed all-WebSocket sample",
     ))
 }
 

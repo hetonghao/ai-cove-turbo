@@ -152,7 +152,25 @@ fn completion_response_id(event: &[u8]) -> Completion {
             | "response.canceled"
             | "error"
     ) {
-        return Completion::Failed(event_type.to_owned());
+        let error = value.get("error").or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("error"))
+        });
+        let code = error
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str);
+        let message = error
+            .and_then(|error| error.get("message"))
+            .and_then(serde_json::Value::as_str);
+        return Completion::Failed(match (code, message) {
+            (Some(code), Some(message)) => {
+                format!("{event_type}: code={code}, message={message}")
+            }
+            (Some(code), None) => format!("{event_type}: code={code}"),
+            (None, Some(message)) => format!("{event_type}: message={message}"),
+            (None, None) => event_type.to_owned(),
+        });
     }
     if !matches!(event_type, "response.completed" | "response.done") {
         return Completion::Pending;
@@ -166,10 +184,10 @@ fn completion_response_id(event: &[u8]) -> Completion {
     )
 }
 
-fn response_failure_error(event_type: &str) -> io::Error {
+fn response_failure_error(failure: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::ConnectionAborted,
-        format!("upstream response ended with {event_type}"),
+        format!("upstream response ended with {failure}"),
     )
 }
 

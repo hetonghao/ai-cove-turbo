@@ -183,6 +183,11 @@ struct MechanismEvidence {
     websocket_first_event_ms: f64,
     http_complete_ms: f64,
     websocket_complete_ms: f64,
+    paired_first_event_saved_ms: f64,
+    paired_first_event_drift_pct: f64,
+    paired_complete_saved_ms: f64,
+    paired_complete_drift_pct: Option<f64>,
+    complete_constant_qualified: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -805,7 +810,7 @@ fn mechanism_evidence(cases: &[BenchmarkCase]) -> Result<(MechanismEvidence, f64
             ));
         }
         case_report(case)?;
-        super::stability::validate_case(case)?;
+        super::stability::validate_sample_count(case)?;
     }
     let hybrid = continuation_case(cases, HYBRID_PATH)?;
     if hybrid
@@ -814,17 +819,15 @@ fn mechanism_evidence(cases: &[BenchmarkCase]) -> Result<(MechanismEvidence, f64
         .filter(|sample| sample.retries == 0)
         .any(|sample| {
             sample.websocket_reconnects != 0
-                || sample.round_transports.first() != Some(&super::RoundTransport::Http)
+                || sample.round_transports.is_empty()
                 || sample
                     .round_transports
                     .iter()
-                    .filter(|transport| **transport == super::RoundTransport::WebSocket)
-                    .count()
-                    < 2
+                    .any(|transport| *transport != super::RoundTransport::WebSocket)
         })
     {
         return Err(profile_error(
-            "Hybrid continuation requires one HTTP first round, at least two warm WS rounds, and no reconnects",
+            "Hybrid continuation constants require already-warmed WebSocket rounds and no reconnects",
         ));
     }
     let http = case_report(continuation_case(cases, HTTP_PATH)?)?;
@@ -845,21 +848,42 @@ fn mechanism_evidence(cases: &[BenchmarkCase]) -> Result<(MechanismEvidence, f64
         .websocket_complete
         .ok_or_else(|| profile_error("Hybrid WS complete is missing"))?
         .median;
-    let first_saved_ms = http_first_event_ms - websocket_first_event_ms;
-    let complete_saved_ms = http_complete_ms - websocket_complete_ms;
-    if first_saved_ms <= 0.0 || complete_saved_ms <= 0.0 {
-        return Err(profile_error(
-            "mechanism benchmark does not show positive WebSocket savings",
-        ));
+    let paired_first = super::stability::paired_savings(
+        continuation_case(cases, HTTP_PATH)?,
+        continuation_case(cases, HYBRID_PATH)?,
+        super::stability::PairedMetric::FirstEvent,
+    )?;
+    if !paired_first.qualifies {
+        return Err(profile_error(format!(
+            "paired first-event savings are not candidate-ready: both sample halves must remain positive, median={:.1} ms, half-sample drift={:?}%",
+            paired_first.median_ms, paired_first.drift_pct,
+        )));
     }
+    let paired_complete = super::stability::paired_savings(
+        continuation_case(cases, HTTP_PATH)?,
+        continuation_case(cases, HYBRID_PATH)?,
+        super::stability::PairedMetric::Complete,
+    )?;
+    let complete_saved_ms = if paired_complete.qualifies {
+        paired_complete.median_ms
+    } else {
+        0.0
+    };
     Ok((
         MechanismEvidence {
             http_first_event_ms,
             websocket_first_event_ms,
             http_complete_ms,
             websocket_complete_ms,
+            paired_first_event_saved_ms: paired_first.median_ms,
+            paired_first_event_drift_pct: paired_first.drift_pct.ok_or_else(|| {
+                profile_error("paired first-event savings require a positive first-half median")
+            })?,
+            paired_complete_saved_ms: paired_complete.median_ms,
+            paired_complete_drift_pct: paired_complete.drift_pct,
+            complete_constant_qualified: paired_complete.qualifies,
         },
-        first_saved_ms,
+        paired_first.median_ms,
         complete_saved_ms,
     ))
 }
@@ -1175,6 +1199,27 @@ fn write_bucket_evidence(
     Ok(())
 }
 
+fn write_mechanism_evidence(
+    output: &mut impl Write,
+    summary: &CandidateSummary,
+) -> Result<(), io::Error> {
+    writeln!(
+        output,
+        "机制层：HTTP→WS 同轮配对首事件节省 {:.1} ms（前后半漂移 {:.1}%）；只使用 Hybrid 的纯 WS warm rounds。",
+        summary.mechanism.paired_first_event_saved_ms,
+        summary.mechanism.paired_first_event_drift_pct,
+    )?;
+    writeln!(
+        output,
+        "complete：HTTP/WS 聚合中位数 {:.1}/{:.1} ms，同轮配对差 {:.1} ms，漂移 {:?}%，固定收益资格={}；不合格时常量为 0。",
+        summary.mechanism.http_complete_ms,
+        summary.mechanism.websocket_complete_ms,
+        summary.mechanism.paired_complete_saved_ms,
+        summary.mechanism.paired_complete_drift_pct,
+        summary.mechanism.complete_constant_qualified,
+    )
+}
+
 fn write_candidate_report(
     output: &mut impl Write,
     summary: &CandidateSummary,
@@ -1221,12 +1266,7 @@ fn write_candidate_report(
         "websocketCompleteSavedMs",
         summary.changes.websocket_complete_saved_ms,
     )?;
-    writeln!(
-        output,
-        "机制层：HTTP→WS 首事件节省 {:.1} ms，complete 节省 {:.1} ms；只使用 Hybrid 的纯 WS warm rounds。",
-        summary.mechanism.http_first_event_ms - summary.mechanism.websocket_first_event_ms,
-        summary.mechanism.http_complete_ms - summary.mechanism.websocket_complete_ms,
-    )?;
+    write_mechanism_evidence(output, summary)?;
     writeln!(
         output,
         "历史观测：首事件 {:+.1}%，complete {:+.1}%；历史 before/after 仅作交叉验证，不归因于 Turbo。",
@@ -1443,7 +1483,7 @@ mod tests {
         Ok(())
     }
 
-    fn benchmark_cases(extra_hybrid_http_round: bool) -> Vec<super::super::BenchmarkCase> {
+    fn benchmark_cases(include_cold_hybrid_round: bool) -> Vec<super::super::BenchmarkCase> {
         use std::time::Duration;
 
         use super::super::{
@@ -1459,29 +1499,10 @@ mod tests {
                 samples: (0..8)
                     .map(|_| {
                         let (round_transports, first_events, round_e2e) = match path {
-                            HYBRID_PATH if extra_hybrid_http_round => (
+                            HYBRID_PATH if include_cold_hybrid_round => (
                                 vec![
-                                    RoundTransport::Http,
                                     RoundTransport::Http,
                                     RoundTransport::WebSocket,
-                                    RoundTransport::WebSocket,
-                                ],
-                                vec![
-                                    Duration::from_secs(9),
-                                    Duration::from_secs(8),
-                                    Duration::from_millis(100),
-                                    Duration::from_millis(100),
-                                ],
-                                vec![
-                                    Duration::from_secs(20),
-                                    Duration::from_secs(18),
-                                    Duration::from_millis(100),
-                                    Duration::from_millis(100),
-                                ],
-                            ),
-                            HYBRID_PATH => (
-                                vec![
-                                    RoundTransport::Http,
                                     RoundTransport::WebSocket,
                                     RoundTransport::WebSocket,
                                 ],
@@ -1489,14 +1510,16 @@ mod tests {
                                     Duration::from_secs(9),
                                     Duration::from_millis(100),
                                     Duration::from_millis(100),
+                                    Duration::from_millis(100),
                                 ],
                                 vec![
                                     Duration::from_secs(20),
                                     Duration::from_millis(100),
                                     Duration::from_millis(100),
+                                    Duration::from_millis(100),
                                 ],
                             ),
-                            WEBSOCKET_PATH => (
+                            HYBRID_PATH | WEBSOCKET_PATH => (
                                 vec![RoundTransport::WebSocket; 3],
                                 vec![Duration::from_millis(100); 3],
                                 vec![Duration::from_millis(100); 3],
@@ -1563,7 +1586,9 @@ mod tests {
         };
 
         let three_rounds = candidate_summary(&bytes, &settings, &benchmark_cases(false))?;
-        let extra_http_round = candidate_summary(&bytes, &settings, &benchmark_cases(true))?;
+        let cold_mixed = candidate_summary(&bytes, &settings, &benchmark_cases(true))
+            .expect_err("cold Hybrid HTTP rounds must stay out of candidate constants")
+            .to_string();
 
         assert_eq!(
             three_rounds.candidate_constants.baseline_first_token_ms,
@@ -1580,20 +1605,80 @@ mod tests {
             three_rounds.candidate_constants.websocket_complete_saved_ms,
             900
         );
+        assert!(cold_mixed.contains("already-warmed WebSocket rounds"));
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_ignores_unrelated_path_e2e_drift_when_paired_savings_are_stable()
+    -> Result<(), io::Error> {
+        use std::time::Duration;
+
+        use super::super::{
+            BenchmarkSettings, DIRECT_PATH, WEBSOCKET_PATH, settings::WorkloadSource,
+        };
+        use super::candidate_summary;
+
+        let bytes = serde_json::to_vec(&profile()?).map_err(io::Error::other)?;
+        let settings = BenchmarkSettings {
+            upstream: "https://api.ai-cove.com/v1".to_owned(),
+            model: "gpt-5.6-luna".to_owned(),
+            prompt: "fixed workload".to_owned(),
+            workload_source: WorkloadSource::BuiltIn,
+            runs: 8,
+            warmups: 1,
+            timeout: Duration::from_secs(180),
+        };
+        let mut cases = benchmark_cases(false);
+        for path in [DIRECT_PATH, WEBSOCKET_PATH] {
+            let case = cases
+                .iter_mut()
+                .find(|case| case.path == path)
+                .ok_or_else(|| io::Error::other("missing unrelated path fixture"))?;
+            for (index, sample) in case.samples.iter_mut().enumerate() {
+                sample.e2e = Duration::from_millis(if index < 4 { 1_000 } else { 2_000 });
+            }
+        }
+
+        let summary = candidate_summary(&bytes, &settings, &cases)?;
+
         assert_eq!(
-            three_rounds
-                .candidate_constants
-                .websocket_first_token_saved_ms,
-            extra_http_round
-                .candidate_constants
-                .websocket_first_token_saved_ms
+            summary.candidate_constants.websocket_first_token_saved_ms,
+            400
         );
-        assert_eq!(
-            three_rounds.candidate_constants.websocket_complete_saved_ms,
-            extra_http_round
-                .candidate_constants
-                .websocket_complete_saved_ms
-        );
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_sets_complete_savings_to_zero_when_paired_complete_is_not_positive()
+    -> Result<(), io::Error> {
+        use std::time::Duration;
+
+        use super::super::{BenchmarkSettings, HYBRID_PATH, settings::WorkloadSource};
+        use super::candidate_summary;
+
+        let bytes = serde_json::to_vec(&profile()?).map_err(io::Error::other)?;
+        let settings = BenchmarkSettings {
+            upstream: "https://api.ai-cove.com/v1".to_owned(),
+            model: "gpt-5.6-luna".to_owned(),
+            prompt: "fixed workload".to_owned(),
+            workload_source: WorkloadSource::BuiltIn,
+            runs: 8,
+            warmups: 1,
+            timeout: Duration::from_secs(180),
+        };
+        let mut cases = benchmark_cases(false);
+        let hybrid = cases
+            .iter_mut()
+            .find(|case| case.path == HYBRID_PATH)
+            .ok_or_else(|| io::Error::other("missing Hybrid fixture"))?;
+        for sample in &mut hybrid.samples {
+            sample.round_e2e = vec![Duration::from_millis(1_500); 3];
+        }
+
+        let summary = candidate_summary(&bytes, &settings, &cases)?;
+
+        assert_eq!(summary.candidate_constants.websocket_complete_saved_ms, 0);
         Ok(())
     }
 
