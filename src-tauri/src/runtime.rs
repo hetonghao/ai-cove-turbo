@@ -329,8 +329,11 @@ impl AppRuntime {
 
     pub(crate) async fn status(&self) -> AppStatus {
         self.refresh_ownership().await;
+        self.verify_codex_restart().await;
         let metrics = self.metrics.snapshot();
+        let waiting_for_request = read_lock(&self.status).codex_state == "waiting_request";
         if metrics.successful_responses > self.activation_baseline.load(Ordering::Relaxed)
+            && waiting_for_request
             && read_lock(&self.status).config_state == "managed"
         {
             self.update_status(|status| {
@@ -1010,9 +1013,7 @@ base_url = "https://api.ai-cove.com/v1"
         assert_eq!(runtime.status().await.codex_state, "waiting_start");
 
         runtime.metrics.record_successful_response_for_test();
-        let active = runtime.status().await;
-        assert_eq!(active.codex_state, "active");
-        assert!(!active.restart_required);
+        assert_eq!(runtime.status().await.codex_state, "waiting_start");
 
         runtime.mark_desktop_restarted(Some(42));
         assert_eq!(runtime.status().await.codex_state, "waiting_request");
