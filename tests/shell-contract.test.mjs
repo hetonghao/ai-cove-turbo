@@ -302,9 +302,9 @@ test("桌面版本和 updater endpoint 由同一编译期契约驱动", async ()
   );
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 
-  assert.equal(packageJson.version, "0.1.0-beta.3");
-  assert.match(cargo, /^version = "0\.1\.0-beta\.3"$/m);
-  assert.equal(tauriConfig.version, "0.1.0-beta.3");
+  assert.equal(packageJson.version, "0.1.0-beta.4");
+  assert.match(cargo, /^version = "0\.1\.0-beta\.4"$/m);
+  assert.equal(tauriConfig.version, "0.1.0-beta.4");
   assert.equal(packageJson.scripts["desktop:release:local"], "node scripts/desktop-release.mjs");
   assert.match(rust, /option_env!\("TURBO_UPDATER_ENDPOINT"\)/);
   assert.match(rust, /https:\/\/ai-cove\.com\/downloads\/turbo\/latest\.json/);
