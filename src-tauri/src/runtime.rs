@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(not(test), target_os = "macos"))]
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
@@ -781,7 +781,7 @@ fn codex_desktop_process_id() -> Option<u32> {
 
 #[cfg(all(not(test), target_os = "windows"))]
 fn codex_desktop_process_id() -> Option<u32> {
-    let output = Command::new("powershell.exe")
+    let output = crate::windows_process::hidden_command("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",

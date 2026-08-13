@@ -7,6 +7,8 @@ mod codex_thread_title;
 pub(crate) mod config;
 pub(crate) mod proxy;
 pub(crate) mod runtime;
+#[cfg(target_os = "windows")]
+mod windows_process;
 
 #[cfg(test)]
 mod benchmark;
