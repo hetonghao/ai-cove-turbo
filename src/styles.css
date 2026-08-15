@@ -1480,7 +1480,7 @@ h2 {
 
 .c-connection-transition dl {
   display: grid;
-  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1fr) minmax(0, 1.4fr);
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) max-content;
   gap: 8px;
   margin: 0;
   padding: 8px 10px 9px 31px;
@@ -1489,6 +1489,10 @@ h2 {
 
 .c-connection-transition dl > div {
   min-width: 0;
+}
+
+.c-connection-transition dl > div:last-child {
+  grid-column: 1 / -1;
 }
 
 .c-connection-transition dt {
