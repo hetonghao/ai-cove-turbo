@@ -168,10 +168,7 @@ pub(super) async fn handle_worker_event(
                 .is_ok()
         }
         WorkerEvent::Error { code, message } => {
-            let failed_websocket = retire_failed_websocket(session, active, code, message).await;
-            if failed_websocket && code == 1011 {
-                return send_error(client, "server_error", message).await;
-            }
+            retire_failed_websocket(session, active, code, message).await;
             let _ = send_error(client, "server_error", message).await;
             let _ = close_client(client, code, message).await;
             false
