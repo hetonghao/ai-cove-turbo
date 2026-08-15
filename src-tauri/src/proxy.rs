@@ -53,6 +53,15 @@ use private_websocket::{
 const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 128 * 1024 * 1024;
 pub(crate) const MIN_COMPRESSION_INPUT_BYTES: usize = 1024;
 const PRIVATE_TLS_SESSION_CACHE_SIZE: usize = 256;
+const fn turbo_client_version() -> &'static str {
+    if cfg!(target_os = "windows") {
+        concat!("win/", env!("CARGO_PKG_VERSION"))
+    } else if cfg!(target_os = "macos") {
+        concat!("mac/", env!("CARGO_PKG_VERSION"))
+    } else {
+        concat!("other/", env!("CARGO_PKG_VERSION"))
+    }
+}
 const HOP_BY_HOP_HEADERS: [&str; 8] = [
     "connection",
     "keep-alive",
@@ -561,6 +570,10 @@ async fn proxy_request(
     request.headers_mut().insert(
         HeaderName::from_static("x-ai-cove-client"),
         header::HeaderValue::from_static("turbo"),
+    );
+    request.headers_mut().insert(
+        HeaderName::from_static("x-ai-cove-client-version"),
+        header::HeaderValue::from_static(turbo_client_version()),
     );
     if is_websocket_upgrade(request.headers()) {
         return proxy_websocket(state, &mut request).await;
@@ -1448,6 +1461,12 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("turbo")
         );
+        assert_eq!(
+            headers
+                .get("x-ai-cove-client-version")
+                .and_then(|v| v.to_str().ok()),
+            Some(turbo_client_version())
+        );
         let decoded = zstd::stream::decode_all(Cursor::new(compressed))?;
         assert_eq!(decoded, input.as_bytes());
 
@@ -1857,6 +1876,10 @@ mod tests {
         assert_eq!(
             http_header_value(&upstream_head, "X-AI-Cove-Client"),
             Some("turbo")
+        );
+        assert_eq!(
+            http_header_value(&upstream_head, "X-AI-Cove-Client-Version"),
+            Some(turbo_client_version())
         );
         let (text, binary) = messages_rx.await?;
         assert_eq!(text.0, text_input.as_bytes());
