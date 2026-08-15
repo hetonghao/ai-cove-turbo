@@ -729,44 +729,34 @@ async fn idle_unexpected_eof_is_replaced_without_user_visible_failure() -> io::R
 }
 
 #[tokio::test]
-async fn active_ws_failure_keeps_client_and_rewarms_without_replay() -> io::Result<()> {
+async fn active_ws_failure_closes_client_without_replay() -> io::Result<()> {
+    // Given: the client has completed one request while Turbo warms a private WebSocket.
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::ActiveFailure,
         delay_http: false,
     })
     .await?;
-    let (proxy, metrics) = start_test_proxy(&server).await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
     send_create(&mut client).await?;
     server.fixture.wait_ready(1).await?;
     server.fixture.wait_http(1).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
+
+    // When: the warmed private WebSocket fails during the next active request.
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
+
+    // Then: Turbo terminates the failed downstream request instead of leaving it open.
     assert_eq!(next_event_type(&mut client).await?, "error");
-    assert_eq!(metrics.snapshot().hybrid_ws, 1);
-    server.fixture.wait_ready(2).await?;
-    send_create(&mut client).await?;
-    server.fixture.wait_messages(2).await?;
-    assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_eq!(metrics.snapshot().hybrid_ws, 2);
-    assert_counts_with_min_private(server.fixture.counts().await, 2, 2, 1);
-    let events = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
-        .map_err(io::Error::other)?;
-    let failure = events
-        .as_array()
-        .and_then(|events| {
-            events
-                .iter()
-                .find(|event| event.get("failurePhase") == Some(&Value::from("hybridActive")))
-        })
-        .ok_or_else(|| io::Error::other("hybrid active failure was not persisted"))?;
-    assert_eq!(failure.get("status"), Some(&Value::from(1011)));
-    assert_eq!(
-        failure.get("failureReason"),
-        Some(&Value::from("private websocket failed while active"))
-    );
+    let close = tokio::time::timeout(Duration::from_secs(1), client.next())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "active failure close missing"))?;
+    let Some(Ok(Message::Close(Some(frame)))) = close else {
+        return Err(io::Error::other("active failure close frame missing"));
+    };
+    assert_eq!(u16::from(frame.code), 1011);
     drop(client);
     proxy.stop().await;
     server.stop().await;
@@ -806,7 +796,7 @@ async fn active_ws_silence_pings_and_pong_keeps_the_request_alive() -> io::Resul
 }
 
 #[tokio::test]
-async fn active_ws_missing_pong_fails_without_replaying_the_request() -> io::Result<()> {
+async fn active_ws_missing_pong_closes_client_without_replaying_the_request() -> io::Result<()> {
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::HoldResponseNoPong,
         delay_http: false,
@@ -842,11 +832,14 @@ async fn active_ws_missing_pong_fails_without_replaying_the_request() -> io::Res
     );
     assert_eq!(metrics.snapshot().hybrid_ws, 1);
     assert_counts_with_min_private(server.fixture.counts().await, 6, 1, 0);
-    server.fixture.release_private();
-    send_create(&mut client).await?;
-    assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_eq!(metrics.snapshot().hybrid_ws, 2);
-    assert_counts_with_min_private(server.fixture.counts().await, 6, 2, 0);
+    let close = client
+        .next()
+        .now_or_never()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "keepalive close missing"))?;
+    let Some(Ok(Message::Close(Some(frame)))) = close else {
+        return Err(io::Error::other("keepalive close frame missing"));
+    };
+    assert_eq!(u16::from(frame.code), 1011);
     drop(client);
     proxy.stop().await;
     server.stop().await;
