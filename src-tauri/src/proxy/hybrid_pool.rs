@@ -92,10 +92,14 @@ struct ScopeState {
 struct PoolConnection {
     id: u64,
     upstream: PrivateUpstream,
+    server_trace: Option<String>,
+    ordinal: u64,
 }
 
 struct ConnectionLease {
     connection_id: u64,
+    server_trace: Option<String>,
+    ordinal: u64,
 }
 
 struct ParkedConnection {
@@ -104,6 +108,8 @@ struct ParkedConnection {
     thread_id: String,
     response_id: String,
     connection_id: u64,
+    server_trace: Option<String>,
+    ordinal: u64,
     upstream: PrivateUpstream,
 }
 
@@ -213,6 +219,8 @@ impl HybridPool {
                     session_id,
                     ConnectionLease {
                         connection_id: connection.id,
+                        server_trace: connection.server_trace,
+                        ordinal: connection.ordinal,
                     },
                 );
                 connection.upstream
@@ -308,13 +316,10 @@ impl HybridPool {
             let Some(entry) = state.scopes.get_mut(scope) else {
                 return Err(upstream);
             };
-            let Some(connection_id) = entry
-                .leased
-                .get(&session_id)
-                .map(|lease| lease.connection_id)
-            else {
+            let Some(lease) = entry.leased.remove(&session_id) else {
                 return Err(upstream);
             };
+            let connection_id = lease.connection_id;
             entry.active_local = entry.active_local.saturating_sub(1);
             state.release_session(session_id, None);
             state.handoffs.push(ParkedConnection {
@@ -323,6 +328,8 @@ impl HybridPool {
                 thread_id,
                 response_id,
                 connection_id,
+                server_trace: lease.server_trace,
+                ordinal: lease.ordinal,
                 upstream,
             });
             connection_id
@@ -368,6 +375,8 @@ impl HybridPool {
                             session_id,
                             ConnectionLease {
                                 connection_id: parked.connection_id,
+                                server_trace: parked.server_trace,
+                                ordinal: parked.ordinal,
                             },
                         );
                         state.remove_session(parked.session_id, None);

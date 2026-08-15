@@ -3329,10 +3329,6 @@ body[data-active-tab="statistics"] {
     gap: 10px;
   }
 
-  .b-version-bar__status > span {
-    display: none;
-  }
-
   .b-status-strands {
     width: var(--turbo-strands-mobile-width);
     height: var(--turbo-strands-mobile-height);

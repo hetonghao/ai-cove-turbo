@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-const version = "0.1.0-beta.4";
+const version = "0.1.0-beta.5";
 
 test("本地构建把 updater 配置和私钥内容交给 Tauri CLI", async () => {
   const { createLocalBuildInvocation } = await import("../scripts/desktop-release.mjs");
@@ -64,7 +64,7 @@ test("本地 assembly 生成 darwin updater manifest 并保留可下载的稳定
     assert.equal(manifest.version, version);
     assert.equal(
       updater.url,
-      "http://127.0.0.1:41731/downloads/turbo/ai-cove-turbo-macos-aarch64.app.tar.gz?v=0.1.0-beta.4",
+      "http://127.0.0.1:41731/downloads/turbo/ai-cove-turbo-macos-aarch64.app.tar.gz?v=0.1.0-beta.5",
     );
     assert.equal(new URL(updater.url).pathname.split("/").pop(), "ai-cove-turbo-macos-aarch64.app.tar.gz");
     assert.equal(updater.signature, "signed updater payload");
@@ -86,12 +86,12 @@ test("CI assembly 从双平台 updater 实物生成合并 manifest", async () =>
   try {
     await mkdir(darwinDir, { recursive: true });
     await mkdir(windowsDir, { recursive: true });
-    await writeFile(path.join(darwinDir, "AI Cove Turbo_0.1.0-beta.4_aarch64.dmg"), "dmg");
+    await writeFile(path.join(darwinDir, "AI Cove Turbo_0.1.0-beta.5_aarch64.dmg"), "dmg");
     await writeFile(path.join(darwinDir, "AI Cove Turbo.app.tar.gz"), "mac updater");
     await writeFile(path.join(darwinDir, "AI Cove Turbo.app.tar.gz.sig"), "mac signature\n");
-    await writeFile(path.join(windowsDir, "AI Cove Turbo_0.1.0-beta.4_x64-setup.exe"), "exe");
+    await writeFile(path.join(windowsDir, "AI Cove Turbo_0.1.0-beta.5_x64-setup.exe"), "exe");
     await writeFile(
-      path.join(windowsDir, "AI Cove Turbo_0.1.0-beta.4_x64-setup.exe.sig"),
+      path.join(windowsDir, "AI Cove Turbo_0.1.0-beta.5_x64-setup.exe.sig"),
       "windows signature\n",
     );
 
@@ -107,12 +107,12 @@ test("CI assembly 从双平台 updater 实物生成合并 manifest", async () =>
     assert.equal(manifest.platforms["darwin-aarch64"].signature, "mac signature");
     assert.equal(
       manifest.platforms["darwin-aarch64"].url,
-      "https://ai-cove.com/downloads/turbo/ai-cove-turbo-macos-aarch64.app.tar.gz?v=0.1.0-beta.4",
+      "https://ai-cove.com/downloads/turbo/ai-cove-turbo-macos-aarch64.app.tar.gz?v=0.1.0-beta.5",
     );
     assert.equal(manifest.platforms["windows-x86_64"].signature, "windows signature");
     assert.equal(
       manifest.platforms["windows-x86_64"].url,
-      "https://ai-cove.com/downloads/turbo/ai-cove-turbo-windows.exe?v=0.1.0-beta.4",
+      "https://ai-cove.com/downloads/turbo/ai-cove-turbo-windows.exe?v=0.1.0-beta.5",
     );
     assert.equal(await readFile(path.join(releaseDir, "ai-cove-turbo-windows.exe"), "utf8"), "exe");
     assert.equal(

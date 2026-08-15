@@ -424,18 +424,25 @@ async fn check_for_updates(
         return Ok(runtime.status().await);
     }
     runtime.set_update_status("checking", "正在检查更新", 0);
-    let endpoint = updater_endpoint()?;
-    let updater = app
-        .updater_builder()
-        .endpoints(vec![endpoint])
-        .map_err(|error| error.to_string())?
-        .build()
-        .map_err(|error| error.to_string())?;
-    match updater.check().await.map_err(|error| error.to_string())? {
-        Some(update) => {
+    let update = async {
+        let endpoint = updater_endpoint()?;
+        let updater = app
+            .updater_builder()
+            .endpoints(vec![endpoint])
+            .map_err(|error| error.to_string())?
+            .build()
+            .map_err(|error| error.to_string())?;
+        updater.check().await.map_err(|error| error.to_string())
+    }
+    .await;
+    match update {
+        Ok(Some(update)) => {
             runtime.set_update_status("available", &format!("发现新版本 {}", update.version), 0);
         }
-        None => runtime.set_update_status("current", "当前已是最新版本", 100),
+        Ok(None) => runtime.set_update_status("current", "Turbo 已是最新", 100),
+        Err(error) => {
+            runtime.set_update_status("error", &format!("检查更新失败，可重试：{error}"), 0);
+        }
     }
     Ok(runtime.status().await)
 }
@@ -457,7 +464,7 @@ async fn install_update(
         .build()
         .map_err(|error| error.to_string())?;
     let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
-        runtime.set_update_status("current", "当前已是最新版本", 100);
+        runtime.set_update_status("current", "Turbo 已是最新", 100);
         return Ok(runtime.status().await);
     };
     runtime.set_update_status("downloading", "正在下载签名更新", 0);

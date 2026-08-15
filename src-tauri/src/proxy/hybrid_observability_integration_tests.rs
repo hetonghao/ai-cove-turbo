@@ -77,6 +77,34 @@ async fn real_hybrid_session_reports_active_idle_and_closed_lifecycle() -> io::R
     })
     .await?;
     assert_eq!(active.bound_threads.len(), 1);
+    let active_json = serde_json::to_value(&active).map_err(io::Error::other)?;
+    let active_bound = active_json
+        .get("boundThreads")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .ok_or_else(|| io::Error::other("active bound connection missing"))?;
+    assert!(
+        active_bound
+            .get("upstreamTrace")
+            .and_then(Value::as_str)
+            .is_some_and(|trace| {
+                trace.len() == 32
+                    && trace
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
+    );
+    let generation = active_bound
+        .get("upstreamGeneration")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| io::Error::other("upstream generation missing"))?;
+    assert!(generation > 0);
+    let expected_id = format!("S{generation:03}");
+    assert_eq!(
+        active_bound.get("id").and_then(Value::as_str),
+        Some(expected_id.as_str())
+    );
+    assert_eq!(active_bound.get("upstreamOrdinal"), Some(&Value::from(1)));
 
     // When: 上游完成响应。
     server.fixture.release_private();
@@ -99,6 +127,26 @@ async fn real_hybrid_session_reports_active_idle_and_closed_lifecycle() -> io::R
     })
     .await?;
     assert_eq!(idle.bound_threads.len(), 1);
+
+    let trace = active_bound
+        .get("upstreamTrace")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("upstream trace missing"))?;
+    send_observed_create(&mut client).await?;
+    server.fixture.wait_messages(2).await?;
+    let second_active = wait_for_snapshot(&proxy, "second active upload", |snapshot| {
+        snapshot.bound_threads.iter().any(|item| {
+            item.thread_id == OBSERVED_THREAD_ID
+                && item.activity == ConnectionActivity::Up
+                && item.upstream_trace.as_deref() == Some(trace)
+                && item.upstream_generation == generation
+                && item.upstream_ordinal == 2
+        })
+    })
+    .await?;
+    assert_eq!(second_active.bound_threads.len(), 1);
+    server.fixture.release_private();
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
 
     // When: Codex 关闭本地会话。
     client.close(None).await.map_err(io::Error::other)?;

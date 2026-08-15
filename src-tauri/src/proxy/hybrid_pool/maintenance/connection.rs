@@ -22,8 +22,8 @@ pub(super) fn spawn_connection(inner: Arc<PoolInner>, scope: HybridScope, spec: 
         let connected =
             private_websocket::connect_private(&spec.target, &spec.headers, &inner.tls_config)
                 .await;
-        let upstream = match connected {
-            Ok(upstream) => upstream,
+        let (upstream, server_trace) = match connected {
+            Ok(connection) => connection,
             Err(failure) => {
                 let mut state = inner.state.lock().await;
                 let (remove, retry) = if let Some(entry) = state.scopes.get_mut(&scope) {
@@ -70,6 +70,8 @@ pub(super) fn spawn_connection(inner: Arc<PoolInner>, scope: HybridScope, spec: 
                 entry.idle.push(PoolConnection {
                     id: connection_id,
                     upstream,
+                    server_trace,
+                    ordinal: 0,
                 });
                 entry.initialized = true;
             }

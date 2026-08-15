@@ -117,6 +117,8 @@ async fn active_scope_reclaims_dormant_pool_capacity() -> io::Result<()> {
                     idle: vec![PoolConnection {
                         id: connection_id,
                         upstream,
+                        server_trace: None,
+                        ordinal: 0,
                     }],
                 },
             );
@@ -187,7 +189,12 @@ async fn inactive_scope_keeps_full_warm_reserve() -> io::Result<()> {
         .enumerate()
         .map(|(index, upstream)| {
             u64::try_from(index.saturating_add(1))
-                .map(|id| PoolConnection { id, upstream })
+                .map(|id| PoolConnection {
+                    id,
+                    upstream,
+                    server_trace: None,
+                    ordinal: 0,
+                })
                 .map_err(io::Error::other)
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -262,7 +269,12 @@ async fn successful_checkout_cannot_be_cancelled_after_lease_assignment() -> io:
                 leased: HashMap::new(),
                 connecting: 0,
                 probing: 0,
-                idle: vec![PoolConnection { id: 1, upstream }],
+                idle: vec![PoolConnection {
+                    id: 1,
+                    upstream,
+                    server_trace: None,
+                    ordinal: 0,
+                }],
             },
         );
         session_id

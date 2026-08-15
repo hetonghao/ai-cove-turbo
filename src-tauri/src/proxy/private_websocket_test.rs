@@ -54,6 +54,9 @@ const TEST_KEY_DER: &[u8] = &[
     0xca, 0xc5, 0x30, 0xd7, 0x70, 0x7d, 0xf0, 0x67, 0x71, 0xd6,
 ];
 
+const VALID_SERVER_TRACE: &str = "0123456789abcdef0123456789abcdef";
+const INVALID_SERVER_TRACE: &str = "upstream-test-trace";
+
 fn test_server_config() -> io::Result<Arc<ServerConfig>> {
     let cert = CertificateDer::from(TEST_CERT_DER.to_vec());
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(TEST_KEY_DER.to_vec()));
@@ -67,12 +70,16 @@ fn test_server_config() -> io::Result<Arc<ServerConfig>> {
 fn serve_private_handshakes(listener: &TcpListener, config: &Arc<ServerConfig>) -> io::Result<()> {
     for _ in 0..2 {
         let (socket, _) = listener.accept()?;
-        serve_private_handshake(socket, Arc::clone(config))?;
+        serve_private_handshake(socket, Arc::clone(config), VALID_SERVER_TRACE)?;
     }
     Ok(())
 }
 
-fn serve_private_handshake(socket: TcpStream, config: Arc<ServerConfig>) -> io::Result<()> {
+fn serve_private_handshake(
+    socket: TcpStream,
+    config: Arc<ServerConfig>,
+    trace: &str,
+) -> io::Result<()> {
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
     socket.set_write_timeout(Some(Duration::from_secs(2)))?;
     let connection = ServerConnection::new(config).map_err(io::Error::other)?;
@@ -108,11 +115,93 @@ fn serve_private_handshake(socket: TcpStream, config: Arc<ServerConfig>) -> io::
         .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "websocket key missing"))?;
     let accept = derive_accept_key(key.trim().as_bytes());
+    if request
+        .lines()
+        .any(|line| line.to_ascii_lowercase().starts_with("x-ai-cove-ws-trace:"))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "response-only websocket trace was forwarded as a request header",
+        ));
+    }
     write!(
         stream,
-        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: {PRIVATE_WEBSOCKET_SUBPROTOCOL}\r\n\r\n"
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: {PRIVATE_WEBSOCKET_SUBPROTOCOL}\r\nX-AI-Cove-WS-Trace: {trace}\r\n\r\n"
     )?;
     stream.flush()
+}
+
+#[tokio::test]
+async fn private_connections_capture_server_trace_without_forwarding_client_trace() -> io::Result<()>
+{
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let target = Url::parse(&format!("https://127.0.0.1:{port}")).map_err(io::Error::other)?;
+    let server = thread::spawn(move || {
+        test_server_config().and_then(|config| serve_private_handshakes(&listener, &config))
+    });
+    let config = ClientConfig::builder()
+        .with_root_certificates({
+            let mut roots = RootCertStore::empty();
+            roots
+                .add(CertificateDer::from(TEST_CERT_DER.to_vec()))
+                .map_err(io::Error::other)?;
+            roots
+        })
+        .with_no_client_auth();
+    let shared = PrivateTlsConfig::new(Arc::new(config));
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-ai-cove-ws-trace",
+        axum::http::HeaderValue::from_static("client-controlled"),
+    );
+    let first = connect_private(&target, &headers, &shared).await;
+    let second = connect_private(&target, &headers, &shared).await;
+    let server_result = server
+        .join()
+        .map_err(|_| io::Error::other("test server panicked"))?;
+    server_result?;
+
+    let (first, first_trace) = first.map_err(|failure| io::Error::other(failure.to_string()))?;
+    let (second, second_trace) = second.map_err(|failure| io::Error::other(failure.to_string()))?;
+    assert_eq!(first_trace.as_deref(), Some(VALID_SERVER_TRACE));
+    assert_eq!(second_trace.as_deref(), Some(VALID_SERVER_TRACE));
+    drop(first);
+    drop(second);
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_connections_ignore_invalid_server_trace() -> io::Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let target = Url::parse(&format!("https://127.0.0.1:{port}")).map_err(io::Error::other)?;
+    let server = thread::spawn(move || {
+        test_server_config().and_then(|config| {
+            let (socket, _) = listener.accept()?;
+            serve_private_handshake(socket, config, INVALID_SERVER_TRACE)
+        })
+    });
+    let config = ClientConfig::builder()
+        .with_root_certificates({
+            let mut roots = RootCertStore::empty();
+            roots
+                .add(CertificateDer::from(TEST_CERT_DER.to_vec()))
+                .map_err(io::Error::other)?;
+            roots
+        })
+        .with_no_client_auth();
+    let shared = PrivateTlsConfig::new(Arc::new(config));
+    let (stream, trace) = connect_private(&target, &axum::http::HeaderMap::new(), &shared)
+        .await
+        .map_err(|failure| io::Error::other(failure.to_string()))?;
+    server
+        .join()
+        .map_err(|_| io::Error::other("test server panicked"))??;
+
+    assert!(trace.is_none());
+    drop(stream);
+    Ok(())
 }
 
 #[tokio::test]

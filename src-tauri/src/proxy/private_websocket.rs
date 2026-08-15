@@ -4,7 +4,7 @@ use std::{fmt, sync::Arc, time::Duration};
 mod tests;
 use axum::{
     body::Body,
-    http::{HeaderMap, Response, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Response, StatusCode, header},
 };
 use rustls::ClientConfig;
 use tokio::{net::TcpStream, task::JoinError};
@@ -33,6 +33,16 @@ use codec::{PRIVATE_MESSAGE_MAX_BYTES, PrivateProtocolError};
 
 const PRIVATE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const PRIVATE_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const WS_TRACE_HEADER: &str = "x-ai-cove-ws-trace";
+
+fn valid_server_trace(value: &HeaderValue) -> Option<String> {
+    let value = value.to_str().ok()?;
+    (value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+    .then(|| value.to_owned())
+}
 
 pub(super) const fn should_offload_private_encoding(payload_len: usize) -> bool {
     payload_len >= super::MIN_COMPRESSION_INPUT_BYTES
@@ -142,7 +152,7 @@ pub(super) async fn connect_private(
     target: &Url,
     client_headers: &HeaderMap,
     tls_config: &PrivateTlsConfig,
-) -> Result<PrivateUpstream, PrivateConnectFailure> {
+) -> Result<(PrivateUpstream, Option<String>), PrivateConnectFailure> {
     let mut target = target.clone();
     let websocket_scheme = match target.scheme() {
         "http" => "ws",
@@ -191,7 +201,11 @@ pub(super) async fn connect_private(
         let _ = tokio::time::timeout(PRIVATE_CLOSE_TIMEOUT, stream.close(None)).await;
         return Err(PrivateConnectFailure::PrivateProtocolRejected);
     }
-    Ok(stream)
+    let server_trace = response
+        .headers()
+        .get(WS_TRACE_HEADER)
+        .and_then(valid_server_trace);
+    Ok((stream, server_trace))
 }
 
 fn classify_connect_failure(error: WebSocketError) -> PrivateConnectFailure {
@@ -220,4 +234,5 @@ pub(super) fn is_client_handshake_header(name: &header::HeaderName) -> bool {
         || *name == header::SEC_WEBSOCKET_VERSION
         || *name == header::SEC_WEBSOCKET_EXTENSIONS
         || *name == header::SEC_WEBSOCKET_PROTOCOL
+        || name.as_str() == WS_TRACE_HEADER
 }

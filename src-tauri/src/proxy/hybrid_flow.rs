@@ -221,6 +221,11 @@ async fn start_response(
     }
     if let Some(upstream) = session.ready.take() {
         session
+            .state
+            .hybrid_pool
+            .record_response_create(&session.pool_scope, session.pool_id)
+            .await;
+        session
             .observe_activity(super::ConnectionActivity::Up)
             .await;
         *active = Some(websocket::start_websocket_worker(

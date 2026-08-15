@@ -258,7 +258,7 @@
     const labels = {
       idle: "尚未检查",
       checking: "检查中",
-      current: "已是最新",
+      current: "已检查",
       available: "发现新版本",
       downloaded: "可安装",
       downloading: "下载中",

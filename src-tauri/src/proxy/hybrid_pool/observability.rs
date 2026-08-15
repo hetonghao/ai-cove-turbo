@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::time::Instant;
 
-use super::{HybridPool, PoolState, scope::ScopeFingerprint};
+use super::{HybridPool, PoolState, scope::HybridScope, scope::ScopeFingerprint};
 
 #[path = "observability_snapshot.rs"]
 mod snapshot;
@@ -60,6 +60,10 @@ pub(crate) struct BoundThreadConnection {
     pub(crate) activity: ConnectionActivity,
     pub(crate) idle_seconds: u64,
     pub(crate) reclaim_policy: SessionReclaimPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) upstream_trace: Option<String>,
+    pub(crate) upstream_generation: u64,
+    pub(crate) upstream_ordinal: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -201,6 +205,23 @@ impl PoolState {
 }
 
 impl HybridPool {
+    pub(in crate::proxy) async fn record_response_create(
+        &self,
+        scope: &HybridScope,
+        session_id: u64,
+    ) {
+        let mut state = self.inner.state.lock().await;
+        let Some(lease) = state
+            .scopes
+            .get_mut(scope)
+            .and_then(|entry| entry.leased.get_mut(&session_id))
+        else {
+            return;
+        };
+        lease.ordinal = lease.ordinal.saturating_add(1);
+        drop(state);
+    }
+
     pub(crate) async fn observe_session(
         &self,
         session_id: u64,

@@ -20,6 +20,10 @@ fn metadata_headers(thread: &'static str, session: &'static str) -> HeaderMap {
         "x-codex-turn-metadata",
         HeaderValue::from_static(r#"{"thread_id":"thread"}"#),
     );
+    headers.insert(
+        "x-ai-cove-ws-trace",
+        HeaderValue::from_static("client-controlled-trace"),
+    );
     headers
 }
 
@@ -96,6 +100,7 @@ fn blank_connection_headers_remove_dynamic_session_metadata() {
         "x-codex-turn-metadata",
         "x-codex-parent-thread-id",
         "x-openai-subagent",
+        "x-ai-cove-ws-trace",
     ] {
         assert!(blank.get(dynamic).is_none());
     }

@@ -5,9 +5,9 @@
   const SPEED_ESTIMATE = Object.freeze({
     uplinkBitsPerSecond: 10_000_000,
     baselineFirstTokenMs: 1_669,
-    baselineCompleteMs: 11_184,
+    baselineCompleteMs: 2_273,
     websocketFirstTokenSavedMs: 521,
-    websocketCompleteSavedMs: 0,
+    websocketCompleteSavedMs: 274,
   });
 
   function formatBytes(value) {

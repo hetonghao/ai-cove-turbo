@@ -171,6 +171,8 @@ impl HybridPool {
                 entry.idle.push(PoolConnection {
                     id: connection_id,
                     upstream,
+                    server_trace: connection.server_trace,
+                    ordinal: connection.ordinal,
                 });
             }
             if !succeeded {

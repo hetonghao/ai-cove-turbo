@@ -380,6 +380,9 @@ async fn upgrade_response(
             header::SEC_WEBSOCKET_PROTOCOL,
             header::HeaderValue::from_static("ai-cove-zstd.v1"),
         );
+        if let Ok(trace) = header::HeaderValue::from_str(&format!("{private_handshakes:032x}")) {
+            response.headers_mut().insert("x-ai-cove-ws-trace", trace);
+        }
     }
     response
 }

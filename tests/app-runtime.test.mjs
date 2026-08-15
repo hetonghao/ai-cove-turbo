@@ -1399,11 +1399,55 @@ test("条件区域从隐藏变为可见时播放轻量反馈", async () => {
   );
 });
 
+test("最新版检查完成后显示已检查和 Turbo 已是最新", async () => {
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  let onClick;
+  const checkUpdate = element({ action: "check-for-updates" });
+  checkUpdate.closest = (selector) => selector === "[data-action]" ? checkUpdate : null;
+  const updateState = element({ state: "update-state" });
+  const updateMessage = element({ state: "update-message" });
+  const document = {
+    hidden: false,
+    readyState: "complete",
+    body: element(),
+    addEventListener(type, handler) {
+      if (type === "click") onClick = handler;
+    },
+    querySelector() { return null; },
+    querySelectorAll(selector) {
+      if (selector === "[data-action]") return [checkUpdate];
+      if (selector === "[data-state]") return [updateState, updateMessage];
+      return [];
+    },
+  };
+  const window = {
+    __TAURI__: { core: { invoke(command) {
+      if (command === "check_for_updates") {
+        return Promise.resolve({ updateState: "current", updateMessage: "Turbo 已是最新", updateProgress: 100 });
+      }
+      return Promise.resolve({ updateState: "idle", updateMessage: "尚未检查更新", updateProgress: 0 });
+    } } },
+    location: { href: "tauri://localhost/?tab=config" },
+    history: { replaceState() {} },
+    matchMedia: () => ({ matches: false }),
+    addEventListener() {},
+    setInterval() {},
+  };
+
+  await runApp(source, { document, window, URL, Intl });
+  await new Promise((resolve) => setImmediate(resolve));
+  onClick({ target: checkUpdate });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(updateState.textContent, "已检查");
+  assert.equal(updateMessage.textContent, "Turbo 已是最新");
+});
+
 test("安装更新期间持续读取并展示下载进度", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   let status = {
     updateState: "available",
-    updateMessage: "发现新版本 v0.1.0-beta.4",
+    updateMessage: "发现新版本 v0.1.0-beta.5",
     updateProgress: 0,
   };
   let statusPolls = 0;

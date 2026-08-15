@@ -101,9 +101,10 @@ async fn handle_upgrade(
         return json_error(StatusCode::BAD_REQUEST, "invalid websocket handshake");
     };
     let target = resolve_target(&state.upstream, request.uri());
-    let Some(upstream) = private_websocket::connect_private(&target, &headers, &state.tls_config)
-        .await
-        .ok()
+    let Some((upstream, _server_trace)) =
+        private_websocket::connect_private(&target, &headers, &state.tls_config)
+            .await
+            .ok()
     else {
         state
             .metrics

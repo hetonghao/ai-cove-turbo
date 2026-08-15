@@ -150,7 +150,7 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   assert.equal(statElements[2].textContent, "150 B");
   assert.equal(statElements[3].textContent, "150 B");
   assert.equal(statElements[4].textContent, "50.0%");
-  assert.equal(statElements[5].textContent, "25.0% / 0.0%");
+  assert.equal(statElements[5].textContent, "25.0% / 9.6%");
   assert.equal((bars.innerHTML.match(/class="c-bar-slot/g) ?? []).length, 6);
   assert.equal(chartSlots.filter((slot) => slot.tabIndex === 0).length, 1);
   assert.match(bars.innerHTML, /class="c-bar-slot" style="--bar: 100%/);
@@ -199,6 +199,6 @@ test("速度估算按压缩字节和已就绪 WebSocket 请求加权", async () 
   // Then: 错误请求不进入提速分母，WS 请求额外获得连接复用常量。
   assert.equal(estimate.requests, 2);
   assert.equal(estimate.firstPercent.toFixed(1), "19.7");
-  assert.equal(estimate.completePercent.toFixed(1), "0.6");
-  assert.equal(window.TurboTelemetry.formatSpeedGain(estimate), "19.7% / 0.6%");
+  assert.equal(estimate.completePercent.toFixed(1), "9.0");
+  assert.equal(window.TurboTelemetry.formatSpeedGain(estimate), "19.7% / 9.0%");
 });

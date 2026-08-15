@@ -27,9 +27,9 @@
   },
   "candidateConstants": {
     "baselineFirstTokenMs": 1669,
-    "baselineCompleteMs": 11184,
+    "baselineCompleteMs": 2273,
     "websocketFirstTokenSavedMs": 521,
-    "websocketCompleteSavedMs": 0
+    "websocketCompleteSavedMs": 274
   },
   "mechanism": {
     "httpFirstEventMs": 1197.0,
@@ -54,6 +54,6 @@
   "compressionAt10Mbps": {
     "uploadSavedMs": 10.9,
     "estimatedFirstEventGainPct": 31.8,
-    "estimatedCompleteGainPct": 0.1
+    "estimatedCompleteGainPct": 12.5
   }
 }

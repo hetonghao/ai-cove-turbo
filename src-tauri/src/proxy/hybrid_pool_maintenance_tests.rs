@@ -82,10 +82,14 @@ async fn checkout_remains_available_while_keepalive_probe_waits() -> io::Result<
                     PoolConnection {
                         id: 1,
                         upstream: first_client,
+                        server_trace: None,
+                        ordinal: 0,
                     },
                     PoolConnection {
                         id: 2,
                         upstream: second_client,
+                        server_trace: None,
+                        ordinal: 0,
                     },
                 ],
             },

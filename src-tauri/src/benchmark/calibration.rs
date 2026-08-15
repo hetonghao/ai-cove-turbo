@@ -949,9 +949,7 @@ fn historical_gain_pct(baseline_ms: f64, current_ms: f64) -> f64 {
 
 fn compression_sensitivity(
     profile: &WorkloadProfile,
-    baseline: LatencyCalibration,
-    first_saved_ms: f64,
-    complete_saved_ms: f64,
+    constants: SpeedConstants,
 ) -> Result<Vec<CompressionSensitivity>, io::Error> {
     let total = current_total(&profile.current)?;
     let websocket_requests = profile.current.iter().try_fold(0_u64, |count, bucket| {
@@ -976,13 +974,15 @@ fn compression_sensitivity(
             CompressionSensitivity {
                 uplink_mbps,
                 upload_saved_ms,
-                estimated_first_event_gain_pct: websocket_weight
-                    .mul_add(first_saved_ms, upload_saved_ms)
-                    / baseline.first_event_p50_ms
+                estimated_first_event_gain_pct: websocket_weight.mul_add(
+                    count_as_f64(constants.websocket_first_token_saved_ms),
+                    upload_saved_ms,
+                ) / count_as_f64(constants.baseline_first_token_ms)
                     * 100.0,
-                estimated_complete_gain_pct: websocket_weight
-                    .mul_add(complete_saved_ms, upload_saved_ms)
-                    / baseline.complete_p50_ms
+                estimated_complete_gain_pct: websocket_weight.mul_add(
+                    count_as_f64(constants.websocket_complete_saved_ms),
+                    upload_saved_ms,
+                ) / count_as_f64(constants.baseline_complete_ms)
                     * 100.0,
             }
         })
@@ -1118,7 +1118,8 @@ fn candidate_summary(
             "historical calibration direction conflicts with mechanism benchmark",
         ));
     }
-    let candidate_constants = SpeedConstants {
+    let old_constants = calibration.profile.old_constants;
+    let measured_constants = SpeedConstants {
         baseline_first_token_ms: rounded_milliseconds(
             calibration.baseline_same_window.first_event_p50_ms,
         )?,
@@ -1128,7 +1129,37 @@ fn candidate_summary(
         websocket_first_token_saved_ms: rounded_milliseconds(first_saved_ms)?,
         websocket_complete_saved_ms: rounded_milliseconds(complete_saved_ms)?,
     };
-    let old_constants = calibration.profile.old_constants;
+    let first_gain_increased = u128::from(measured_constants.websocket_first_token_saved_ms)
+        * u128::from(old_constants.baseline_first_token_ms)
+        > u128::from(old_constants.websocket_first_token_saved_ms)
+            * u128::from(measured_constants.baseline_first_token_ms);
+    let complete_gain_increased = mechanism.complete_constant_qualified
+        && u128::from(measured_constants.websocket_complete_saved_ms)
+            * u128::from(old_constants.baseline_complete_ms)
+            > u128::from(old_constants.websocket_complete_saved_ms)
+                * u128::from(measured_constants.baseline_complete_ms);
+    let candidate_constants = SpeedConstants {
+        baseline_first_token_ms: if first_gain_increased {
+            measured_constants.baseline_first_token_ms
+        } else {
+            old_constants.baseline_first_token_ms
+        },
+        baseline_complete_ms: if complete_gain_increased {
+            measured_constants.baseline_complete_ms
+        } else {
+            old_constants.baseline_complete_ms
+        },
+        websocket_first_token_saved_ms: if first_gain_increased {
+            measured_constants.websocket_first_token_saved_ms
+        } else {
+            old_constants.websocket_first_token_saved_ms
+        },
+        websocket_complete_saved_ms: if complete_gain_increased {
+            measured_constants.websocket_complete_saved_ms
+        } else {
+            old_constants.websocket_complete_saved_ms
+        },
+    };
     let workload_profile = workload_profile_evidence(&calibration)?;
     let benchmark = benchmark_evidence(settings, cases)?;
     let historical_calibration = historical_calibration_evidence(&calibration);
@@ -1153,9 +1184,7 @@ fn candidate_summary(
         },
         compression_sensitivity: compression_sensitivity(
             &calibration.profile,
-            calibration.baseline_same_window,
-            first_saved_ms,
-            complete_saved_ms,
+            candidate_constants,
         )?,
         mechanism,
     })
@@ -1211,7 +1240,7 @@ fn write_mechanism_evidence(
     )?;
     writeln!(
         output,
-        "complete：HTTP/WS 聚合中位数 {:.1}/{:.1} ms，同轮配对差 {:.1} ms，漂移 {:?}%，固定收益资格={}；不合格时常量为 0。",
+        "complete：HTTP/WS 聚合中位数 {:.1}/{:.1} ms，同轮配对差 {:.1} ms，漂移 {:?}%，固定收益资格={}；不合格或收益比例未提高时保留旧 complete 常量组。",
         summary.mechanism.http_complete_ms,
         summary.mechanism.websocket_complete_ms,
         summary.mechanism.paired_complete_saved_ms,
@@ -1592,14 +1621,14 @@ mod tests {
 
         assert_eq!(
             three_rounds.candidate_constants.baseline_first_token_ms,
-            2_000
+            1_661
         );
         assert_eq!(three_rounds.candidate_constants.baseline_complete_ms, 4_000);
         assert_eq!(
             three_rounds
                 .candidate_constants
                 .websocket_first_token_saved_ms,
-            400
+            469
         );
         assert_eq!(
             three_rounds.candidate_constants.websocket_complete_saved_ms,
@@ -1644,13 +1673,13 @@ mod tests {
 
         assert_eq!(
             summary.candidate_constants.websocket_first_token_saved_ms,
-            400
+            469
         );
         Ok(())
     }
 
     #[test]
-    fn candidate_sets_complete_savings_to_zero_when_paired_complete_is_not_positive()
+    fn candidate_keeps_old_complete_pair_when_paired_complete_is_not_positive()
     -> Result<(), io::Error> {
         use std::time::Duration;
 
@@ -1678,7 +1707,8 @@ mod tests {
 
         let summary = candidate_summary(&bytes, &settings, &cases)?;
 
-        assert_eq!(summary.candidate_constants.websocket_complete_saved_ms, 0);
+        assert_eq!(summary.candidate_constants.baseline_complete_ms, 2_273);
+        assert_eq!(summary.candidate_constants.websocket_complete_saved_ms, 274);
         Ok(())
     }
 
@@ -1779,10 +1809,10 @@ mod tests {
             .find(|item| (item.uplink_mbps - 10.0).abs() < f64::EPSILON)
             .ok_or_else(|| io::Error::other("missing 10 Mbps sensitivity"))?;
 
-        assert_eq!(summary.changes.baseline_first_token_ms.absolute_ms, 339);
-        assert!((summary.changes.baseline_first_token_ms.percent - 20.409).abs() < 0.001);
+        assert_eq!(summary.changes.baseline_first_token_ms.absolute_ms, 0);
+        assert!(summary.changes.baseline_first_token_ms.percent.abs() < f64::EPSILON);
         assert!((at_10_mbps.upload_saved_ms - 60.0).abs() < 0.001);
-        assert!((at_10_mbps.estimated_first_event_gain_pct - 21.0).abs() < 0.001);
+        assert!((at_10_mbps.estimated_first_event_gain_pct - 29.025).abs() < 0.001);
         assert!((at_10_mbps.estimated_complete_gain_pct - 21.75).abs() < 0.001);
         assert!((summary.historical_observation.first_event_gain_pct - 90.0).abs() < 0.001);
         assert!((summary.historical_observation.complete_gain_pct - 50.0).abs() < 0.001);
@@ -1906,7 +1936,7 @@ mod tests {
             machine
                 .pointer("/candidateConstants/baselineFirstTokenMs")
                 .and_then(serde_json::Value::as_u64),
-            Some(2_000)
+            Some(1_661)
         );
         Ok(())
     }

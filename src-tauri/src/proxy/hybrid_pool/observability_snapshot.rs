@@ -75,6 +75,9 @@ fn append_session_state(snapshot: &mut ConnectionSnapshot, state: &PoolState, no
                     0
                 },
                 reclaim_policy: SessionReclaimPolicy::ThreadEnd,
+                upstream_trace: lease.server_trace.clone(),
+                upstream_generation: lease.connection_id,
+                upstream_ordinal: lease.ordinal,
             });
         }
     }
