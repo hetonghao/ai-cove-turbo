@@ -248,13 +248,7 @@ impl AppRuntime {
             return;
         }
         let handoff_path = self.paths.session_handoff_path();
-        let session_handoff = match read_session_handoff(&handoff_path) {
-            Ok(handoff) => handoff,
-            Err(error) => {
-                self.block(&error.to_string());
-                return;
-            }
-        };
+        let (session_handoff, handoff_error) = load_session_handoff(&handoff_path);
 
         let check = match preflight(&self.paths.config_path) {
             Ok(check) => check,
@@ -317,31 +311,19 @@ impl AppRuntime {
         *lock_mutex(&self.managed) = Some(managed);
         *self.proxy.lock().await = Some(proxy);
         let codex_pid = codex_desktop_process_id();
-        let config_changed = config_requires_codex_restart(
+        self.apply_codex_activation(
+            endpoint,
             session_handoff.as_ref(),
             &check,
-            &endpoint,
             websocket_enabled,
             codex_pid,
         );
-        let (codex_state, restart_required, config_message) =
-            self.prepare_codex_activation(config_changed, codex_pid);
-        self.update_status(|status| {
-            status.service_healthy = true;
-            status.endpoint = endpoint;
-            status.config_state = "managed".to_owned();
-            status.config_message = config_message.to_owned();
-            status.codex_state = codex_state.to_owned();
-            status.restart_required = restart_required;
-            status.desktop_restarted = false;
-            status.websocket_enabled = websocket_enabled;
-            status.websocket_state = if websocket_enabled {
-                "waiting".to_owned()
-            } else {
-                "disabled".to_owned()
-            };
-        });
-        let _ = remove_session_handoff(&handoff_path);
+        if let Some(error) = handoff_error {
+            self.report_session_handoff_error(&error);
+        }
+        if let Some(error) = clear_session_handoff(&handoff_path) {
+            self.report_session_handoff_error(&error);
+        }
     }
 
     pub(crate) async fn status(&self) -> AppStatus {
@@ -603,32 +585,40 @@ impl AppRuntime {
         if let Some(managed) = managed {
             match restore(&managed, &recovery_path) {
                 Ok(RestoreOutcome::Restored) => {
-                    if let Some(handoff) = session_handoff.as_ref() {
-                        let _ = write_session_handoff(&handoff_path, handoff);
-                    } else {
-                        let _ = remove_session_handoff(&handoff_path);
-                    }
+                    let handoff_error = session_handoff.as_ref().map_or_else(
+                        || clear_session_handoff(&handoff_path),
+                        |handoff| write_session_handoff(&handoff_path, handoff).err(),
+                    );
                     lock_mutex(&self.managed).take();
                     self.update_status(|status| {
                         status.config_state = "restored".to_owned();
                         status.config_message = "Codex 配置已恢复".to_owned();
                     });
+                    if let Some(error) = handoff_error {
+                        self.report_session_handoff_error(&error);
+                    }
                 }
                 Ok(RestoreOutcome::NoRecord) => {
-                    let _ = remove_session_handoff(&handoff_path);
+                    let handoff_error = clear_session_handoff(&handoff_path);
                     lock_mutex(&self.managed).take();
                     self.update_status(|status| {
                         status.config_state = "restored".to_owned();
                         status.config_message = "Codex 配置已恢复".to_owned();
                     });
+                    if let Some(error) = handoff_error {
+                        self.report_session_handoff_error(&error);
+                    }
                 }
                 Ok(RestoreOutcome::Conflict) => {
-                    let _ = remove_session_handoff(&handoff_path);
+                    let handoff_error = clear_session_handoff(&handoff_path);
                     lock_mutex(&self.managed).take();
                     self.update_status(|status| {
                         status.config_state = "conflict".to_owned();
                         status.config_message = "外部配置已取得所有权，Turbo 未覆盖该值".to_owned();
                     });
+                    if let Some(error) = handoff_error {
+                        self.report_session_handoff_error(&error);
+                    }
                 }
                 Err(error) => {
                     self.shutting_down.store(false, Ordering::Relaxed);
@@ -769,6 +759,40 @@ impl AppRuntime {
             == Some(upstream)
     }
 
+    fn apply_codex_activation(
+        &self,
+        endpoint: String,
+        session_handoff: Option<&SessionHandoff>,
+        check: &Preflight,
+        websocket_enabled: bool,
+        codex_pid: Option<u32>,
+    ) {
+        let config_changed = config_requires_codex_restart(
+            session_handoff,
+            check,
+            &endpoint,
+            websocket_enabled,
+            codex_pid,
+        );
+        let (codex_state, restart_required, config_message) =
+            self.prepare_codex_activation(config_changed, codex_pid);
+        self.update_status(|status| {
+            status.service_healthy = true;
+            status.endpoint = endpoint;
+            status.config_state = "managed".to_owned();
+            status.config_message = config_message.to_owned();
+            status.codex_state = codex_state.to_owned();
+            status.restart_required = restart_required;
+            status.desktop_restarted = false;
+            status.websocket_enabled = websocket_enabled;
+            status.websocket_state = if websocket_enabled {
+                "waiting".to_owned()
+            } else {
+                "disabled".to_owned()
+            };
+        });
+    }
+
     fn prepare_codex_activation(
         &self,
         config_changed: bool,
@@ -795,6 +819,24 @@ impl AppRuntime {
     fn update_status(&self, update: impl FnOnce(&mut AppStatus)) {
         update(&mut write_lock(&self.status));
     }
+
+    fn report_session_handoff_error(&self, error: &ConfigError) {
+        self.update_status(|status| {
+            status.config_message =
+                format!("Turbo 会话续接记录失败，下次启动将要求重启 Codex：{error}");
+        });
+    }
+}
+
+fn load_session_handoff(handoff_path: &Path) -> (Option<SessionHandoff>, Option<ConfigError>) {
+    match read_session_handoff(handoff_path) {
+        Ok(handoff) => (handoff, None),
+        Err(error) => (None, Some(error)),
+    }
+}
+
+fn clear_session_handoff(handoff_path: &Path) -> Option<ConfigError> {
+    remove_session_handoff(handoff_path).err()
 }
 
 fn session_handoff_for_shutdown(
@@ -806,7 +848,8 @@ fn session_handoff_for_shutdown(
     let codex_pid = codex_pid?;
     (!status.restart_required
         && matches!(status.codex_state.as_str(), "waiting_request" | "active"))
-    .then(|| SessionHandoff::new(managed.clone(), codex_pid))
+    .then(|| SessionHandoff::new(managed, codex_pid))
+    .flatten()
 }
 
 fn config_requires_codex_restart(
@@ -1124,7 +1167,6 @@ base_url = "https://api.ai-cove.com/v1"
         status.restart_required = false;
         status.codex_state = "waiting_start".to_owned();
         assert!(session_handoff_for_shutdown(Some(&managed), &status, Some(41)).is_none());
-        assert!(session_handoff_for_shutdown(Some(&managed), &status, None).is_none());
         Ok(())
     }
 
@@ -1145,7 +1187,7 @@ base_url = "https://api.ai-cove.com/v1"
         let managed = take_over(&preflight(&config_path)?, endpoint, true, &recovery_path)?;
         restore(&managed, &recovery_path)?;
         let check = preflight(&config_path)?;
-        let handoff = SessionHandoff::new(managed, 41);
+        let handoff = SessionHandoff::new(&managed, 41).expect("managed config has a fingerprint");
 
         assert!(!config_requires_codex_restart(
             Some(&handoff),
