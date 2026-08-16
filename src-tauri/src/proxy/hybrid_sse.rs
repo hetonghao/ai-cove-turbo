@@ -46,9 +46,14 @@ pub(super) fn http_request_payload(payload: &[u8]) -> Result<PreparedResponseCre
         .filter(|response_id| !response_id.is_empty())
         .map(str::to_owned);
     let has_request_source = previous_response_id.is_some()
-        || ["input", "prompt", "conversation"]
-            .into_iter()
-            .any(|key| object.get(key).is_some_and(|value| !value.is_null()));
+        || ["input", "prompt", "conversation"].into_iter().any(|key| {
+            object.get(key).is_some_and(|value| match value {
+                Value::Array(items) => !items.is_empty(),
+                Value::Object(fields) => !fields.is_empty(),
+                Value::String(value) => !value.is_empty(),
+                Value::Null | Value::Bool(_) | Value::Number(_) => false,
+            })
+        });
     if previous_response_id.is_some() {
         return Ok(PreparedResponseCreate {
             fallback: HttpFallback::WebSocketRequired,

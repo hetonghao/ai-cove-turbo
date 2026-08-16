@@ -8,7 +8,7 @@ async fn send_thread_create(client: &mut ClientWebSocket, thread_id: &str) -> io
     let request = serde_json::json!({
         "type": "response.create",
         "model": "test",
-        "input": [],
+        "input": "test",
         "client_metadata": {
             "session_id": "shared-root-session",
             "thread_id": thread_id,

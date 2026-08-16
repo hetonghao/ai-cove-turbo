@@ -1447,7 +1447,7 @@ test("安装更新期间持续读取并展示下载进度", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   let status = {
     updateState: "available",
-    updateMessage: "发现新版本 v0.1.0-beta.7",
+    updateMessage: "发现新版本 v0.1.0-beta.8",
     updateProgress: 0,
   };
   let statusPolls = 0;

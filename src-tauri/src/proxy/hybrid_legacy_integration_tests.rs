@@ -10,10 +10,10 @@ mod fixture;
 
 use fixture::{StandardFixture, start_standard_proxy, wait_for_traffic};
 
-const CREATE: &str = r#"{"type":"response.create","model":"test","input":[]}"#;
-const FAIL_CREATE: &str = r#"{"type":"response.create","model":"close-active","input":[]}"#;
+const CREATE: &str = r#"{"type":"response.create","model":"test","input":"test"}"#;
+const FAIL_CREATE: &str = r#"{"type":"response.create","model":"close-active","input":"test"}"#;
 const FAILED_TERMINAL_CREATE: &str =
-    r#"{"type":"response.create","model":"failed-terminal","input":[]}"#;
+    r#"{"type":"response.create","model":"failed-terminal","input":"test"}"#;
 
 #[tokio::test]
 async fn standard_legacy_relay_records_each_terminal_once() -> io::Result<()> {

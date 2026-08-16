@@ -14,7 +14,7 @@ pub(super) async fn send_observed_create(client: &mut ClientWebSocket) -> io::Re
     let request = serde_json::json!({
         "type": "response.create",
         "model": "test",
-        "input": [],
+        "input": "test",
         "client_metadata": {
             "session_id": "observability-session",
             "thread_id": OBSERVED_THREAD_ID,

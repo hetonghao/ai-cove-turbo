@@ -68,8 +68,9 @@ fn internal_idle_request_error_requires_exact_orphan_signature() {
 
 #[test]
 fn converts_response_create_into_streaming_http_payload() -> std::io::Result<()> {
-    let prepared = http_request_payload(br#"{"type":"response.create","model":"test","input":[]}"#)
-        .map_err(std::io::Error::other)?;
+    let prepared =
+        http_request_payload(br#"{"type":"response.create","model":"test","input":"test"}"#)
+            .map_err(std::io::Error::other)?;
     let HttpFallback::Request(payload) = prepared.fallback else {
         return Err(std::io::Error::other(
             "HTTP request unexpectedly requires WS",
@@ -91,14 +92,20 @@ fn converts_response_create_into_streaming_http_payload() -> std::io::Result<()>
 fn classifies_supported_response_request_sources() -> std::io::Result<()> {
     // Given: every upstream-supported source and the source-free boundary shapes.
     let provided = [
-        br#"{"type":"response.create","input":[]}"#.as_slice(),
+        br#"{"type":"response.create","input":"hello"}"#.as_slice(),
+        br#"{"type":"response.create","input":[{"type":"message"}]}"#.as_slice(),
         br#"{"type":"response.create","previous_response_id":"response-1"}"#.as_slice(),
-        br#"{"type":"response.create","prompt":{}}"#.as_slice(),
+        br#"{"type":"response.create","prompt":{"id":"prompt-1"}}"#.as_slice(),
         br#"{"type":"response.create","conversation":"conversation-1"}"#.as_slice(),
     ];
     let missing = [
         br#"{"type":"response.create"}"#.as_slice(),
         br#"{"type":"response.create","input":null,"prompt":null,"conversation":null}"#.as_slice(),
+        br#"{"type":"response.create","input":[]}"#.as_slice(),
+        br#"{"type":"response.create","input":""}"#.as_slice(),
+        br#"{"type":"response.create","input":{}}"#.as_slice(),
+        br#"{"type":"response.create","prompt":{}}"#.as_slice(),
+        br#"{"type":"response.create","conversation":""}"#.as_slice(),
         br#"{"type":"response.create","previous_response_id":""}"#.as_slice(),
         br#"{"type":"response.create","previous_response_id":7}"#.as_slice(),
     ];

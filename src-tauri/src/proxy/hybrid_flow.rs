@@ -176,8 +176,12 @@ async fn start_response(
         .await;
         return true;
     };
-    if reject_missing_continuation(client, session, prepared.has_request_source, None).await {
-        return true;
+    if !prepared.has_request_source {
+        session.response_started = false;
+        let message = "Previous response is not available on this websocket";
+        let _ = send_error(client, "previous_response_not_found", message).await;
+        let _ = close_client(client, 1002, message).await;
+        return false;
     }
     if !session.bind_thread_id(prepared.thread_id).await {
         return reject_thread_switch(client).await;

@@ -112,7 +112,7 @@ async fn stale_continuation_is_rejected_after_upstream_discard() -> io::Result<(
 }
 
 #[tokio::test]
-async fn empty_recovery_payload_is_rejected_before_upstream() -> io::Result<()> {
+async fn empty_recovery_payload_is_rejected_and_reconnects_before_upstream() -> io::Result<()> {
     // Given: the recovered local session has no checked-out upstream connection.
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::Stateful,
@@ -127,7 +127,7 @@ async fn empty_recovery_payload_is_rejected_before_upstream() -> io::Result<()> 
     // When: Codex emits a recovery create without any continuation source.
     client
         .send(Message::Text(
-            r#"{"type":"response.create","model":"test"}"#.into(),
+            r#"{"type":"response.create","model":"test","input":[]}"#.into(),
         ))
         .await
         .map_err(io::Error::other)?;
@@ -139,11 +139,24 @@ async fn empty_recovery_payload_is_rejected_before_upstream() -> io::Result<()> 
         error.pointer("/error/code"),
         Some(&Value::from("previous_response_not_found"))
     );
+    let close = tokio::time::timeout(Duration::from_secs(1), client.next())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "empty recovery did not close"))?;
+    let Some(Ok(Message::Close(Some(frame)))) = close else {
+        return Err(io::Error::other(
+            "empty recovery did not close local websocket",
+        ));
+    };
+    assert_eq!(u16::from(frame.code), 1002);
     assert_counts(server.fixture.counts().await, 6, 0, 0);
     let snapshot = proxy.connection_snapshot().await;
     assert_eq!(snapshot.current_connections, 6);
     assert_eq!(snapshot.prewarm, 6);
     assert!(snapshot.bound_threads.is_empty());
+    drop(client);
+
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
 
     // And: a malformed continuation id is not accepted as an upstream source.
     client
@@ -157,7 +170,25 @@ async fn empty_recovery_payload_is_rejected_before_upstream() -> io::Result<()> 
         error.pointer("/error/code"),
         Some(&Value::from("previous_response_not_found"))
     );
+    let close = tokio::time::timeout(Duration::from_secs(1), client.next())
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "malformed continuation did not close",
+            )
+        })?;
+    let Some(Ok(Message::Close(Some(frame)))) = close else {
+        return Err(io::Error::other(
+            "malformed continuation did not close local websocket",
+        ));
+    };
+    assert_eq!(u16::from(frame.code), 1002);
     assert_counts(server.fixture.counts().await, 6, 0, 0);
+    drop(client);
+
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
 
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;

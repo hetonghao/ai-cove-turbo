@@ -87,7 +87,7 @@ async fn connect_local_with_headers(
 async fn send_create(client: &mut ClientWebSocket) -> io::Result<()> {
     client
         .send(Message::Text(
-            r#"{"type":"response.create","model":"test","input":[]}"#.into(),
+            r#"{"type":"response.create","model":"test","input":"test"}"#.into(),
         ))
         .await
         .map_err(io::Error::other)
