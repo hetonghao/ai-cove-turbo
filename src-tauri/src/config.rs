@@ -40,6 +40,34 @@ pub(crate) struct ManagedConfig {
     managed_supports_websockets: Option<bool>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct SessionHandoff {
+    managed: ManagedConfig,
+    codex_pid: u32,
+}
+
+impl SessionHandoff {
+    pub(crate) const fn new(managed: ManagedConfig, codex_pid: u32) -> Self {
+        Self { managed, codex_pid }
+    }
+
+    pub(crate) fn matches_effective_config(
+        &self,
+        check: &Preflight,
+        endpoint: &str,
+        websocket_enabled: bool,
+        codex_pid: Option<u32>,
+    ) -> bool {
+        codex_pid == Some(self.codex_pid)
+            && self.managed.config_path == check.config_path
+            && self.managed.provider == check.provider
+            && self.managed.original_base_url == check.upstream.as_str()
+            && self.managed.original_supports_websockets == check.supports_websockets
+            && self.managed.managed_base_url == endpoint
+            && self.managed.managed_supports_websockets == Some(websocket_enabled)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RestoreOutcome {
     Restored,
@@ -247,6 +275,34 @@ pub(crate) fn recover_stale(recovery_path: &Path) -> Result<StaleRecovery, Confi
     })
 }
 
+pub(crate) fn read_session_handoff(
+    handoff_path: &Path,
+) -> Result<Option<SessionHandoff>, ConfigError> {
+    let bytes = match fs::read(handoff_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ConfigError::Read(error)),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(ConfigError::Json)
+}
+
+pub(crate) fn write_session_handoff(
+    handoff_path: &Path,
+    handoff: &SessionHandoff,
+) -> Result<(), ConfigError> {
+    write_json_atomic(handoff_path, handoff)
+}
+
+pub(crate) fn remove_session_handoff(handoff_path: &Path) -> Result<(), ConfigError> {
+    match fs::remove_file(handoff_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ConfigError::Write(error)),
+    }
+}
+
 pub(crate) fn restore(
     managed: &ManagedConfig,
     recovery_path: &Path,
@@ -395,7 +451,7 @@ fn provider_websocket(document: &DocumentMut, provider: &str) -> Result<Option<b
         })
 }
 
-fn write_json_atomic(path: &Path, value: &ManagedConfig) -> Result<(), ConfigError> {
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), ConfigError> {
     let bytes = serde_json::to_vec(value).map_err(ConfigError::Json)?;
     write_atomic(path, &bytes)
 }
@@ -572,6 +628,65 @@ supports_websockets = false
         assert!(recovery.matches_effective_config(endpoint, true));
         assert!(!recovery.matches_effective_config(endpoint, false));
         assert!(fs::read_to_string(config_path)?.contains("https://api.ai-cove.com/v1"));
+        Ok(())
+    }
+
+    #[test]
+    fn session_handoff_matches_only_same_codex_and_endpoint() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_path = root.path().join("config.toml");
+        let recovery_path = root.path().join("recovery.json");
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.ai-cove.com/v1"
+supports_websockets = false
+"#,
+        )?;
+        let endpoint = "http://127.0.0.1:44175/v1";
+        let managed = take_over(&preflight(&config_path)?, endpoint, true, &recovery_path)?;
+        let handoff = SessionHandoff::new(managed, 41);
+        assert_eq!(
+            restore(&handoff.managed, &recovery_path)?,
+            RestoreOutcome::Restored
+        );
+        let restored = preflight(&config_path)?;
+        let handoff_path = root.path().join("handoff.json");
+        write_session_handoff(&handoff_path, &handoff)?;
+
+        assert!(handoff.matches_effective_config(&restored, endpoint, true, Some(41)));
+        let persisted = read_session_handoff(&handoff_path)?;
+        assert!(persisted.as_ref().is_some_and(|handoff| {
+            handoff.matches_effective_config(&restored, endpoint, true, Some(41))
+        }));
+        assert!(!handoff.matches_effective_config(&restored, endpoint, true, Some(42)));
+        assert!(!handoff.matches_effective_config(
+            &restored,
+            "http://127.0.0.1:44176/v1",
+            true,
+            Some(41),
+        ));
+        assert!(!handoff.matches_effective_config(&restored, endpoint, false, Some(41)));
+        let mut changed_provider = restored.clone();
+        changed_provider.provider = "other".to_owned();
+        assert!(!handoff.matches_effective_config(
+            &changed_provider,
+            endpoint,
+            true,
+            Some(41),
+        ));
+        let mut changed_upstream = restored;
+        changed_upstream.upstream = Url::parse("https://other.example/v1")?;
+        assert!(!handoff.matches_effective_config(
+            &changed_upstream,
+            endpoint,
+            true,
+            Some(41),
+        ));
+        remove_session_handoff(&handoff_path)?;
+        assert!(read_session_handoff(&handoff_path)?.is_none());
         Ok(())
     }
 

@@ -22,9 +22,10 @@ use url::Url;
 use crate::{
     config::{
         AI_COVE_UPSTREAM, ConfigError, ManagedConfig, ManagedOwnership, RestoreOutcome,
-        StaleRecovery, UpstreamCompatibility, managed_ownership, preflight, recover_stale,
-        relinquish_websocket, restore, set_ai_cove_upstream as replace_loopback_upstream,
-        set_managed_websocket, take_over,
+        SessionHandoff, StaleRecovery, UpstreamCompatibility, managed_ownership, preflight,
+        read_session_handoff, recover_stale, relinquish_websocket, remove_session_handoff, restore,
+        set_ai_cove_upstream as replace_loopback_upstream, set_managed_websocket, take_over,
+        write_session_handoff,
     },
     proxy::{
         ConnectionSnapshot, Metrics, ProxyHandle, ProxyOptions, start_proxy,
@@ -45,6 +46,10 @@ pub(crate) struct RuntimePaths {
 impl RuntimePaths {
     fn recovery_path(&self) -> PathBuf {
         self.data_dir.join("recovery.json")
+    }
+
+    fn session_handoff_path(&self) -> PathBuf {
+        self.data_dir.join("handoff.json")
     }
 
     fn preferences_path(&self) -> PathBuf {
@@ -245,6 +250,14 @@ impl AppRuntime {
                 return;
             }
         };
+        let handoff_path = self.paths.session_handoff_path();
+        let session_handoff = match read_session_handoff(&handoff_path) {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                self.block(&error.to_string());
+                return;
+            }
+        };
 
         let check = match preflight(&self.paths.config_path) {
             Ok(check) => check,
@@ -307,7 +320,12 @@ impl AppRuntime {
         *lock_mutex(&self.managed) = Some(managed);
         *self.proxy.lock().await = Some(proxy);
         let codex_pid = codex_desktop_process_id();
-        let config_changed = !stale_recovery.matches_effective_config(&endpoint, websocket_enabled);
+        let handoff_matches = session_handoff.as_ref().is_some_and(|handoff| {
+            handoff.matches_effective_config(&check, &endpoint, websocket_enabled, codex_pid)
+        });
+        let config_changed = !(stale_recovery
+            .matches_effective_config(&endpoint, websocket_enabled)
+            || handoff_matches);
         let (codex_state, restart_required, config_message) =
             self.prepare_codex_activation(config_changed, codex_pid);
         self.update_status(|status| {
@@ -325,6 +343,7 @@ impl AppRuntime {
                 "disabled".to_owned()
             };
         });
+        let _ = remove_session_handoff(&handoff_path);
     }
 
     pub(crate) async fn status(&self) -> AppStatus {
@@ -577,9 +596,28 @@ impl AppRuntime {
         self.shutting_down.store(true, Ordering::Relaxed);
         let managed = lock_mutex(&self.managed).clone();
         let recovery_path = self.paths.recovery_path();
+        let handoff_path = self.paths.session_handoff_path();
+        let session_handoff = session_handoff_for_shutdown(
+            managed.as_ref(),
+            &read_lock(&self.status),
+            codex_desktop_process_id(),
+        );
         if let Some(managed) = managed {
             match restore(&managed, &recovery_path) {
-                Ok(RestoreOutcome::Restored | RestoreOutcome::NoRecord) => {
+                Ok(RestoreOutcome::Restored) => {
+                    if let Some(handoff) = session_handoff.as_ref() {
+                        let _ = write_session_handoff(&handoff_path, handoff);
+                    } else {
+                        let _ = remove_session_handoff(&handoff_path);
+                    }
+                    lock_mutex(&self.managed).take();
+                    self.update_status(|status| {
+                        status.config_state = "restored".to_owned();
+                        status.config_message = "Codex 配置已恢复".to_owned();
+                    });
+                }
+                Ok(RestoreOutcome::NoRecord) => {
+                    let _ = remove_session_handoff(&handoff_path);
                     lock_mutex(&self.managed).take();
                     self.update_status(|status| {
                         status.config_state = "restored".to_owned();
@@ -587,6 +625,7 @@ impl AppRuntime {
                     });
                 }
                 Ok(RestoreOutcome::Conflict) => {
+                    let _ = remove_session_handoff(&handoff_path);
                     lock_mutex(&self.managed).take();
                     self.update_status(|status| {
                         status.config_state = "conflict".to_owned();
@@ -758,6 +797,18 @@ impl AppRuntime {
     fn update_status(&self, update: impl FnOnce(&mut AppStatus)) {
         update(&mut write_lock(&self.status));
     }
+}
+
+fn session_handoff_for_shutdown(
+    managed: Option<&ManagedConfig>,
+    status: &AppStatus,
+    codex_pid: Option<u32>,
+) -> Option<SessionHandoff> {
+    let managed = managed?;
+    let codex_pid = codex_pid?;
+    (!status.restart_required
+        && matches!(status.codex_state.as_str(), "waiting_request" | "active"))
+    .then(|| SessionHandoff::new(managed.clone(), codex_pid))
 }
 
 const fn initial_codex_state(
@@ -1033,6 +1084,38 @@ base_url = "https://api.ai-cove.com/v1"
         assert!(!initial_codex_state(true, None).1);
         assert_eq!(initial_codex_state(false, Some(41)).0, "waiting_request");
         assert!(!initial_codex_state(false, Some(41)).1);
+    }
+
+    #[test]
+    fn shutdown_handoff_requires_loaded_codex_config() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_path = root.path().join("config.toml");
+        let recovery_path = root.path().join("recovery.json");
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.ai-cove.com/v1"
+"#,
+        )?;
+        let managed = take_over(
+            &preflight(&config_path)?,
+            "http://127.0.0.1:44175/v1",
+            true,
+            &recovery_path,
+        )?;
+        let mut status = AppStatus::starting(&Preferences::default());
+        status.codex_state = "waiting_request".to_owned();
+
+        assert!(session_handoff_for_shutdown(Some(&managed), &status, Some(41)).is_some());
+        status.restart_required = true;
+        assert!(session_handoff_for_shutdown(Some(&managed), &status, Some(41)).is_none());
+        status.restart_required = false;
+        status.codex_state = "waiting_start".to_owned();
+        assert!(session_handoff_for_shutdown(Some(&managed), &status, Some(41)).is_none());
+        assert!(session_handoff_for_shutdown(Some(&managed), &status, None).is_none());
+        Ok(())
     }
 
     #[tokio::test]
