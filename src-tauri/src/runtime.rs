@@ -21,7 +21,7 @@ use url::Url;
 
 use crate::{
     config::{
-        AI_COVE_UPSTREAM, ConfigError, ManagedConfig, ManagedOwnership, RestoreOutcome,
+        AI_COVE_UPSTREAM, ConfigError, ManagedConfig, ManagedOwnership, Preflight, RestoreOutcome,
         SessionHandoff, StaleRecovery, UpstreamCompatibility, managed_ownership, preflight,
         read_session_handoff, recover_stale, relinquish_websocket, remove_session_handoff, restore,
         set_ai_cove_upstream as replace_loopback_upstream, set_managed_websocket, take_over,
@@ -243,13 +243,10 @@ impl AppRuntime {
         });
 
         let recovery_path = self.paths.recovery_path();
-        let stale_recovery = match self.recover_stale_config(&recovery_path) {
-            Ok(recovery) => recovery,
-            Err(error) => {
-                self.block(&error.to_string());
-                return;
-            }
-        };
+        if let Err(error) = self.recover_stale_config(&recovery_path) {
+            self.block(&error.to_string());
+            return;
+        }
         let handoff_path = self.paths.session_handoff_path();
         let session_handoff = match read_session_handoff(&handoff_path) {
             Ok(handoff) => handoff,
@@ -320,12 +317,13 @@ impl AppRuntime {
         *lock_mutex(&self.managed) = Some(managed);
         *self.proxy.lock().await = Some(proxy);
         let codex_pid = codex_desktop_process_id();
-        let handoff_matches = session_handoff.as_ref().is_some_and(|handoff| {
-            handoff.matches_effective_config(&check, &endpoint, websocket_enabled, codex_pid)
-        });
-        let config_changed = !(stale_recovery
-            .matches_effective_config(&endpoint, websocket_enabled)
-            || handoff_matches);
+        let config_changed = config_requires_codex_restart(
+            session_handoff.as_ref(),
+            &check,
+            &endpoint,
+            websocket_enabled,
+            codex_pid,
+        );
         let (codex_state, restart_required, config_message) =
             self.prepare_codex_activation(config_changed, codex_pid);
         self.update_status(|status| {
@@ -811,6 +809,18 @@ fn session_handoff_for_shutdown(
     .then(|| SessionHandoff::new(managed.clone(), codex_pid))
 }
 
+fn config_requires_codex_restart(
+    session_handoff: Option<&SessionHandoff>,
+    check: &Preflight,
+    endpoint: &str,
+    websocket_enabled: bool,
+    codex_pid: Option<u32>,
+) -> bool {
+    !session_handoff.is_some_and(|handoff| {
+        handoff.matches_effective_config(check, endpoint, websocket_enabled, codex_pid)
+    })
+}
+
 const fn initial_codex_state(
     config_changed: bool,
     codex_pid: Option<u32>,
@@ -1115,6 +1125,49 @@ base_url = "https://api.ai-cove.com/v1"
         status.codex_state = "waiting_start".to_owned();
         assert!(session_handoff_for_shutdown(Some(&managed), &status, Some(41)).is_none());
         assert!(session_handoff_for_shutdown(Some(&managed), &status, None).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn codex_restart_decision_requires_session_handoff() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_path = root.path().join("config.toml");
+        let recovery_path = root.path().join("recovery.json");
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.ai-cove.com/v1"
+"#,
+        )?;
+        let endpoint = "http://127.0.0.1:44175/v1";
+        let managed = take_over(&preflight(&config_path)?, endpoint, true, &recovery_path)?;
+        restore(&managed, &recovery_path)?;
+        let check = preflight(&config_path)?;
+        let handoff = SessionHandoff::new(managed, 41);
+
+        assert!(!config_requires_codex_restart(
+            Some(&handoff),
+            &check,
+            endpoint,
+            true,
+            Some(41),
+        ));
+        assert!(config_requires_codex_restart(
+            None,
+            &check,
+            endpoint,
+            true,
+            Some(41),
+        ));
+        assert!(config_requires_codex_restart(
+            Some(&handoff),
+            &check,
+            endpoint,
+            true,
+            Some(42),
+        ));
         Ok(())
     }
 

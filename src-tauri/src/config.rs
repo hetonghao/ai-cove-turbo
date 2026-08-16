@@ -78,17 +78,6 @@ pub(crate) enum RestoreOutcome {
 #[derive(Clone, Debug)]
 pub(crate) struct StaleRecovery {
     pub(crate) outcome: RestoreOutcome,
-    previous_managed: Option<ManagedConfig>,
-}
-
-impl StaleRecovery {
-    pub(crate) fn matches_effective_config(&self, endpoint: &str, websocket_enabled: bool) -> bool {
-        self.outcome == RestoreOutcome::Restored
-            && self.previous_managed.as_ref().is_some_and(|managed| {
-                managed.managed_base_url == endpoint
-                    && managed.managed_supports_websockets == Some(websocket_enabled)
-            })
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,16 +252,12 @@ pub(crate) fn recover_stale(recovery_path: &Path) -> Result<StaleRecovery, Confi
     if !recovery_path.exists() {
         return Ok(StaleRecovery {
             outcome: RestoreOutcome::NoRecord,
-            previous_managed: None,
         });
     }
     let bytes = fs::read(recovery_path).map_err(ConfigError::Read)?;
     let managed = serde_json::from_slice::<ManagedConfig>(&bytes).map_err(ConfigError::Json)?;
     let outcome = restore(&managed, recovery_path)?;
-    Ok(StaleRecovery {
-        outcome,
-        previous_managed: Some(managed),
-    })
+    Ok(StaleRecovery { outcome })
 }
 
 pub(crate) fn read_session_handoff(
@@ -606,7 +591,7 @@ base_url = "https://example.com/v1"
     }
 
     #[test]
-    fn stale_recovery_preserves_the_last_effective_managed_config() -> Result<(), Box<dyn Error>> {
+    fn stale_recovery_restores_the_previous_managed_config() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let config_path = root.path().join("config.toml");
         let recovery_path = root.path().join("recovery.json");
@@ -625,9 +610,8 @@ supports_websockets = false
         let recovery = recover_stale(&recovery_path)?;
 
         assert_eq!(recovery.outcome, RestoreOutcome::Restored);
-        assert!(recovery.matches_effective_config(endpoint, true));
-        assert!(!recovery.matches_effective_config(endpoint, false));
         assert!(fs::read_to_string(config_path)?.contains("https://api.ai-cove.com/v1"));
+        assert!(!recovery_path.exists());
         Ok(())
     }
 
@@ -671,20 +655,10 @@ supports_websockets = false
         assert!(!handoff.matches_effective_config(&restored, endpoint, false, Some(41)));
         let mut changed_provider = restored.clone();
         changed_provider.provider = "other".to_owned();
-        assert!(!handoff.matches_effective_config(
-            &changed_provider,
-            endpoint,
-            true,
-            Some(41),
-        ));
+        assert!(!handoff.matches_effective_config(&changed_provider, endpoint, true, Some(41)));
         let mut changed_upstream = restored;
         changed_upstream.upstream = Url::parse("https://other.example/v1")?;
-        assert!(!handoff.matches_effective_config(
-            &changed_upstream,
-            endpoint,
-            true,
-            Some(41),
-        ));
+        assert!(!handoff.matches_effective_config(&changed_upstream, endpoint, true, Some(41)));
         remove_session_handoff(&handoff_path)?;
         assert!(read_session_handoff(&handoff_path)?.is_none());
         Ok(())
