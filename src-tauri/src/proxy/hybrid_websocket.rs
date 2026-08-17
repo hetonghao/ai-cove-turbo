@@ -5,11 +5,11 @@ use tokio::{
     sync::mpsc,
     time::{Instant, Sleep},
 };
-use tokio_tungstenite::tungstenite::{Bytes, Message};
+use tokio_tungstenite::tungstenite::{Bytes, Message, protocol::CloseFrame};
 
 use super::{
     Active, ActiveKind, PrivateWebSocket, WebSocketSendReceipt, WorkerCommand, WorkerEvent,
-    common::{event_type, text_message},
+    common::{context_length_exceeded_message, event_type, text_message},
     private_websocket,
     sse::{is_terminal_event, success_terminal_response_id},
 };
@@ -135,8 +135,8 @@ async fn run_websocket_worker(
                         }
                     }
                     Message::Pong(_) => {}
-                    Message::Close(_) => {
-                        send_worker_error(&events, &context, 1011, "private websocket closed while active").await;
+                    Message::Close(frame) => {
+                        handle_active_close(frame, &events, &context).await;
                         return;
                     }
                     Message::Text(_) | Message::Frame(_) => {
@@ -169,6 +169,41 @@ async fn run_websocket_worker(
                 );
             }
         }
+    }
+}
+
+async fn handle_active_close(
+    frame: Option<CloseFrame>,
+    events: &mpsc::Sender<WorkerEvent>,
+    context: &WorkerContext,
+) {
+    let Some(frame) = frame else {
+        send_worker_error(
+            events,
+            context,
+            1011,
+            "private websocket closed while active",
+        )
+        .await;
+        return;
+    };
+    let code = u16::from(frame.code);
+    let reason = if frame.reason.is_empty() {
+        format!("private websocket closed while active ({code})")
+    } else {
+        frame.reason.to_string()
+    };
+    if super::super::is_context_length_exceeded(code) {
+        context.metrics.record_websocket_closed();
+        let _ = events
+            .send(WorkerEvent::FailedTerminal {
+                response: context_length_exceeded_message(),
+                code,
+                reason,
+            })
+            .await;
+    } else {
+        send_worker_error(events, context, code, &reason).await;
     }
 }
 
@@ -208,8 +243,13 @@ async fn handle_binary_response(
         return BinaryOutcome::Stop;
     };
     if let Some((code, reason)) = failed_diagnostic {
+        let response = if super::super::is_context_length_exceeded(code) {
+            context_length_exceeded_message()
+        } else {
+            message
+        };
         return BinaryOutcome::FailedTerminal {
-            response: message,
+            response,
             code,
             reason,
         };
@@ -284,10 +324,15 @@ async fn send_worker_error(
     events: &mpsc::Sender<WorkerEvent>,
     context: &WorkerContext,
     code: u16,
-    message: &'static str,
+    message: &str,
 ) {
     context.metrics.record_websocket_closed();
-    let _ = events.send(WorkerEvent::Error { code, message }).await;
+    let _ = events
+        .send(WorkerEvent::Error {
+            code,
+            message: message.to_owned(),
+        })
+        .await;
 }
 
 async fn send_private_application(

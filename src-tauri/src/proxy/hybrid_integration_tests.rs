@@ -36,7 +36,7 @@ async fn start_test_proxy(server: &FixtureServer) -> io::Result<(ProxyHandle, Ar
         ai_cove_private_websocket_zstd: true,
         metrics: Arc::clone(&metrics),
         preferred_ports: vec![0],
-        max_request_body_bytes: 1024 * 1024,
+        max_request_body_bytes: 64 * 1024 * 1024,
     })
     .await
     .map_err(io::Error::other)?;
@@ -89,6 +89,25 @@ async fn send_create(client: &mut ClientWebSocket) -> io::Result<()> {
         .send(Message::Text(
             r#"{"type":"response.create","model":"test","input":"test"}"#.into(),
         ))
+        .await
+        .map_err(io::Error::other)
+}
+
+async fn send_create_with_size(client: &mut ClientWebSocket, bytes: usize) -> io::Result<()> {
+    const PREFIX: &str = r#"{"type":"response.create","model":"test","input":""#;
+    const SUFFIX: &str = r#""}"#;
+    let input_bytes = bytes
+        .checked_sub(PREFIX.len() + SUFFIX.len())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "payload size too small"))?;
+    let mut payload = String::with_capacity(bytes);
+    payload.push_str(PREFIX);
+    payload.extend(std::iter::repeat_n('x', input_bytes));
+    payload.push_str(SUFFIX);
+    if payload.len() != bytes {
+        return Err(io::Error::other("payload size mismatch"));
+    }
+    client
+        .send(Message::Text(payload.into()))
         .await
         .map_err(io::Error::other)
 }
@@ -276,6 +295,57 @@ async fn delayed_prewarm_keeps_not_ready_turns_http_then_switches_to_ws() -> io:
         routes,
         ["hybridColdStartHttp", "hybridColdStartHttp", "hybridWs"]
     );
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn large_create_uses_http_before_ready_websocket_and_session_continues() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    server.fixture.wait_ready(6).await?;
+
+    send_create_with_size(&mut client, super::MAX_HYBRID_WEBSOCKET_REQUEST_BYTES - 1).await?;
+    server.fixture.wait_messages(1).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+
+    for (index, bytes) in [18_700_000, 23_060_000, 33_460_000].into_iter().enumerate() {
+        send_create_with_size(&mut client, bytes).await?;
+        server.fixture.wait_http(index + 1).await?;
+        server.fixture.wait_normal_closes(index + 1).await?;
+        assert_eq!(next_event_type(&mut client).await?, "response.completed");
+        assert_counts_with_min_private(server.fixture.counts().await, 6, index + 1, index + 1);
+
+        send_create(&mut client).await?;
+        server.fixture.wait_messages(index + 2).await?;
+        assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    }
+    assert_counts_with_min_private(server.fixture.counts().await, 6, 4, 3);
+    let routes = metrics
+        .traffic_snapshot()
+        .recent_requests
+        .into_iter()
+        .map(|event| serde_json::to_value(event).map_err(io::Error::other))
+        .collect::<io::Result<Vec<_>>>()?;
+    assert_eq!(
+        routes
+            .iter()
+            .filter(|event| event.get("route") == Some(&Value::from("hybridLargeRequestHttp")))
+            .count(),
+        3
+    );
+    assert_eq!(metrics.snapshot().http_fallbacks, 0);
+    assert_eq!(metrics.snapshot().hybrid_large_request_http, 3);
+    assert_eq!(metrics.snapshot().hybrid_ws, 4);
+
     drop(client);
     proxy.stop().await;
     server.stop().await;
@@ -757,6 +827,114 @@ async fn active_ws_failure_closes_client_without_replay() -> io::Result<()> {
         return Err(io::Error::other("active failure close frame missing"));
     };
     assert_eq!(u16::from(frame.code), 1011);
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_ws_1009_keeps_client_and_routes_same_retry_over_http() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::ActiveMessageTooBig,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    server.fixture.wait_ready(6).await?;
+
+    send_create(&mut client).await?;
+    server.fixture.wait_messages(1).await?;
+    let failure = next_event_value(&mut client).await?;
+    assert_eq!(failure.get("type"), Some(&Value::from("response.failed")));
+    assert_eq!(
+        failure.pointer("/response/error/code"),
+        Some(&Value::from("context_length_exceeded"))
+    );
+    let event = metrics
+        .traffic_snapshot()
+        .recent_requests
+        .into_iter()
+        .find_map(|event| {
+            let event = serde_json::to_value(event).ok()?;
+            (event.get("failurePhase") == Some(&Value::from("hybridActive"))).then_some(event)
+        })
+        .ok_or_else(|| io::Error::other("1009 traffic event missing"))?;
+    assert_eq!(event.get("status"), Some(&Value::from(1009)));
+    assert_eq!(
+        event.get("failureReason"),
+        Some(&Value::from("message too big"))
+    );
+
+    send_create(&mut client).await?;
+    server.fixture.wait_http(1).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_counts_with_min_private(server.fixture.counts().await, 6, 1, 1);
+
+    client
+        .send(Message::Text(
+            r#"{"type":"response.create","model":"test","input":"x"}"#.into(),
+        ))
+        .await
+        .map_err(io::Error::other)?;
+    server.fixture.wait_messages(2).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_counts_with_min_private(server.fixture.counts().await, 6, 2, 1);
+
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn large_http_413_keeps_client_with_context_length_failure() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::HttpPayloadTooLarge,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    server.fixture.wait_ready(6).await?;
+
+    send_create_with_size(&mut client, 18_700_000).await?;
+    server.fixture.wait_http(1).await?;
+    let failure = next_event_value(&mut client).await?;
+    assert_eq!(failure.get("type"), Some(&Value::from("response.failed")));
+    assert_eq!(
+        failure.pointer("/response/error/code"),
+        Some(&Value::from("context_length_exceeded"))
+    );
+    let event = metrics
+        .traffic_snapshot()
+        .recent_requests
+        .into_iter()
+        .find_map(|event| {
+            let event = serde_json::to_value(event).ok()?;
+            (event.get("route") == Some(&Value::from("hybridLargeRequestHttp"))).then_some(event)
+        })
+        .ok_or_else(|| io::Error::other("large HTTP traffic event missing"))?;
+    assert_eq!(event.get("status"), Some(&Value::from(413)));
+    assert_eq!(event.get("result"), Some(&Value::from("error")));
+    assert_eq!(event.get("transport"), Some(&Value::from("HTTP")));
+    assert_eq!(
+        event.get("failurePhase"),
+        Some(&Value::from("hybridActive"))
+    );
+    assert_eq!(
+        event.get("failureReason"),
+        Some(&Value::from("HTTP upstream returned status 413"))
+    );
+
+    send_create(&mut client).await?;
+    server.fixture.wait_messages(1).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_counts_with_min_private(server.fixture.counts().await, 6, 1, 1);
+
     drop(client);
     proxy.stop().await;
     server.stop().await;

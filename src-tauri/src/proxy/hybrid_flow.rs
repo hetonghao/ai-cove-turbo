@@ -166,7 +166,6 @@ async fn start_response(
     if event_type != "response.create" {
         return legacy::start_legacy_response(client, session, payload, original_binary).await;
     }
-
     let Ok(prepared) = http_request_payload(&payload) else {
         let _ = send_error(
             client,
@@ -189,41 +188,24 @@ async fn start_response(
     session.response_started = true;
     let previous_response_id = prepared.previous_response_id;
     let fallback = prepared.fallback;
-    let wait_for_drain_reconnect = std::mem::take(&mut session.drain_reconnect_pending);
-    if session.ready.is_none()
-        && let (Some(thread_id), Some(response_id)) = (
-            session.thread_id.as_deref(),
-            previous_response_id.as_deref(),
-        )
-        && let Some(upstream) = session
-            .state
-            .hybrid_pool
-            .checkout_handoff_wait(&session.pool_scope, session.pool_id, thread_id, response_id)
-            .await
-    {
-        session.ready = Some(upstream);
-        session.last_terminal_response_id = Some(response_id.to_owned());
+    let large_http_request = payload.len() >= session.max_websocket_request_bytes
+        && matches!(&fallback, HttpFallback::Request(_));
+    let wait_for_drain_reconnect =
+        !large_http_request && std::mem::take(&mut session.drain_reconnect_pending);
+    if !large_http_request {
+        checkout_handoff_websocket(session, previous_response_id.as_deref()).await;
     }
     if reject_missing_continuation(client, session, true, previous_response_id.as_deref()).await {
         return true;
     }
-    if session.ready.is_none() {
-        session.ready = session
-            .state
-            .hybrid_pool
-            .checkout(&session.pool_scope, session.pool_id)
-            .await;
+    if !large_http_request {
+        checkout_response_websocket(
+            session,
+            wait_for_drain_reconnect || matches!(&fallback, HttpFallback::WebSocketRequired),
+        )
+        .await;
     }
-    if session.ready.is_none()
-        && (wait_for_drain_reconnect || matches!(&fallback, HttpFallback::WebSocketRequired))
-    {
-        session.ready = session
-            .state
-            .hybrid_pool
-            .checkout_wait(&session.pool_scope, session.pool_id, Duration::from_secs(2))
-            .await;
-    }
-    if let Some(upstream) = session.ready.take() {
+    if !large_http_request && let Some(upstream) = session.ready.take() {
         session
             .state
             .hybrid_pool
@@ -242,7 +224,9 @@ async fn start_response(
         return true;
     }
 
-    let traffic = if session
+    let traffic = if large_http_request {
+        HttpTraffic::HYBRID_LARGE_REQUEST
+    } else if session
         .state
         .hybrid_pool
         .has_initialized(&session.pool_scope)
@@ -266,6 +250,48 @@ async fn start_response(
         .await;
         return true;
     };
+    if large_http_request && session.ready.is_some() {
+        session
+            .retire_idle_upstream(LeaseRetirement::Replacing)
+            .await;
+    }
     *active = Some(http::start_http_worker(session, http_payload, traffic));
     true
+}
+
+async fn checkout_handoff_websocket(session: &mut Session, previous_response_id: Option<&str>) {
+    if session.ready.is_some() {
+        return;
+    }
+    let (Some(thread_id), Some(response_id)) = (session.thread_id.as_deref(), previous_response_id)
+    else {
+        return;
+    };
+    let Some(upstream) = session
+        .state
+        .hybrid_pool
+        .checkout_handoff_wait(&session.pool_scope, session.pool_id, thread_id, response_id)
+        .await
+    else {
+        return;
+    };
+    session.ready = Some(upstream);
+    session.last_terminal_response_id = Some(response_id.to_owned());
+}
+
+async fn checkout_response_websocket(session: &mut Session, wait: bool) {
+    if session.ready.is_none() {
+        session.ready = session
+            .state
+            .hybrid_pool
+            .checkout(&session.pool_scope, session.pool_id)
+            .await;
+    }
+    if session.ready.is_none() && wait {
+        session.ready = session
+            .state
+            .hybrid_pool
+            .checkout_wait(&session.pool_scope, session.pool_id, Duration::from_secs(2))
+            .await;
+    }
 }

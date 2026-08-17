@@ -53,20 +53,21 @@ type ClientWebSocket = WebSocketStream<TokioIo<Upgraded>>;
 type PrivateWebSocket = private_websocket::PrivateUpstream;
 
 const WEBSOCKET_MESSAGE_LIMIT: usize = 128 * 1024 * 1024;
+const MAX_HYBRID_WEBSOCKET_REQUEST_BYTES: usize = 15 * 1024 * 1024;
 
 pub(super) fn spawn(state: ProxyState, request: &mut AxumRequest, target: Url, path: String) {
     let client_upgrade = hyper::upgrade::on(&mut *request);
     let client_headers = request.headers().clone();
     let request_uri = request.uri().clone();
     tokio::spawn(async move {
-        run_after_upgrade(
+        Box::pin(run_after_upgrade(
             state,
             client_upgrade,
             client_headers,
             request_uri,
             target,
             path,
-        )
+        ))
         .await;
     });
 }
@@ -134,6 +135,6 @@ enum WorkerEvent {
     Cancelled,
     Error {
         code: u16,
-        message: &'static str,
+        message: String,
     },
 }

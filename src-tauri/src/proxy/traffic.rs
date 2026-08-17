@@ -37,15 +37,17 @@ pub(crate) enum TrafficRoute {
     HybridWs,
     HybridColdStartHttp,
     HybridRecoveryHttp,
+    HybridLargeRequestHttp,
     DirectHttp,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub(crate) struct TrafficRouteCounts {
     pub(crate) hybrid_ws: u64,
     pub(crate) hybrid_cold_start_http: u64,
     pub(crate) hybrid_recovery_http: u64,
+    pub(crate) hybrid_large_request_http: u64,
     pub(crate) direct_http: u64,
 }
 
@@ -55,6 +57,7 @@ impl TrafficRouteCounts {
             TrafficRoute::HybridWs => &mut self.hybrid_ws,
             TrafficRoute::HybridColdStartHttp => &mut self.hybrid_cold_start_http,
             TrafficRoute::HybridRecoveryHttp => &mut self.hybrid_recovery_http,
+            TrafficRoute::HybridLargeRequestHttp => &mut self.hybrid_large_request_http,
             TrafficRoute::DirectHttp => &mut self.direct_http,
         };
         *counter = counter.saturating_add(1);

@@ -30,6 +30,20 @@ pub(super) fn error_message(code: &str, message: &str) -> Message {
     Message::Text(payload.to_string().into())
 }
 
+pub(super) fn context_length_exceeded_message() -> Message {
+    let payload = serde_json::json!({
+        "type": "response.failed",
+        "response": {
+            "status": "failed",
+            "error": {
+                "code": "context_length_exceeded",
+                "message": "Your input exceeds the supported context size. Please reduce it and try again."
+            }
+        }
+    });
+    Message::Text(payload.to_string().into())
+}
+
 pub(super) async fn send_error(client: &mut ClientWebSocket, code: &str, message: &str) -> bool {
     client.send(error_message(code, message)).await.is_ok()
 }

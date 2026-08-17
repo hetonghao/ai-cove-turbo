@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use super::{
     Active, WorkerCommand, WorkerEvent,
-    common::text_message,
+    common::{context_length_exceeded_message, text_message},
     sse::{SseParser, is_terminal_event},
 };
 use crate::proxy::{HttpTraffic, ProxyState};
@@ -70,7 +70,11 @@ async fn run_http_worker(
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let message = format!("HTTP upstream returned status {status}");
-        let error = super::common::error_message("upstream_http_error", &message);
+        let error = if super::super::is_context_length_exceeded(status) {
+            context_length_exceeded_message()
+        } else {
+            super::common::error_message("upstream_http_error", &message)
+        };
         if events.send(WorkerEvent::Message(error)).await.is_err() {
             return;
         }
@@ -95,14 +99,14 @@ async fn run_http_worker(
                     }
                     let _ = events.send(WorkerEvent::Error {
                         code: 1011,
-                        message: "HTTP stream ended before terminal response event",
+                        message: "HTTP stream ended before terminal response event".to_owned(),
                     }).await;
                     return;
                 };
                 let Ok(chunk) = chunk else {
                     let _ = events.send(WorkerEvent::Error {
                         code: 1011,
-                        message: "HTTP response stream failed",
+                        message: "HTTP response stream failed".to_owned(),
                     }).await;
                     return;
                 };

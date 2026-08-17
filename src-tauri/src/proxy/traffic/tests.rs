@@ -169,6 +169,7 @@ fn persisted_route_counts_round_trip() -> Result<(), Box<dyn Error>> {
         TrafficRoute::HybridWs,
         TrafficRoute::HybridColdStartHttp,
         TrafficRoute::HybridRecoveryHttp,
+        TrafficRoute::HybridLargeRequestHttp,
         TrafficRoute::DirectHttp,
     ] {
         let mut outcome = record(21_000, 0);
@@ -185,9 +186,23 @@ fn persisted_route_counts_round_trip() -> Result<(), Box<dyn Error>> {
             hybrid_ws: 1,
             hybrid_cold_start_http: 1,
             hybrid_recovery_http: 1,
+            hybrid_large_request_http: 1,
             direct_http: 1,
         }
     );
+    Ok(())
+}
+
+#[test]
+fn persisted_route_counts_accept_legacy_shape() -> Result<(), Box<dyn Error>> {
+    let counts: TrafficRouteCounts = serde_json::from_value(serde_json::json!({
+        "hybridWs": 1,
+        "hybridColdStartHttp": 2,
+        "hybridRecoveryHttp": 3,
+        "directHttp": 4
+    }))?;
+
+    assert_eq!(counts.hybrid_large_request_http, 0);
     Ok(())
 }
 

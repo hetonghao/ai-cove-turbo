@@ -151,6 +151,14 @@ pub(super) async fn handle_worker_event(
             code,
             reason,
         } => {
+            if super::super::is_context_length_exceeded(code)
+                && let Some(raw_bytes) = session
+                    .websocket_receipt
+                    .and_then(|receipt| usize::try_from(receipt.raw_bytes).ok())
+            {
+                session.max_websocket_request_bytes =
+                    session.max_websocket_request_bytes.min(raw_bytes);
+            }
             if !retire_failed_websocket(session, active, code, &reason).await {
                 return false;
             }
@@ -168,9 +176,9 @@ pub(super) async fn handle_worker_event(
                 .is_ok()
         }
         WorkerEvent::Error { code, message } => {
-            retire_failed_websocket(session, active, code, message).await;
-            let _ = send_error(client, "server_error", message).await;
-            let _ = close_client(client, code, message).await;
+            retire_failed_websocket(session, active, code, &message).await;
+            let _ = send_error(client, "server_error", &message).await;
+            let _ = close_client(client, code, &message).await;
             false
         }
     }

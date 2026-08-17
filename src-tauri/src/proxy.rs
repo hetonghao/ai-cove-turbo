@@ -125,6 +125,7 @@ pub(crate) struct MetricsSnapshot {
     pub(crate) hybrid_ws: u64,
     pub(crate) hybrid_cold_start_http: u64,
     pub(crate) hybrid_recovery_http: u64,
+    pub(crate) hybrid_large_request_http: u64,
     pub(crate) direct_http: u64,
 }
 
@@ -137,6 +138,7 @@ struct HttpRequestMetric<'a> {
     compressed: bool,
     result: traffic::TrafficResult,
     route: traffic::TrafficRoute,
+    failure_reason: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -158,6 +160,14 @@ impl HttpTraffic {
         result: traffic::TrafficResult::Fallback,
         route: traffic::TrafficRoute::HybridRecoveryHttp,
     };
+    const HYBRID_LARGE_REQUEST: Self = Self {
+        result: traffic::TrafficResult::Success,
+        route: traffic::TrafficRoute::HybridLargeRequestHttp,
+    };
+}
+
+const fn is_context_length_exceeded(code: u16) -> bool {
+    matches!(code, 413 | 1009)
 }
 
 impl Metrics {
@@ -196,6 +206,7 @@ impl Metrics {
             hybrid_ws: route_counts.hybrid_ws,
             hybrid_cold_start_http: route_counts.hybrid_cold_start_http,
             hybrid_recovery_http: route_counts.hybrid_recovery_http,
+            hybrid_large_request_http: route_counts.hybrid_large_request_http,
             direct_http: route_counts.direct_http,
         }
     }
@@ -206,6 +217,8 @@ impl Metrics {
         } else {
             record.result
         };
+        let hybrid_capacity_failure = record.route != traffic::TrafficRoute::DirectHttp
+            && is_context_length_exceeded(record.status);
         self.requests.fetch_add(1, Ordering::Relaxed);
         if record.path == "/v1/responses"
             && (200..300).contains(&record.status)
@@ -232,8 +245,8 @@ impl Metrics {
             transport: traffic::TrafficTransport::Http,
             result,
             route: Some(record.route),
-            failure_phase: None,
-            failure_reason: None,
+            failure_phase: hybrid_capacity_failure.then_some(traffic::FailurePhase::HybridActive),
+            failure_reason: record.failure_reason,
         });
     }
 
@@ -386,6 +399,7 @@ impl Metrics {
             compressed: false,
             result: traffic::TrafficResult::Success,
             route: traffic::TrafficRoute::DirectHttp,
+            failure_reason: None,
         });
     }
 
@@ -399,6 +413,7 @@ impl Metrics {
             compressed: false,
             result: traffic::TrafficResult::Success,
             route: traffic::TrafficRoute::DirectHttp,
+            failure_reason: None,
         });
     }
 }
@@ -598,6 +613,7 @@ async fn proxy_http(
             compressed: false,
             result: traffic.result,
             route: traffic.route,
+            failure_reason: Some("local request body limit exceeded"),
         });
         return json_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
     };
@@ -617,6 +633,7 @@ async fn proxy_http(
                     compressed: false,
                     result: traffic.result,
                     route: traffic.route,
+                    failure_reason: None,
                 });
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, "compression failed");
             }
@@ -645,6 +662,7 @@ async fn proxy_http(
             compressed: false,
             result: traffic.result,
             route: traffic.route,
+            failure_reason: None,
         });
         return json_error(StatusCode::BAD_GATEWAY, "upstream request failed");
     };
@@ -657,6 +675,8 @@ async fn proxy_http(
         compressed,
         result: traffic.result,
         route: traffic.route,
+        failure_reason: is_context_length_exceeded(status.as_u16())
+            .then_some("HTTP upstream returned status 413"),
     });
     let response_headers = upstream_response.headers().clone();
     let response_hop_by_hop = hop_by_hop_headers(&response_headers);
@@ -945,6 +965,7 @@ mod tests {
             compressed: true,
             result: traffic::TrafficResult::Success,
             route: traffic::TrafficRoute::DirectHttp,
+            failure_reason: None,
         });
         metrics.save_traffic(&path)?;
 
@@ -970,6 +991,7 @@ mod tests {
             compressed: true,
             result: traffic::TrafficResult::Success,
             route: traffic::TrafficRoute::DirectHttp,
+            failure_reason: None,
         });
         metrics.record_http(HttpRequestMetric {
             path: "/v1/responses",
@@ -979,6 +1001,7 @@ mod tests {
             compressed: false,
             result: traffic::TrafficResult::Success,
             route: traffic::TrafficRoute::DirectHttp,
+            failure_reason: None,
         });
         metrics.record_http(HttpRequestMetric {
             path: "/v1/models",
@@ -988,6 +1011,7 @@ mod tests {
             compressed: false,
             result: traffic::TrafficResult::Success,
             route: traffic::TrafficRoute::DirectHttp,
+            failure_reason: None,
         });
         metrics.record_http(HttpRequestMetric {
             path: "/v1/responses",
@@ -997,6 +1021,7 @@ mod tests {
             compressed: false,
             result: traffic::TrafficResult::Error,
             route: traffic::TrafficRoute::DirectHttp,
+            failure_reason: None,
         });
         metrics.record_websocket_connected();
         metrics.record_websocket_outcome(
@@ -1037,35 +1062,37 @@ mod tests {
     }
 
     #[test]
-    fn recovery_http_error_updates_route_without_incrementing_fallback()
-    -> Result<(), Box<dyn Error>> {
-        // Given: a Hybrid recovery request whose final HTTP status is an error.
-        let metrics = Metrics::default();
+    fn hybrid_http_413_records_active_failure_phase() -> Result<(), Box<dyn Error>> {
+        for traffic in [HttpTraffic::HYBRID_COLD_START, HttpTraffic::HYBRID_RECOVERY] {
+            let metrics = Metrics::default();
+            metrics.record_http(HttpRequestMetric {
+                path: "/v1/responses",
+                status: 413,
+                raw_bytes: 100,
+                sent_bytes: 50,
+                compressed: false,
+                result: traffic.result,
+                route: traffic.route,
+                failure_reason: Some("HTTP upstream returned status 413"),
+            });
 
-        // When: the final outcome crosses the Metrics seam once.
-        metrics.record_http(HttpRequestMetric {
-            path: "/v1/responses",
-            status: 502,
-            raw_bytes: 100,
-            sent_bytes: 50,
-            compressed: false,
-            result: traffic::TrafficResult::Fallback,
-            route: traffic::TrafficRoute::HybridRecoveryHttp,
-        });
-
-        // Then: the route is retained without contradicting fallback telemetry.
-        let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.requests, 1);
-        assert_eq!(snapshot.http_fallbacks, 0);
-        assert_eq!(snapshot.hybrid_recovery_http, 1);
-        let event = metrics
-            .traffic_snapshot()
-            .recent_requests
-            .into_iter()
-            .next()
-            .ok_or("recovery HTTP traffic event missing")?;
-        let event = serde_json::to_value(event)?;
-        assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
+            let event = metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("Hybrid HTTP 413 traffic event missing")?;
+            let event = serde_json::to_value(event)?;
+            assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
+            assert_eq!(
+                event.get("failurePhase"),
+                Some(&serde_json::json!("hybridActive"))
+            );
+            assert_eq!(
+                event.get("failureReason"),
+                Some(&serde_json::json!("HTTP upstream returned status 413"))
+            );
+        }
         Ok(())
     }
 
@@ -1087,6 +1114,7 @@ mod tests {
                 compressed: false,
                 result: traffic.result,
                 route: traffic.route,
+                failure_reason: None,
             });
 
             // Then: its existing route and fallback classification remain intact.
@@ -1753,6 +1781,12 @@ mod tests {
         assert_eq!(
             event.get("result").and_then(serde_json::Value::as_str),
             Some("error")
+        );
+        assert_eq!(
+            event
+                .get("failureReason")
+                .and_then(serde_json::Value::as_str),
+            Some("local request body limit exceeded")
         );
         proxy.stop().await;
         task.abort();

@@ -15,12 +15,14 @@ pub(super) enum PrivateBehavior {
     FailFirstBatch,
     HoldResponse,
     HoldResponseNoPong,
+    HttpPayloadTooLarge,
     IdleError,
     IdleMessage,
     IdleRestart,
     IdleRestartDelayedReconnect,
     IdleUnexpectedEof,
     ActiveFailure,
+    ActiveMessageTooBig,
     ActiveReplayRequired,
     Stateful,
     CancelledTerminal,
@@ -38,8 +40,10 @@ impl PrivateBehavior {
             self,
             Self::HoldResponse
                 | Self::HoldResponseNoPong
+                | Self::HttpPayloadTooLarge
                 | Self::IdleError
                 | Self::IdleMessage
+                | Self::ActiveMessageTooBig
                 | Self::Stateful
                 | Self::Persistent
                 | Self::CancelledTerminal
@@ -56,9 +60,11 @@ impl PrivateBehavior {
             | Self::FailFirstBatch
             | Self::HoldResponse
             | Self::HoldResponseNoPong
+            | Self::HttpPayloadTooLarge
             | Self::IdleError
             | Self::IdleMessage
             | Self::ActiveFailure
+            | Self::ActiveMessageTooBig
             | Self::ActiveReplayRequired
             | Self::Stateful
             | Self::CancelledTerminal

@@ -37,12 +37,17 @@ pub(super) async fn upstream_request(
     if upgrade {
         return upgrade_response(&fixture, &mut request, private).await;
     }
-    let Ok(_) = to_bytes(request.into_body(), 1024 * 1024).await else {
+    let Ok(_) = to_bytes(request.into_body(), 64 * 1024 * 1024).await else {
         return Response::new(Body::empty());
     };
     fixture.record(|counts| counts.http_requests += 1).await;
     if fixture.config.delay_http {
         fixture.state.release_http.notified().await;
+    }
+    if matches!(fixture.config.private, PrivateBehavior::HttpPayloadTooLarge) {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+        return response;
     }
     let mut response = Response::new(Body::from("data: {\"type\":\"response.completed\"}\n\n"));
     response.headers_mut().insert(
@@ -215,6 +220,12 @@ impl Fixture {
             let response_index = self.counts().await.private_messages;
             match (self.config.private, response_index) {
                 (PrivateBehavior::ActiveFailure, 1) => return,
+                (PrivateBehavior::ActiveMessageTooBig, 1) => {
+                    let _ = self
+                        .close_upstream(&mut websocket, CloseCode::Size, "message too big")
+                        .await;
+                    return;
+                }
                 (PrivateBehavior::ActiveReplayRequired, 1) => {
                     self.send_replay_required_failure(&mut websocket).await;
                     return;
