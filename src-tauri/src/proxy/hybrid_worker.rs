@@ -12,7 +12,7 @@ use crate::proxy::traffic::{
 pub(super) async fn handle_active_client_message(
     client: &mut ClientWebSocket,
     session: &mut Session,
-    active: &Active,
+    active: &mut Active,
     message: Option<Result<Message, WebSocketError>>,
 ) -> bool {
     let Some(Ok(message)) = message else {
@@ -38,7 +38,7 @@ pub(super) async fn handle_active_client_message(
 async fn forward_active_message(
     client: &mut ClientWebSocket,
     session: &mut Session,
-    active: &Active,
+    active: &mut Active,
     payload: Vec<u8>,
     original_binary: bool,
 ) -> bool {
@@ -64,7 +64,8 @@ async fn forward_active_message(
         )
         .await;
     }
-    let command = if event_type == "response.cancel" {
+    let cancel_requested = event_type == "response.cancel";
+    let command = if cancel_requested {
         WorkerCommand::Cancel(payload)
     } else if active.kind == ActiveKind::WebSocket {
         WorkerCommand::Forward(payload, original_binary)
@@ -82,7 +83,11 @@ async fn forward_active_message(
             .observe_activity(super::ConnectionActivity::Up)
             .await;
     }
-    active.commands.send(command).await.is_ok()
+    let sent = active.commands.send(command).await.is_ok();
+    if sent && cancel_requested {
+        active.cancel_requested = true;
+    }
+    sent
 }
 
 pub(super) async fn handle_worker_event(
@@ -92,21 +97,17 @@ pub(super) async fn handle_worker_event(
     event: Option<WorkerEvent>,
 ) -> bool {
     let Some(event) = event else {
-        let _ = send_error(
-            client,
-            "server_error",
-            "response worker stopped unexpectedly",
-        )
-        .await;
-        let _ = close_client(client, 1011, "response worker stopped unexpectedly").await;
-        return false;
+        return super::transport_fallback::handle_stopped_worker(client).await;
     };
     match event {
         WorkerEvent::Message(message) => {
-            if active
+            let from_websocket = active
                 .as_ref()
-                .is_some_and(|item| item.kind == ActiveKind::WebSocket)
-            {
+                .is_some_and(|item| item.kind == ActiveKind::WebSocket);
+            if from_websocket {
+                if let Some(active) = active.as_mut() {
+                    active.output_forwarded = true;
+                }
                 session
                     .observe_activity(super::ConnectionActivity::Down)
                     .await;
@@ -164,6 +165,15 @@ pub(super) async fn handle_worker_event(
             }
             client.send(response).await.is_ok()
         }
+        WorkerEvent::TransportFallback(fallback) => {
+            match super::transport_fallback::apply(session, active, fallback).await {
+                super::transport_fallback::Action::Forward(response) => {
+                    client.send(response).await.is_ok()
+                }
+                super::transport_fallback::Action::StartedHttp => true,
+                super::transport_fallback::Action::Stop => false,
+            }
+        }
         WorkerEvent::Cancelled => {
             active.take();
             let message = serde_json::json!({
@@ -184,7 +194,7 @@ pub(super) async fn handle_worker_event(
     }
 }
 
-async fn retire_failed_websocket(
+pub(super) async fn retire_failed_websocket(
     session: &mut Session,
     active: &mut Option<Active>,
     code: u16,

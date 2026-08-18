@@ -27,6 +27,9 @@ mod observability_integration_tests;
 #[path = "hybrid_session_isolation_tests.rs"]
 mod session_isolation_tests;
 
+#[path = "hybrid_transport_fallback_tests.rs"]
+mod transport_fallback_tests;
+
 async fn start_test_proxy(server: &FixtureServer) -> io::Result<(ProxyHandle, Arc<Metrics>)> {
     let metrics = Arc::new(Metrics::default());
     let proxy = start_proxy(ProxyOptions {

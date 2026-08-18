@@ -8,10 +8,11 @@ use tokio::{
 use tokio_tungstenite::tungstenite::{Bytes, Message, protocol::CloseFrame};
 
 use super::{
-    Active, ActiveKind, PrivateWebSocket, WebSocketSendReceipt, WorkerCommand, WorkerEvent,
+    Active, ActiveKind, PrivateWebSocket, TransportFallback, WebSocketSendReceipt, WorkerCommand,
+    WorkerEvent,
     common::{context_length_exceeded_message, event_type, text_message},
     private_websocket,
-    sse::{is_terminal_event, success_terminal_response_id},
+    sse::{HttpFallback, is_terminal_event, success_terminal_response_id},
 };
 use crate::proxy::Metrics;
 
@@ -24,6 +25,7 @@ pub(super) fn start_websocket_worker(
     original_binary: bool,
     metrics: Arc<Metrics>,
     previous_response_id: Option<String>,
+    fallback: HttpFallback,
 ) -> Active {
     let (command_tx, command_rx) = mpsc::channel(8);
     let (event_tx, event_rx) = mpsc::channel(8);
@@ -41,6 +43,12 @@ pub(super) fn start_websocket_worker(
     ));
     Active {
         kind: ActiveKind::WebSocket,
+        http_fallback: match fallback {
+            HttpFallback::Request(payload) => Some(payload),
+            HttpFallback::WebSocketRequired => None,
+        },
+        output_forwarded: false,
+        cancel_requested: false,
         commands: command_tx,
         events: event_rx,
         task,
@@ -54,11 +62,7 @@ struct WorkerContext {
 
 enum BinaryOutcome {
     Continue,
-    FailedTerminal {
-        response: Message,
-        code: u16,
-        reason: String,
-    },
+    Failure(WorkerEvent),
     Stop,
     Terminal(Option<String>),
 }
@@ -105,16 +109,10 @@ async fn run_websocket_worker(
                 match message {
                     Message::Binary(envelope) => match handle_binary_response(envelope, &events, &context).await {
                         BinaryOutcome::Continue => {}
-                        BinaryOutcome::FailedTerminal { response, code, reason } => {
+                        BinaryOutcome::Failure(event) => {
                             context.metrics.record_websocket_closed();
                             drop(upstream);
-                            let _ = events
-                                .send(WorkerEvent::FailedTerminal {
-                                    response,
-                                    code,
-                                    reason,
-                                })
-                                .await;
+                            let _ = events.send(event).await;
                             return;
                         }
                         BinaryOutcome::Stop => return,
@@ -225,6 +223,7 @@ async fn handle_binary_response(
     let terminal = is_terminal_event(&decoded.payload);
     let failed_terminal =
         event_type(&decoded.payload).is_ok_and(|event_type| event_type == "error");
+    let transport_fallback = failed_terminal && is_http_transport_fallback(&decoded.payload);
     let failed_diagnostic = failed_terminal.then(|| failed_terminal_diagnostic(&decoded.payload));
     let response_id = terminal
         .then(|| success_terminal_response_id(&decoded.payload))
@@ -243,16 +242,23 @@ async fn handle_binary_response(
         return BinaryOutcome::Stop;
     };
     if let Some((code, reason)) = failed_diagnostic {
+        if transport_fallback {
+            return BinaryOutcome::Failure(WorkerEvent::TransportFallback(TransportFallback {
+                response: message,
+                code,
+                reason,
+            }));
+        }
         let response = if super::super::is_context_length_exceeded(code) {
             context_length_exceeded_message()
         } else {
             message
         };
-        return BinaryOutcome::FailedTerminal {
+        return BinaryOutcome::Failure(WorkerEvent::FailedTerminal {
             response,
             code,
             reason,
-        };
+        });
     }
     if events.send(WorkerEvent::Message(message)).await.is_err() {
         context.metrics.record_websocket_closed();
@@ -262,6 +268,21 @@ async fn handle_binary_response(
         return BinaryOutcome::Terminal(response_id);
     }
     BinaryOutcome::Continue
+}
+
+fn is_http_transport_fallback(payload: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(payload).is_ok_and(|value| {
+        value.get("status").and_then(serde_json::Value::as_u64) == Some(503)
+            && value.get("transport").and_then(serde_json::Value::as_str) == Some("http")
+            && value
+                .get("request_state")
+                .and_then(serde_json::Value::as_str)
+                == Some("not_submitted")
+            && value
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str)
+                == Some("responses_websocket_unavailable")
+    })
 }
 
 fn reset_keepalive(keepalive: Pin<&mut Sleep>, after: Duration) {

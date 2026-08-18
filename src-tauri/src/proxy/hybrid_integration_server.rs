@@ -44,7 +44,10 @@ pub(super) async fn upstream_request(
     if fixture.config.delay_http {
         fixture.state.release_http.notified().await;
     }
-    if matches!(fixture.config.private, PrivateBehavior::HttpPayloadTooLarge) {
+    if matches!(
+        fixture.config.private,
+        PrivateBehavior::HttpPayloadTooLarge | PrivateBehavior::ActiveTransportFallbackHttpFailure
+    ) {
         let mut response = Response::new(Body::empty());
         *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
         return response;
@@ -100,6 +103,11 @@ impl Fixture {
         }
     }
 
+    async fn send_transport_fallback(&self, websocket: &mut FixtureWebSocket) {
+        let failed = br#"{"type":"error","status":503,"transport":"http","request_state":"not_submitted","error":{"code":"responses_websocket_unavailable","message":"Responses WebSocket is temporarily unavailable"}}"#;
+        let _ = Self::send_private_event(websocket, failed).await;
+    }
+
     async fn send_idle_event(&self, websocket: &mut FixtureWebSocket) -> bool {
         let event = if matches!(self.config.private, PrivateBehavior::IdleError) {
             br#"{"type":"error","error":{"code":"do_request_failed","message":"simulated idle failure"}}"#
@@ -141,6 +149,9 @@ impl Fixture {
                 return false;
             };
             self.record(|counts| counts.private_messages += 1).await;
+            if self.handled_transport_fallback(websocket).await {
+                return false;
+            }
             if !stateful_previous_response_mismatch(
                 self.config.private,
                 &decoded.payload,
@@ -205,6 +216,56 @@ impl Fixture {
         self.record(|counts| counts.active_pings += 1).await;
         self.state.release_private.notified().await;
         drop(upstream);
+    }
+
+    async fn handled_transport_fallback(&self, websocket: &mut FixtureWebSocket) -> bool {
+        let response_index = self.counts().await.private_messages;
+        if response_index != 2 {
+            return false;
+        }
+        match self.config.private {
+            PrivateBehavior::ActiveTransportFallback
+            | PrivateBehavior::ActiveTransportFallbackHttpFailure => {
+                self.send_transport_fallback(websocket).await;
+            }
+            PrivateBehavior::ActiveGenericFallbackLookalike => {
+                let failed = br#"{"type":"error","status":503,"transport":"http","request_state":"not_submitted","error":{"code":"upstream_error","message":"Responses WebSocket is temporarily unavailable"}}"#;
+                let _ = Self::send_private_event(websocket, failed).await;
+            }
+            PrivateBehavior::ActiveOutputThenTransportFallback => {
+                let output = br#"{"type":"response.output_text.delta","delta":"partial"}"#;
+                if Self::send_private_event(websocket, output).await {
+                    self.send_transport_fallback(websocket).await;
+                }
+            }
+            PrivateBehavior::ActiveCancelThenTransportFallback => {
+                if let Some(Ok(Message::Binary(payload))) = websocket.next().await
+                    && decode_private_message(&payload).is_ok()
+                {
+                    self.record(|counts| counts.private_messages += 1).await;
+                    self.send_transport_fallback(websocket).await;
+                }
+            }
+            PrivateBehavior::Delay
+            | PrivateBehavior::Fail
+            | PrivateBehavior::FailFirstBatch
+            | PrivateBehavior::HoldResponse
+            | PrivateBehavior::HoldResponseNoPong
+            | PrivateBehavior::HttpPayloadTooLarge
+            | PrivateBehavior::IdleError
+            | PrivateBehavior::IdleMessage
+            | PrivateBehavior::IdleRestart
+            | PrivateBehavior::IdleRestartDelayedReconnect
+            | PrivateBehavior::IdleUnexpectedEof
+            | PrivateBehavior::ActiveFailure
+            | PrivateBehavior::ActiveMessageTooBig
+            | PrivateBehavior::ActiveReplayRequired
+            | PrivateBehavior::Stateful
+            | PrivateBehavior::CancelledTerminal
+            | PrivateBehavior::Persistent
+            | PrivateBehavior::TerminalTail => return false,
+        }
+        true
     }
 
     async fn run_private(&self, mut websocket: FixtureWebSocket) {

@@ -42,6 +42,8 @@ mod sse;
 #[cfg(test)]
 #[path = "hybrid_tests.rs"]
 mod tests;
+#[path = "hybrid_transport_fallback.rs"]
+mod transport_fallback;
 #[path = "hybrid_websocket.rs"]
 mod websocket;
 #[path = "hybrid_worker.rs"]
@@ -103,6 +105,9 @@ enum ActiveKind {
 
 struct Active {
     kind: ActiveKind,
+    http_fallback: Option<Vec<u8>>,
+    output_forwarded: bool,
+    cancel_requested: bool,
     commands: mpsc::Sender<WorkerCommand>,
     events: mpsc::Receiver<WorkerEvent>,
     task: JoinHandle<()>,
@@ -113,6 +118,12 @@ struct WebSocketSendReceipt {
     raw_bytes: u64,
     sent_bytes: u64,
     compressed: bool,
+}
+
+struct TransportFallback {
+    response: Message,
+    code: u16,
+    reason: String,
 }
 
 enum WorkerCommand {
@@ -132,6 +143,7 @@ enum WorkerEvent {
         code: u16,
         reason: String,
     },
+    TransportFallback(TransportFallback),
     Cancelled,
     Error {
         code: u16,

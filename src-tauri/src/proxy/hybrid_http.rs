@@ -32,6 +32,9 @@ pub(super) fn start_http_worker(
     let task = tokio::spawn(run_http_worker(context, command_rx, event_tx));
     Active {
         kind: super::ActiveKind::Http,
+        http_fallback: None,
+        output_forwarded: false,
+        cancel_requested: false,
         commands: command_tx,
         events: event_rx,
         task,

@@ -220,6 +220,7 @@ async fn start_response(
             original_binary,
             std::sync::Arc::clone(&session.state.metrics),
             session.last_terminal_response_id.clone(),
+            fallback,
         ));
         return true;
     }

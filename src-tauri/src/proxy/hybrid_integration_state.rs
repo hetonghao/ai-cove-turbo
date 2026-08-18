@@ -22,6 +22,11 @@ pub(super) enum PrivateBehavior {
     IdleRestartDelayedReconnect,
     IdleUnexpectedEof,
     ActiveFailure,
+    ActiveTransportFallback,
+    ActiveGenericFallbackLookalike,
+    ActiveOutputThenTransportFallback,
+    ActiveCancelThenTransportFallback,
+    ActiveTransportFallbackHttpFailure,
     ActiveMessageTooBig,
     ActiveReplayRequired,
     Stateful,
@@ -43,6 +48,11 @@ impl PrivateBehavior {
                 | Self::HttpPayloadTooLarge
                 | Self::IdleError
                 | Self::IdleMessage
+                | Self::ActiveTransportFallback
+                | Self::ActiveGenericFallbackLookalike
+                | Self::ActiveOutputThenTransportFallback
+                | Self::ActiveCancelThenTransportFallback
+                | Self::ActiveTransportFallbackHttpFailure
                 | Self::ActiveMessageTooBig
                 | Self::Stateful
                 | Self::Persistent
@@ -64,6 +74,11 @@ impl PrivateBehavior {
             | Self::IdleError
             | Self::IdleMessage
             | Self::ActiveFailure
+            | Self::ActiveTransportFallback
+            | Self::ActiveGenericFallbackLookalike
+            | Self::ActiveOutputThenTransportFallback
+            | Self::ActiveCancelThenTransportFallback
+            | Self::ActiveTransportFallbackHttpFailure
             | Self::ActiveMessageTooBig
             | Self::ActiveReplayRequired
             | Self::Stateful
