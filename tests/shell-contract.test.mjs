@@ -191,6 +191,18 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
   assert.match(app, /"set-ai-cove-upstream": \["set_ai_cove_upstream"\]/);
 });
 
+test("Windows 重启 Codex 不闪出 PowerShell 并返回新进程", async () => {
+  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const start = rust.indexOf('#[cfg(target_os = "windows")]\nfn restart_codex_desktop');
+  const end = rust.indexOf('#[cfg(not(any(target_os = "macos", target_os = "windows")))]', start);
+  const windowsRestart = rust.slice(start, end);
+
+  assert.match(windowsRestart, /crate::windows_process::hidden_command\("powershell\.exe"\)/);
+  assert.match(windowsRestart, /Start-Process -FilePath \$path -PassThru/);
+  assert.match(windowsRestart, /\.output\(\)/);
+  assert.match(windowsRestart, /parse::<u32>\(\)/);
+});
+
 test("更新下载失败后进入可重试状态", async () => {
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 
@@ -317,9 +329,9 @@ test("桌面版本和 updater endpoint 由同一编译期契约驱动", async ()
   );
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 
-  assert.equal(packageJson.version, "0.1.0-beta.10");
-  assert.match(cargo, /^version = "0\.1\.0-beta\.10"$/m);
-  assert.equal(tauriConfig.version, "0.1.0-beta.10");
+  assert.equal(packageJson.version, "0.1.0-beta.11");
+  assert.match(cargo, /^version = "0\.1\.0-beta\.11"$/m);
+  assert.equal(tauriConfig.version, "0.1.0-beta.11");
   assert.equal(packageJson.scripts["desktop:release:local"], "node scripts/desktop-release.mjs");
   assert.match(rust, /option_env!\("TURBO_UPDATER_ENDPOINT"\)/);
   assert.match(rust, /https:\/\/ai-cove\.com\/downloads\/turbo\/latest\.json/);

@@ -663,6 +663,9 @@ mod restart_codex_tests {
 
 #[cfg(target_os = "windows")]
 fn restart_codex_desktop() -> Result<Option<u32>, String> {
+    const LAUNCH_ATTEMPTS: usize = 300;
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
     let script = r#"$path = Join-Path $env:LOCALAPPDATA 'Programs\Codex\Codex.exe'
 if (-not (Test-Path $path)) { throw '未找到 Codex Desktop 可执行文件' }
 $processes = Get-Process -Name Codex -ErrorAction SilentlyContinue | Where-Object { $_.Path -and [string]::Equals($_.Path, $path, [System.StringComparison]::OrdinalIgnoreCase) }
@@ -670,15 +673,32 @@ $processes | ForEach-Object {
   [void]$_.CloseMainWindow()
   if (-not $_.WaitForExit(5000)) { throw 'Codex Desktop 未能优雅退出' }
 }
-Start-Process -FilePath $path"#;
-    let status = Command::new("powershell.exe")
+$process = Start-Process -FilePath $path -PassThru
+if (-not $process) { throw '无法启动 Codex Desktop' }
+$process.Id"#;
+    let output = crate::windows_process::hidden_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .status()
+        .output()
         .map_err(|error| error.to_string())?;
-    status
-        .success()
-        .then_some(None)
-        .ok_or_else(|| "无法重启 Codex Desktop".to_owned())
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if detail.is_empty() {
+            "无法重启 Codex Desktop".to_owned()
+        } else {
+            format!("无法重启 Codex Desktop：{detail}")
+        });
+    }
+    let pid = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "无法读取 Codex Desktop 新进程".to_owned())?;
+    for _ in 0..LAUNCH_ATTEMPTS {
+        if runtime::codex_desktop_process_id() == Some(pid) {
+            return Ok(Some(pid));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    Err("Codex Desktop 未能重新启动，请手动打开后重试".to_owned())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
