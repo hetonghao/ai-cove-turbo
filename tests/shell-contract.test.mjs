@@ -192,7 +192,7 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
 });
 
 test("Windows 重启 Codex 不闪出 PowerShell 并返回新进程", async () => {
-  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const rust = (await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8")).replaceAll("\r\n", "\n");
   const start = rust.indexOf('#[cfg(target_os = "windows")]\nfn restart_codex_desktop');
   const end = rust.indexOf('#[cfg(not(any(target_os = "macos", target_os = "windows")))]', start);
   const windowsRestart = rust.slice(start, end);
