@@ -19,6 +19,17 @@
   const HTTP_DEGRADATION_MIN_SPAN_MS = 30_000;
   const HTTP_DEGRADATION_MIN_REQUESTS = 5;
   const NETWORK_ERROR_MESSAGE = "请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。\n请尝试切换手机热点排查，如果无法定位请联管理员。";
+  const REQUEST_FAILURE_LABELS = Object.freeze({
+    401: "认证失败，请检查 API 密钥",
+    403: "认证失败，请检查 API 密钥",
+    404: "请求地址不存在，请检查配置",
+    408: "请求超时，请稍后重试",
+    413: "请求内容过大，请重试",
+    429: "请求过于频繁，请稍后重试",
+    500: "服务暂时不可用，请稍后重试",
+    503: "服务暂时不可用，请稍后重试",
+    504: "请求超时，请稍后重试",
+  });
   const invoke = window.__TAURI__?.core?.invoke;
   const telemetry = window.TurboTelemetry;
   const connectionDom = window.TurboConnectionDOM;
@@ -303,6 +314,11 @@
       && request?.route === "directHttp"
       && request?.result === "error"
       && Number(request?.status) === 502;
+  }
+
+  function requestFailureLabel(request) {
+    if (isNetworkIssue(request)) return "网络异常";
+    return REQUEST_FAILURE_LABELS[Number(request?.status)] ?? "请求失败";
   }
 
   function formatCodexState() {
@@ -1336,7 +1352,7 @@
     const route = REQUEST_ROUTE_LABELS[request.route];
     const protocol = route ?? request.transport;
     const networkIssue = isNetworkIssue(request);
-    const transport = networkIssue ? `${protocol} · 网络异常` : releaseRebuild ? "Hybrid WS · 发布重建" : recovering ? `${protocol} · 连接恢复` : failed ? `${protocol} · 失败` : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
+    const transport = networkIssue ? `${protocol} · 网络异常` : releaseRebuild ? "Hybrid WS · 发布重建" : recovering ? `${protocol} · 连接恢复` : failed ? `${protocol} · ${requestFailureLabel(request)}` : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
     const detail = recovering && request.failureReason ? ` title="${escapeHtml(request.failureReason)}"` : "";
     const tooltipId = `network-error-${String(request.id).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
     const networkMarkup = networkIssue

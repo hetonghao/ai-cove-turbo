@@ -628,6 +628,38 @@ test("HTTP 502 记录显示协议、网络异常和可访问排查提示", async
   assert.doesNotMatch(requestStream.innerHTML, /压缩 HTTP · 失败/);
 });
 
+test("首批 HTTP 状态在请求列表中显示可执行的通用提示", async () => {
+  const statuses = [
+    [401, "认证失败，请检查 API 密钥", "hybridColdStartHttp", "首轮 HTTP"],
+    [403, "认证失败，请检查 API 密钥", "directHttp", "压缩 HTTP"],
+    [404, "请求地址不存在，请检查配置", "directHttp", "压缩 HTTP"],
+    [408, "请求超时，请稍后重试", "directHttp", "压缩 HTTP"],
+    [413, "请求内容过大，请重试", "directHttp", "压缩 HTTP"],
+    [429, "请求过于频繁，请稍后重试", "directHttp", "压缩 HTTP"],
+    [500, "服务暂时不可用，请稍后重试", "directHttp", "压缩 HTTP"],
+    [503, "服务暂时不可用，请稍后重试", "directHttp", "压缩 HTTP"],
+    [504, "请求超时，请稍后重试", "directHttp", "压缩 HTTP"],
+  ];
+  const { requestStream } = await liveTailHarness({
+    recentRequests: statuses.map(([status, , route], index) => ({
+      id: index + 1,
+      timestampMs: 1_000 + index,
+      status,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "HTTP",
+      route,
+      result: "error",
+    })),
+  });
+
+  const rows = requestStream.innerHTML.match(/<tr\b.*?<\/tr>/g) ?? [];
+  statuses.forEach(([, label, , transport], index) => {
+    assert.match(rows[index] ?? "", new RegExp(`${transport} · ${label}`));
+  });
+});
+
 test("网络异常 Hover 和键盘聚焦会把提示定位在视口内", async () => {
   const { positionNetworkTooltip } = await liveTailHarness();
 
@@ -1528,7 +1560,7 @@ test("安装更新期间持续读取并展示下载进度", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   let status = {
     updateState: "available",
-    updateMessage: "发现新版本 v0.1.0-beta.11",
+    updateMessage: "发现新版本 v0.1.0-beta.12",
     updateProgress: 0,
   };
   let statusPolls = 0;

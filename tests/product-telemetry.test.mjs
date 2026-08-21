@@ -138,8 +138,8 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   assert.match(requestRows.find((row) => row.includes("/v1/cold-start")) ?? "", />首轮 HTTP<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/recovery")) ?? "", />回退 HTTP<\/span>/);
   assert.match(failedRow, /c-request-status c-request-status--error">101<\/span>/);
-  assert.match(failedRow, /c-transport c-transport--error">Hybrid WS · 失败<\/span>/);
-  assert.doesNotMatch(failedRow, /c-request-status--success|<span class="c-transport">Hybrid WS<\/span>/);
+  assert.match(failedRow, /c-transport c-transport--error">Hybrid WS · 请求失败<\/span>/);
+  assert.doesNotMatch(failedRow, /c-request-status--success|<span class="c-transport">Hybrid WS<\/span>|Hybrid WS · 失败/);
   assert.match(recoveredRow, /title="unexpected idle upstream binary message"/);
   assert.match(recoveredRow, />Hybrid WS · 连接恢复<\/span>/);
   assert.doesNotMatch(recoveredRow, /Hybrid WS · 失败/);

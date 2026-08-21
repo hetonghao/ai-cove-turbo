@@ -5,7 +5,7 @@
     { key: "C", name: "分阶段流水线" },
   ];
   const scenarios = {
-    available: { label: "发现新版本", message: "v0.1.0-beta.11 可安装", short: "等待安装", progress: 0, stage: -1, tone: "available" },
+    available: { label: "发现新版本", message: "v0.1.0-beta.12 可安装", short: "等待安装", progress: 0, stage: -1, tone: "available" },
     download: { label: "下载中", message: "正在下载签名更新", short: "下载更新", progress: 68, stage: 0, tone: "active" },
     verify: { label: "正在校验", message: "正在验证更新签名", short: "签名校验", progress: 88, stage: 1, tone: "active" },
     install: { label: "安装中", message: "正在替换应用文件", short: "安装更新", progress: 96, stage: 2, tone: "active" },
