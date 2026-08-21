@@ -662,7 +662,7 @@ impl HybridPool {
                 connection_id: parked.connection_id,
                 server_trace: parked.server_trace,
                 ordinal: parked.ordinal,
-                metadata: parked.metadata,
+                metadata: parked.metadata.verified_now(),
             },
         );
         state.remove_session(parked.session_id, None);
