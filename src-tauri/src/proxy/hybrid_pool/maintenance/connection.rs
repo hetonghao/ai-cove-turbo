@@ -1,7 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
-use tokio::time::Instant;
 use url::Url;
 
 use super::super::{
@@ -73,7 +72,7 @@ pub(super) fn spawn_connection(inner: Arc<PoolInner>, scope: HybridScope, spec: 
                     upstream,
                     server_trace,
                     ordinal: 0,
-                    last_probe_at: Some(Instant::now()),
+                    metadata: super::super::ConnectionMetadata::fresh(),
                 });
                 entry.initialized = true;
             }

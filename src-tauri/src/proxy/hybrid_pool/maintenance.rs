@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
 use super::{
@@ -179,7 +178,7 @@ impl HybridPool {
                     upstream,
                     server_trace: connection.server_trace,
                     ordinal: connection.ordinal,
-                    last_probe_at: Some(Instant::now()),
+                    metadata: connection.metadata.verified_now(),
                 });
                 drop(state);
                 None

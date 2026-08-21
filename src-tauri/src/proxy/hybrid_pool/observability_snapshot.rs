@@ -78,6 +78,11 @@ fn append_session_state(snapshot: &mut ConnectionSnapshot, state: &PoolState, no
                 upstream_trace: lease.server_trace.clone(),
                 upstream_generation: lease.connection_id,
                 upstream_ordinal: lease.ordinal,
+                connection_age_seconds: now.duration_since(lease.metadata.created_at).as_secs(),
+                last_probe_age_seconds: lease
+                    .metadata
+                    .last_probe_at
+                    .map(|last_probe| now.duration_since(last_probe).as_secs()),
             });
         }
     }

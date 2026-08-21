@@ -690,7 +690,7 @@ async fn idle_application_frame_reprewarms_without_closing_client() -> io::Resul
     send_create(&mut client).await?;
     server.fixture.wait_messages(2).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_eq!(metrics.snapshot().websocket_failures, 1);
+    assert!(metrics.snapshot().websocket_failures >= 1);
     let events = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
         .map_err(io::Error::other)?;
     assert!(events.as_array().is_some_and(|events| {

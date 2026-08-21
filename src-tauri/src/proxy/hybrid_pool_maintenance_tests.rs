@@ -20,7 +20,16 @@ fn pool_connection(
         upstream,
         server_trace: None,
         ordinal: 0,
-        last_probe_at,
+        metadata: last_probe_at.map_or_else(
+            || ConnectionMetadata {
+                created_at: tokio::time::Instant::now(),
+                last_probe_at: None,
+            },
+            |last_probe_at| ConnectionMetadata {
+                created_at: last_probe_at,
+                last_probe_at: Some(last_probe_at),
+            },
+        ),
     }
 }
 

@@ -240,7 +240,10 @@ async fn private_connections_reuse_shared_tls_config() -> io::Result<()> {
 
 #[test]
 fn websocket_failure_kind_is_stable_and_sanitized() {
-    use tokio_tungstenite::tungstenite::{Error as WebSocketError, error::ProtocolError};
+    use tokio_tungstenite::tungstenite::{
+        Error as WebSocketError,
+        error::{CapacityError, ProtocolError, TlsError},
+    };
 
     assert_eq!(
         websocket_error_kind(&WebSocketError::ConnectionClosed),
@@ -249,6 +252,23 @@ fn websocket_failure_kind_is_stable_and_sanitized() {
     assert_eq!(
         websocket_error_kind(&WebSocketError::Io(io::Error::other("secret detail"))),
         "io"
+    );
+    assert_eq!(
+        websocket_error_kind(&WebSocketError::Io(io::Error::from(
+            io::ErrorKind::UnexpectedEof,
+        ))),
+        "eof"
+    );
+    assert_eq!(
+        websocket_error_kind(&WebSocketError::Tls(TlsError::InvalidDnsName)),
+        "tls"
+    );
+    assert_eq!(
+        websocket_error_kind(&WebSocketError::Capacity(CapacityError::MessageTooLong {
+            size: 2,
+            max_size: 1,
+        })),
+        "message_limit"
     );
     assert_eq!(
         websocket_error_kind(&WebSocketError::Protocol(

@@ -93,18 +93,42 @@ struct ScopeState {
     idle: Vec<PoolConnection>,
 }
 
+#[derive(Clone, Copy)]
+struct ConnectionMetadata {
+    created_at: Instant,
+    last_probe_at: Option<Instant>,
+}
+
+impl ConnectionMetadata {
+    fn fresh() -> Self {
+        let now = Instant::now();
+        Self {
+            created_at: now,
+            last_probe_at: Some(now),
+        }
+    }
+
+    fn verified_now(self) -> Self {
+        Self {
+            last_probe_at: Some(Instant::now()),
+            ..self
+        }
+    }
+}
+
 struct PoolConnection {
     id: u64,
     upstream: PrivateUpstream,
     server_trace: Option<String>,
     ordinal: u64,
-    last_probe_at: Option<Instant>,
+    metadata: ConnectionMetadata,
 }
 
 struct ConnectionLease {
     connection_id: u64,
     server_trace: Option<String>,
     ordinal: u64,
+    metadata: ConnectionMetadata,
 }
 
 struct ParkedConnection {
@@ -115,6 +139,7 @@ struct ParkedConnection {
     connection_id: u64,
     server_trace: Option<String>,
     ordinal: u64,
+    metadata: ConnectionMetadata,
     upstream: PrivateUpstream,
 }
 
@@ -132,6 +157,7 @@ fn take_idle_connection(
     }
     entry.idle.pop().map(|connection| {
         let needs_preflight = connection
+            .metadata
             .last_probe_at
             .is_none_or(|last_probe| last_probe.elapsed() >= KEEPALIVE_INTERVAL);
         if needs_preflight {
@@ -143,6 +169,7 @@ fn take_idle_connection(
                     connection_id: connection.id,
                     server_trace: connection.server_trace.clone(),
                     ordinal: connection.ordinal,
+                    metadata: connection.metadata,
                 },
             );
         }
@@ -154,6 +181,58 @@ struct CheckoutProbeGuard {
     pool: HybridPool,
     scope: HybridScope,
     connection: Option<PoolConnection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HandoffCheckoutFailure {
+    Preflight,
+}
+
+struct HandoffProbeGuard {
+    pool: HybridPool,
+    parked: Option<ParkedConnection>,
+}
+
+impl HandoffProbeGuard {
+    const fn new(pool: HybridPool, parked: ParkedConnection) -> Self {
+        Self {
+            pool,
+            parked: Some(parked),
+        }
+    }
+
+    fn upstream_mut(&mut self) -> Option<&mut PrivateUpstream> {
+        self.parked.as_mut().map(|parked| &mut parked.upstream)
+    }
+
+    const fn take_parked(&mut self) -> Option<ParkedConnection> {
+        self.parked.take()
+    }
+}
+
+impl Drop for HandoffProbeGuard {
+    fn drop(&mut self) {
+        let Some(parked) = self.parked.take() else {
+            return;
+        };
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            let mut state = pool.inner.state.lock().await;
+            state.sessions.remove(&parked.session_id);
+            state.push_closed(
+                parked.connection_id,
+                None,
+                "续传连接预检被取消".to_owned(),
+                false,
+            );
+            state.scopes.retain(|_, candidate| {
+                candidate.active_local > 0 || total_connections(candidate) > 0
+            });
+            drop(state);
+            pool.close_all(vec![parked.upstream]).await;
+            pool.refill(&parked.scope).await;
+        });
+    }
 }
 
 impl CheckoutProbeGuard {
@@ -338,6 +417,15 @@ impl HybridPool {
                     drop(state);
                     return None;
                 };
+                if !state.sessions.contains_key(&session_id) {
+                    if let Some(entry) = state.scopes.get_mut(scope) {
+                        entry.probing = entry.probing.saturating_sub(1);
+                    }
+                    drop(state);
+                    self.close_detached(vec![connection.upstream]);
+                    self.refill(scope).await;
+                    return None;
+                }
                 let Some(entry) = state.scopes.get_mut(scope) else {
                     drop(state);
                     self.close_detached(vec![connection.upstream]);
@@ -351,6 +439,7 @@ impl HybridPool {
                             connection_id,
                             server_trace: connection.server_trace,
                             ordinal: connection.ordinal,
+                            metadata: connection.metadata.verified_now(),
                         },
                     );
                     drop(state);
@@ -469,6 +558,7 @@ impl HybridPool {
                 connection_id,
                 server_trace: lease.server_trace,
                 ordinal: lease.ordinal,
+                metadata: lease.metadata,
                 upstream,
             });
             connection_id
@@ -492,48 +582,92 @@ impl HybridPool {
         session_id: u64,
         thread_id: &str,
         response_id: &str,
-    ) -> Option<PrivateUpstream> {
+    ) -> Result<Option<PrivateUpstream>, HandoffCheckoutFailure> {
         let checkout = async {
             loop {
                 let notified = self.inner.ready.notified();
-                let upstream = {
+                let parked = {
                     let mut state = self.inner.state.lock().await;
                     let index = state.handoffs.iter().position(|handoff| {
                         &handoff.scope == scope
                             && handoff.thread_id == thread_id
                             && handoff.response_id == response_id
                     });
-                    let upstream = index.and_then(|index| {
+                    let parked = index.and_then(|index| {
                         if !state.sessions.contains_key(&session_id) {
                             return None;
                         }
-                        let parked = state.handoffs.swap_remove(index);
-                        let entry = state.scopes.get_mut(scope)?;
-                        entry.leased.remove(&parked.session_id);
-                        entry.leased.insert(
-                            session_id,
-                            ConnectionLease {
-                                connection_id: parked.connection_id,
-                                server_trace: parked.server_trace,
-                                ordinal: parked.ordinal,
-                            },
-                        );
-                        state.remove_session(parked.session_id, None);
-                        Some(parked.upstream)
+                        Some(state.handoffs.swap_remove(index))
                     });
                     drop(state);
-                    upstream
+                    parked
                 };
-                if upstream.is_some() {
-                    return upstream;
+                if parked.is_some() {
+                    return parked;
                 }
                 notified.await;
             }
         };
-        tokio::time::timeout(HANDOFF_WAIT, checkout)
+        let Some(parked) = tokio::time::timeout(HANDOFF_WAIT, checkout)
             .await
             .ok()
             .flatten()
+        else {
+            return Ok(None);
+        };
+        let mut probe_guard = HandoffProbeGuard::new(self.clone(), parked);
+        let probe = {
+            let Some(upstream) = probe_guard.upstream_mut() else {
+                return Ok(None);
+            };
+            probe_idle_detailed(upstream, HANDOFF_WAIT.min(PONG_TIMEOUT)).await
+        };
+        let mut state = self.inner.state.lock().await;
+        let Some(parked) = probe_guard.take_parked() else {
+            drop(state);
+            return Ok(None);
+        };
+        if let Err(failure) = probe {
+            state.sessions.remove(&parked.session_id);
+            state.push_closed(
+                parked.connection_id,
+                None,
+                format!("续传连接预检失败：{}", failure.reason()),
+                false,
+            );
+            state.scopes.retain(|_, candidate| {
+                candidate.active_local > 0 || total_connections(candidate) > 0
+            });
+            drop(state);
+            self.close_all(vec![parked.upstream]).await;
+            self.refill(&parked.scope).await;
+            return Err(HandoffCheckoutFailure::Preflight);
+        }
+        if !state.sessions.contains_key(&session_id) {
+            drop(state);
+            self.close_all(vec![parked.upstream]).await;
+            self.refill(&parked.scope).await;
+            return Ok(None);
+        }
+        let Some(entry) = state.scopes.get_mut(scope) else {
+            drop(state);
+            self.close_all(vec![parked.upstream]).await;
+            self.refill(&parked.scope).await;
+            return Ok(None);
+        };
+        entry.leased.remove(&parked.session_id);
+        entry.leased.insert(
+            session_id,
+            ConnectionLease {
+                connection_id: parked.connection_id,
+                server_trace: parked.server_trace,
+                ordinal: parked.ordinal,
+                metadata: parked.metadata,
+            },
+        );
+        state.remove_session(parked.session_id, None);
+        drop(state);
+        Ok(Some(parked.upstream))
     }
 
     async fn expire_handoff(&self, session_id: u64, connection_id: u64) {

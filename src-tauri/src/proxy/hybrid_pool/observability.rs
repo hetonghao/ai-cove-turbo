@@ -64,6 +64,9 @@ pub(crate) struct BoundThreadConnection {
     pub(crate) upstream_trace: Option<String>,
     pub(crate) upstream_generation: u64,
     pub(crate) upstream_ordinal: u64,
+    pub(crate) connection_age_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_probe_age_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]

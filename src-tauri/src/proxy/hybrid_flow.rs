@@ -268,16 +268,21 @@ async fn checkout_handoff_websocket(session: &mut Session, previous_response_id:
     else {
         return;
     };
-    let Some(upstream) = session
+    match session
         .state
         .hybrid_pool
         .checkout_handoff_wait(&session.pool_scope, session.pool_id, thread_id, response_id)
         .await
-    else {
-        return;
-    };
-    session.ready = Some(upstream);
-    session.last_terminal_response_id = Some(response_id.to_owned());
+    {
+        Ok(Some(upstream)) => {
+            session.ready = Some(upstream);
+            session.last_terminal_response_id = Some(response_id.to_owned());
+        }
+        Err(_) => {
+            session.last_terminal_response_id = None;
+        }
+        Ok(None) => {}
+    }
 }
 
 async fn checkout_response_websocket(session: &mut Session, wait: bool) {

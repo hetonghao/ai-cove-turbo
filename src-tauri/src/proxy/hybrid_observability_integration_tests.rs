@@ -50,6 +50,20 @@ async fn wait_for_snapshot(
     })
 }
 
+fn assert_fresh_connection_observation(active_bound: &Value) -> io::Result<()> {
+    let connection_age = active_bound
+        .get("connectionAgeSeconds")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| io::Error::other("connection age missing"))?;
+    let probe_age = active_bound
+        .get("lastProbeAgeSeconds")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| io::Error::other("last probe age missing"))?;
+    assert!(connection_age < 5);
+    assert!(probe_age < 5);
+    Ok(())
+}
+
 #[tokio::test]
 async fn real_hybrid_session_reports_active_idle_and_closed_lifecycle() -> io::Result<()> {
     // Given: 一个已预热的真实 Hybrid WebSocket 会话。
@@ -99,6 +113,7 @@ async fn real_hybrid_session_reports_active_idle_and_closed_lifecycle() -> io::R
         .and_then(Value::as_u64)
         .ok_or_else(|| io::Error::other("upstream generation missing"))?;
     assert!(generation > 0);
+    assert_fresh_connection_observation(active_bound)?;
     let expected_id = format!("S{generation:03}");
     assert_eq!(
         active_bound.get("id").and_then(Value::as_str),

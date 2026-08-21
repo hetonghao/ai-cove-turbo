@@ -237,12 +237,16 @@ pub(super) fn is_client_handshake_header(name: &header::HeaderName) -> bool {
         || name.as_str() == WS_TRACE_HEADER
 }
 
-pub(super) const fn websocket_error_kind(error: &WebSocketError) -> &'static str {
+pub(super) fn websocket_error_kind(error: &WebSocketError) -> &'static str {
     match error {
         WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed => "connection_closed",
+        WebSocketError::Io(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => "eof",
         WebSocketError::Io(_) => "io",
         WebSocketError::Tls(_) => "tls",
         WebSocketError::Protocol(_) => "protocol",
+        WebSocketError::Capacity(
+            tokio_tungstenite::tungstenite::error::CapacityError::MessageTooLong { .. },
+        ) => "message_limit",
         WebSocketError::Capacity(_) => "capacity",
         WebSocketError::Utf8(_) => "utf8",
         WebSocketError::WriteBufferFull(_) => "write_buffer_full",
