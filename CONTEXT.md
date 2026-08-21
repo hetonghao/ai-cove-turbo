@@ -13,6 +13,15 @@ _Avoid_: Codex 原生压缩、传输压缩（当前模式由 Turbo 管理）。
 **WebSocket 模式**：允许 Codex 对 `/v1/responses` 使用 WebSocket 通信的连接模式；它可以独立于压缩模式启用或关闭。
 _Avoid_: SSE 模式、实时模式（它们不是同一个配置概念）。
 
+**Hybrid 连接租约**：本地 WebSocket session 在 Hybrid 模式下对一个受管上游连接的唯一临时持有；租约可以完成请求、被安全丢弃，或在满足 continuation 条件时进入续传，不允许同一 session 同时持有两个上游连接。
+_Avoid_: 连接缓存、可复制连接、已提交请求重放。
+
+**压缩调度预算**：Turbo 在 HTTP 与私有 WebSocket 之间共享的有界压缩执行能力；等待预算不会改变协议语义，取消只放弃当前结果，不触发重放或静默降级。
+_Avoid_: 全局限流、模型配额、网络带宽配额。
+
+**性能证据 artifact**：绑定 Turbo 版本、工具链、运行 profile、固定 workload 指纹和策略常量的版本化性能比较结果；它用于发布前比较实现变化，不属于桌面状态或用户可见收益估算。
+_Avoid_: 运行日志、用户请求记录、精确公网性能承诺。
+
 **受管 Provider**：Codex 根配置中由 `model_provider` 指向、且允许 Turbo 修改连接相关配置的 Provider。
 _Avoid_: 全量配置、所有 Provider（Turbo 不接管无关 Provider）。
 

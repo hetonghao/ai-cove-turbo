@@ -231,6 +231,7 @@ fn compression_gate_ignores_recovered_samples() -> BenchmarkResult<()> {
         messages_per_connection: None,
         retries,
         round_transports: vec![RoundTransport::Http],
+        compression_metrics: None,
     };
     let case = BenchmarkCase {
         scenario: "long-input",
@@ -265,6 +266,7 @@ fn compression_gate_rejects_all_recovered_samples() {
             messages_per_connection: None,
             retries: 1,
             round_transports: vec![RoundTransport::Http],
+            compression_metrics: None,
         }],
     };
 

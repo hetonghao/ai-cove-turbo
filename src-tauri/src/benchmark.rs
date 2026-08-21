@@ -75,6 +75,43 @@ struct Sample {
     messages_per_connection: Option<u64>,
     retries: u64,
     round_transports: Vec<RoundTransport>,
+    compression_metrics: Option<CompressionSampleMetrics>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CompressionSampleMetrics {
+    encode_count: u64,
+    decode_count: u64,
+    queue_wait_ms: u64,
+    work_time_ms: u64,
+    failures: u64,
+    fast_path_count: u64,
+}
+
+fn compression_metric_delta(
+    before: MetricsSnapshot,
+    after: MetricsSnapshot,
+) -> CompressionSampleMetrics {
+    CompressionSampleMetrics {
+        encode_count: after
+            .compression_encode_count
+            .saturating_sub(before.compression_encode_count),
+        decode_count: after
+            .compression_decode_count
+            .saturating_sub(before.compression_decode_count),
+        queue_wait_ms: after
+            .compression_queue_wait_ms
+            .saturating_sub(before.compression_queue_wait_ms),
+        work_time_ms: after
+            .compression_work_time_ms
+            .saturating_sub(before.compression_work_time_ms),
+        failures: after
+            .compression_failures
+            .saturating_sub(before.compression_failures),
+        fast_path_count: after
+            .compression_fast_path_count
+            .saturating_sub(before.compression_fast_path_count),
+    }
 }
 
 #[derive(Debug)]

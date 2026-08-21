@@ -83,7 +83,7 @@ async fn run_http_worker(
         }
         let _ = events
             .send(WorkerEvent::Terminal {
-                upstream: None,
+                lease: None,
                 response_id: None,
             })
             .await;
@@ -169,7 +169,7 @@ pub(super) async fn send_sse_events(
         if terminal {
             events
                 .send(WorkerEvent::Terminal {
-                    upstream: None,
+                    lease: None,
                     response_id: None,
                 })
                 .await

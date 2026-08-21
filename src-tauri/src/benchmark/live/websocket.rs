@@ -18,9 +18,9 @@ use tokio_tungstenite::{
 };
 
 use super::super::{
-    BenchmarkResult, BenchmarkSettings, Completion, HYBRID_PATH, RoundSample, RoundTransport,
-    Sample, WEBSOCKET_PATH, benchmark_error, completion_response_id, metric_delta,
-    payload_with_previous_response_id, response_failure_error,
+    BenchmarkResult, BenchmarkSettings, Completion, CompressionSampleMetrics, HYBRID_PATH,
+    RoundSample, RoundTransport, Sample, WEBSOCKET_PATH, benchmark_error, completion_response_id,
+    metric_delta, payload_with_previous_response_id, response_failure_error,
 };
 use crate::proxy::MetricsSnapshot;
 
@@ -247,6 +247,7 @@ fn request_bytes(round_samples: &[RoundSample]) -> BenchmarkResult<u64> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn sample(
     case: &Case<'_>,
     settings: &BenchmarkSettings,
@@ -314,6 +315,7 @@ async fn sample(
         round_transports.push(transport);
     }
     let connection_counts = observed_connection_counts(case, metrics_before);
+    let compression_metrics = compression_metrics(case, metrics_before);
     timeout(settings.timeout, socket.close(None))
         .await
         .map_err(benchmark_error)?
@@ -349,7 +351,17 @@ async fn sample(
         messages_per_connection: Some(logical_requests),
         retries: 0,
         round_transports,
+        compression_metrics,
     })
+}
+
+fn compression_metrics(
+    case: &Case<'_>,
+    before: MetricsSnapshot,
+) -> Option<CompressionSampleMetrics> {
+    case.metrics
+        .map(crate::proxy::Metrics::snapshot)
+        .map(|after| super::super::compression_metric_delta(before, after))
 }
 
 pub(super) async fn collect_sample(

@@ -14,7 +14,11 @@ use tokio_tungstenite::{
 };
 use url::Url;
 
-use super::{ProxyState, hybrid_pool::ConnectionActivity, private_websocket};
+use super::{
+    ProxyState,
+    hybrid_pool::{ConnectionActivity, Lease},
+    private_websocket,
+};
 
 #[path = "hybrid_common.rs"]
 mod common;
@@ -74,6 +78,7 @@ pub(super) fn spawn(state: ProxyState, request: &mut AxumRequest, target: Url, p
     });
 }
 
+#[allow(clippy::large_futures)]
 async fn run_after_upgrade(
     state: ProxyState,
     client_upgrade: OnUpgrade,
@@ -135,7 +140,7 @@ enum WorkerEvent {
     Message(Message),
     WebSocketSent(WebSocketSendReceipt),
     Terminal {
-        upstream: Option<Box<PrivateWebSocket>>,
+        lease: Option<Box<Lease>>,
         response_id: Option<String>,
     },
     FailedTerminal {

@@ -155,7 +155,7 @@ async fn does_not_forward_done_sentinel_but_forwards_json_terminal() {
     assert!(matches!(
         received.recv().await,
         Some(super::WorkerEvent::Terminal {
-            upstream: None,
+            lease: None,
             response_id: None,
         })
     ));
@@ -178,7 +178,7 @@ async fn does_not_forward_done_sentinel_but_forwards_json_terminal() {
     assert!(matches!(
         received.recv().await,
         Some(super::WorkerEvent::Terminal {
-            upstream: None,
+            lease: None,
             response_id: None,
         })
     ));

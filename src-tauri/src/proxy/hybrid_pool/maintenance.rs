@@ -5,7 +5,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseC
 
 use super::{
     HybridPool, HybridScope, PONG_TIMEOUT, PoolConnection, PoolState, PrivateUpstream,
-    desired_connections, probe::ProbeFailure, probe_idle_detailed, total_connections,
+    ScopeBackend, desired_connections, probe::ProbeFailure, probe_idle_detailed, total_connections,
 };
 
 mod connection;
@@ -22,11 +22,11 @@ fn reclaim_idle(state: &mut PoolState, scope: &HybridScope, count: usize) -> Vec
             }
             let take = count
                 .saturating_sub(reclaimed.len())
-                .min(candidate.idle.len());
+                .min(candidate.idle_len());
             reclaimed.extend(
                 candidate
                     .idle
-                    .drain(candidate.idle.len().saturating_sub(take)..),
+                    .drain(candidate.idle_len().saturating_sub(take)..),
             );
             if reclaimed.len() == count {
                 return reclaimed;
@@ -36,11 +36,11 @@ fn reclaim_idle(state: &mut PoolState, scope: &HybridScope, count: usize) -> Vec
     if let Some(candidate) = state.scopes.get_mut(scope) {
         let take = count
             .saturating_sub(reclaimed.len())
-            .min(candidate.idle.len());
+            .min(candidate.idle_len());
         reclaimed.extend(
             candidate
                 .idle
-                .drain(candidate.idle.len().saturating_sub(take)..),
+                .drain(candidate.idle_len().saturating_sub(take)..),
         );
     }
     reclaimed
@@ -54,7 +54,7 @@ impl HybridPool {
             let global_leased = state
                 .scopes
                 .values()
-                .map(|candidate| candidate.leased.len())
+                .map(ScopeBackend::leased_len)
                 .sum::<usize>();
             let global_desired = desired_connections(global_leased);
             let available = global_desired.saturating_sub(global_total);
@@ -65,7 +65,7 @@ impl HybridPool {
                 .filter(|(candidate_scope, candidate)| {
                     *candidate_scope != scope && candidate.active_local == 0
                 })
-                .map(|(_, candidate)| candidate.idle.len())
+                .map(|(_, candidate)| candidate.idle_len())
                 .sum::<usize>();
             let Some(entry) = state.scopes.get(scope) else {
                 return;
@@ -79,7 +79,7 @@ impl HybridPool {
             let leased_local = entry.leased.len();
             let ready_needed = usize::from(
                 active_local > leased_local
-                    && entry.idle.is_empty()
+                    && entry.idle_len() == 0
                     && entry.connecting == 0
                     && entry.probing == 0,
             );
@@ -104,7 +104,7 @@ impl HybridPool {
             let remaining_total = global_total.saturating_sub(reclaimed.len());
             let connecting = needed.min(global_desired.saturating_sub(remaining_total));
             if let Some(entry) = state.scopes.get_mut(scope) {
-                entry.connecting = entry.connecting.saturating_add(connecting);
+                entry.add_connecting(connecting);
             }
             let plan = (connecting, spec, reclaimed);
             drop(state);
@@ -174,11 +174,11 @@ impl HybridPool {
             let Some(entry) = state.scopes.get_mut(scope) else {
                 return false;
             };
-            if entry.idle.is_empty() {
+            if entry.idle_len() == 0 {
                 return false;
             }
             let connection = entry.idle.remove(0);
-            entry.probing = entry.probing.saturating_add(1);
+            entry.add_probing();
             drop(state);
             connection
         };
@@ -194,7 +194,7 @@ impl HybridPool {
             drop(state);
             return false;
         };
-        entry.probing = entry.probing.saturating_sub(1);
+        entry.remove_probing();
         let Some(connection) = probe_guard.take_connection() else {
             drop(state);
             return false;
@@ -308,7 +308,7 @@ impl Drop for MaintenanceProbeGuard {
         tokio::spawn(async move {
             let mut state = pool.inner.state.lock().await;
             if let Some(entry) = state.scopes.get_mut(&scope) {
-                entry.probing = entry.probing.saturating_sub(1);
+                entry.remove_probing();
                 state.push_closed(
                     connection.id,
                     None,

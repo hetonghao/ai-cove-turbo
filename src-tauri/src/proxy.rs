@@ -1,7 +1,6 @@
 use std::{
     collections::HashSet,
     fmt,
-    io::Cursor,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
     sync::{
@@ -30,6 +29,7 @@ use serde::Serialize;
 use tokio::{io::copy_bidirectional, net::TcpListener, sync::oneshot, task::JoinHandle};
 use url::Url;
 
+mod compression;
 mod hybrid;
 mod hybrid_pool;
 mod private_websocket;
@@ -38,6 +38,7 @@ mod private_websocket;
 pub(crate) mod private_websocket_benchmark;
 pub(crate) mod traffic;
 
+use compression::CompressionScheduler;
 pub(crate) use hybrid_pool::ConnectionSnapshot;
 use private_websocket::{PrivateTlsConfig, client_upgrade_response};
 
@@ -146,6 +147,12 @@ pub(crate) struct MetricsSnapshot {
     pub(crate) hybrid_recovery_http: u64,
     pub(crate) hybrid_large_request_http: u64,
     pub(crate) direct_http: u64,
+    pub(crate) compression_encode_count: u64,
+    pub(crate) compression_decode_count: u64,
+    pub(crate) compression_queue_wait_ms: u64,
+    pub(crate) compression_work_time_ms: u64,
+    pub(crate) compression_failures: u64,
+    pub(crate) compression_fast_path_count: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -207,6 +214,7 @@ impl Metrics {
 
     pub(crate) fn snapshot(&self) -> MetricsSnapshot {
         let route_counts = self.traffic.route_counts();
+        let compression = CompressionScheduler::shared().metrics_snapshot();
         MetricsSnapshot {
             requests: self.requests.load(Ordering::Relaxed),
             successful_responses: self.successful_responses.load(Ordering::Relaxed),
@@ -237,6 +245,12 @@ impl Metrics {
             hybrid_recovery_http: route_counts.hybrid_recovery_http,
             hybrid_large_request_http: route_counts.hybrid_large_request_http,
             direct_http: route_counts.direct_http,
+            compression_encode_count: compression.encode_count,
+            compression_decode_count: compression.decode_count,
+            compression_queue_wait_ms: compression.queue_wait_ms,
+            compression_work_time_ms: compression.work_time_ms,
+            compression_failures: compression.failures,
+            compression_fast_path_count: compression.fast_path_count,
         }
     }
 
@@ -716,7 +730,10 @@ async fn proxy_http(
     let should_compress = state.compression_enabled.load(Ordering::Relaxed)
         && is_compressible_json(&parts.method, &parts.headers);
     let (outbound_body, compressed) = if should_compress {
-        match compress_if_smaller(raw_body.clone()).await {
+        match CompressionScheduler::shared()
+            .encode_http(raw_body.clone())
+            .await
+        {
             Ok(Some(compressed)) => (compressed, true),
             Ok(None) => (raw_body, false),
             Err(()) => {
@@ -916,24 +933,9 @@ fn is_compressible_json(method: &Method, headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
 }
 
-async fn compress_if_smaller(body: Bytes) -> Result<Option<Bytes>, ()> {
-    if body.len() < MIN_COMPRESSION_INPUT_BYTES {
-        return Ok(None);
-    }
-    let original_len = body.len();
-    tokio::task::spawn_blocking(move || {
-        zstd::stream::encode_all(Cursor::new(body), 3)
-            .map(Bytes::from)
-            .map(|compressed| (compressed.len() < original_len).then_some(compressed))
-            .map_err(|_| ())
-    })
-    .await
-    .map_err(|_| ())?
-}
-
 #[cfg(test)]
 pub(crate) async fn measure_http_encoding(body: Bytes) -> Result<Option<Bytes>, ()> {
-    compress_if_smaller(body).await
+    CompressionScheduler::shared().encode_http(body).await
 }
 
 #[cfg(test)]

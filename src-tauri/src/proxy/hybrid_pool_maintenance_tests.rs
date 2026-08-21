@@ -92,7 +92,7 @@ async fn checkout_remains_available_while_keepalive_probe_waits() -> io::Result<
         let session_id = state.register_session(scope_fingerprint);
         state.scopes.insert(
             scope.clone(),
-            ScopeState {
+            ScopeBackend {
                 target,
                 headers: HeaderMap::new(),
                 diagnostics: ScopeDiagnostics::default(),
@@ -164,7 +164,7 @@ async fn sole_idle_reserve_is_probed_before_it_is_reused() -> io::Result<()> {
         let session_id = state.register_session(scope_fingerprint);
         state.scopes.insert(
             scope.clone(),
-            ScopeState {
+            ScopeBackend {
                 target,
                 headers: HeaderMap::new(),
                 diagnostics: ScopeDiagnostics::default(),
@@ -261,7 +261,7 @@ async fn cancelled_checkout_preflight_releases_probe_slot() -> io::Result<()> {
         let session_id = state.register_session(fingerprint);
         state.scopes.insert(
             scope.clone(),
-            ScopeState {
+            ScopeBackend {
                 target,
                 headers: HeaderMap::new(),
                 diagnostics: ScopeDiagnostics::default(),
@@ -366,7 +366,7 @@ async fn checkout_replaces_failed_preflight_before_leasing_application_work() ->
         let session_id = state.register_session(scope_fingerprint);
         state.scopes.insert(
             scope.clone(),
-            ScopeState {
+            ScopeBackend {
                 target,
                 headers: HeaderMap::new(),
                 diagnostics: ScopeDiagnostics::default(),

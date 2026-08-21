@@ -137,6 +137,7 @@ mod tests {
                     messages_per_connection: None,
                     retries: 0,
                     round_transports: vec![RoundTransport::Http],
+                    compression_metrics: None,
                 })
                 .collect(),
         }

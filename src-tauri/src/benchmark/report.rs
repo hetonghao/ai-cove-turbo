@@ -4,6 +4,7 @@ use super::{
     BenchmarkCase, BenchmarkSettings, HYBRID_PATH, LatencyMsSummary, Sample, summarize_latency,
 };
 
+mod artifact;
 mod render;
 
 pub(super) fn print_report(
@@ -11,6 +12,13 @@ pub(super) fn print_report(
     cases: &[BenchmarkCase],
 ) -> Result<(), io::Error> {
     render::print_report(settings, cases)
+}
+
+pub(super) fn write_metrics_artifact_if_requested(
+    settings: &BenchmarkSettings,
+    cases: &[BenchmarkCase],
+) -> Result<(), io::Error> {
+    artifact::write_if_requested(settings, cases)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -337,6 +345,7 @@ mod tests {
                     super::super::RoundTransport::WebSocket,
                     super::super::RoundTransport::WebSocket,
                 ],
+                compression_metrics: None,
             }],
         };
 
@@ -402,6 +411,7 @@ mod tests {
                     super::super::RoundTransport::WebSocket,
                     super::super::RoundTransport::WebSocket,
                 ],
+                compression_metrics: None,
             }],
         };
 
@@ -451,6 +461,7 @@ mod tests {
             messages_per_connection: Some(websocket_messages),
             retries,
             round_transports,
+            compression_metrics: None,
         };
         let case = BenchmarkCase {
             scenario: "multi-turn",
@@ -531,6 +542,7 @@ mod tests {
             messages_per_connection: Some(1),
             retries: 0,
             round_transports: vec![super::super::RoundTransport::WebSocket],
+            compression_metrics: None,
         };
         let case = BenchmarkCase {
             scenario: "single-turn",
@@ -572,6 +584,7 @@ mod tests {
             messages_per_connection: None,
             retries: 0,
             round_transports: vec![super::super::RoundTransport::Http; 2],
+            compression_metrics: None,
         };
         let case = BenchmarkCase {
             scenario: "continuation",
@@ -607,6 +620,7 @@ mod tests {
             messages_per_connection: None,
             retries,
             round_transports: vec![super::super::RoundTransport::Http],
+            compression_metrics: None,
         };
         let case = BenchmarkCase {
             scenario: "single-turn",
@@ -647,6 +661,7 @@ mod tests {
                 messages_per_connection: None,
                 retries: 1,
                 round_transports: vec![super::super::RoundTransport::Http],
+                compression_metrics: None,
             }],
         };
 

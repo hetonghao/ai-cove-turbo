@@ -5,7 +5,7 @@ use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
 use crate::proxy::HttpTraffic;
 
-use super::super::hybrid_pool::LeaseRetirement;
+use super::super::hybrid_pool::{Lease, LeaseRetirement};
 use super::{
     Active, ClientWebSocket, Session,
     common::{close_client, event_type, reject_thread_switch, send_error},
@@ -14,6 +14,7 @@ use super::{
     websocket,
 };
 
+#[allow(clippy::large_futures)]
 pub(super) async fn handle_idle(
     client: &mut ClientWebSocket,
     session: &mut Session,
@@ -27,14 +28,7 @@ pub(super) async fn handle_idle(
         )
         .await
     } else if session.response_started {
-        select_waiting_idle(
-            client.next(),
-            session
-                .state
-                .hybrid_pool
-                .checkout_ready(&session.pool_scope, session.pool_id),
-        )
-        .await
+        select_waiting_idle(client.next(), session.handle.checkout_ready()).await
     } else {
         IdleSelection::Client(client.next().await)
     };
@@ -42,6 +36,7 @@ pub(super) async fn handle_idle(
         IdleSelection::Client(message) => {
             handle_idle_client_message(client, session, active_response, message).await
         }
+        IdleSelection::Closed => false,
         IdleSelection::PoolReady(upstream) => {
             session.ready = Some(*upstream);
             session.drain_reconnect_pending = false;
@@ -55,7 +50,8 @@ pub(super) async fn handle_idle(
 
 pub(super) enum IdleSelection {
     Client(Option<Result<Message, WebSocketError>>),
-    PoolReady(Box<super::PrivateWebSocket>),
+    PoolReady(Box<Lease>),
+    Closed,
     Ready(Option<Result<Message, WebSocketError>>),
     Keepalive,
 }
@@ -66,11 +62,14 @@ pub(super) async fn select_waiting_idle<Client, PoolReady>(
 ) -> IdleSelection
 where
     Client: Future<Output = Option<Result<Message, WebSocketError>>>,
-    PoolReady: Future<Output = super::PrivateWebSocket>,
+    PoolReady: Future<Output = Option<Lease>>,
 {
     tokio::select! {
         biased;
-        upstream = pool_ready => IdleSelection::PoolReady(Box::new(upstream)),
+        upstream = pool_ready => upstream.map_or_else(
+            || IdleSelection::Closed,
+            |upstream| IdleSelection::PoolReady(Box::new(upstream)),
+        ),
         message = client => IdleSelection::Client(message),
     }
 }
@@ -94,12 +93,13 @@ where
 }
 
 pub(super) async fn poll_ready(
-    ready: &mut Option<super::PrivateWebSocket>,
+    ready: &mut Option<Lease>,
 ) -> Option<Result<Message, WebSocketError>> {
     let ready = ready.as_mut()?;
-    ready.next().await
+    ready.upstream_mut()?.next().await
 }
 
+#[allow(clippy::large_futures)]
 pub(super) async fn handle_idle_client_message(
     client: &mut ClientWebSocket,
     session: &mut Session,
@@ -153,6 +153,7 @@ async fn reject_missing_continuation(
     true
 }
 
+#[allow(clippy::large_futures)]
 async fn start_response(
     client: &mut ClientWebSocket,
     session: &mut Session,
@@ -205,17 +206,13 @@ async fn start_response(
         )
         .await;
     }
-    if !large_http_request && let Some(upstream) = session.ready.take() {
-        session
-            .state
-            .hybrid_pool
-            .record_response_create(&session.pool_scope, session.pool_id)
-            .await;
+    if !large_http_request && let Some(lease) = session.ready.take() {
+        session.handle.record_response_create().await;
         session
             .observe_activity(super::ConnectionActivity::Up)
             .await;
         *active = Some(websocket::start_websocket_worker(
-            upstream,
+            lease,
             payload,
             original_binary,
             std::sync::Arc::clone(&session.state.metrics),
@@ -227,12 +224,7 @@ async fn start_response(
 
     let traffic = if large_http_request {
         HttpTraffic::HYBRID_LARGE_REQUEST
-    } else if session
-        .state
-        .hybrid_pool
-        .has_initialized(&session.pool_scope)
-        .await
-    {
+    } else if session.handle.has_initialized().await {
         HttpTraffic::HYBRID_RECOVERY
     } else {
         HttpTraffic::HYBRID_COLD_START
@@ -269,9 +261,8 @@ async fn checkout_handoff_websocket(session: &mut Session, previous_response_id:
         return;
     };
     match session
-        .state
-        .hybrid_pool
-        .checkout_handoff_wait(&session.pool_scope, session.pool_id, thread_id, response_id)
+        .handle
+        .checkout_handoff_wait(thread_id, response_id)
         .await
     {
         Ok(Some(upstream)) => {
@@ -287,17 +278,9 @@ async fn checkout_handoff_websocket(session: &mut Session, previous_response_id:
 
 async fn checkout_response_websocket(session: &mut Session, wait: bool) {
     if session.ready.is_none() {
-        session.ready = session
-            .state
-            .hybrid_pool
-            .checkout(&session.pool_scope, session.pool_id)
-            .await;
+        session.ready = session.handle.checkout().await;
     }
     if session.ready.is_none() && wait {
-        session.ready = session
-            .state
-            .hybrid_pool
-            .checkout_wait(&session.pool_scope, session.pool_id, Duration::from_secs(2))
-            .await;
+        session.ready = session.handle.checkout_wait(Duration::from_secs(2)).await;
     }
 }

@@ -1589,6 +1589,7 @@ mod tests {
                                 .then_some(websocket_messages),
                             retries: 0,
                             round_transports,
+                            compression_metrics: None,
                         }
                     })
                     .collect(),

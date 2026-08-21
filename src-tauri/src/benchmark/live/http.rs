@@ -178,6 +178,9 @@ pub(super) async fn collect_sample(
         .metrics
         .map(crate::proxy::Metrics::snapshot)
         .unwrap_or_default();
+    let compression_metrics = case
+        .metrics
+        .map(|_| super::super::compression_metric_delta(before, after));
     let logical_requests = u64::try_from(case.payloads.len()).map_err(benchmark_error)?;
     let http_requests = after.requests.saturating_sub(before.requests);
     let (raw_bytes, encoded_bytes) = if case.metrics.is_some() {
@@ -234,6 +237,7 @@ pub(super) async fn collect_sample(
         messages_per_connection: None,
         retries: 0,
         round_transports: vec![RoundTransport::Http; case.payloads.len()],
+        compression_metrics,
     })
 }
 

@@ -28,7 +28,7 @@ pub(super) fn spawn_connection(inner: Arc<PoolInner>, scope: HybridScope, spec: 
                 let mut state = inner.state.lock().await;
                 let (remove, retry) = if let Some(entry) = state.scopes.get_mut(&scope) {
                     entry.connecting = entry.connecting.saturating_sub(1);
-                    entry.diagnostics.record_failure(failure);
+                    entry.record_failure(failure);
                     (
                         entry.active_local == 0 && total_connections(entry) == 0,
                         entry.active_local > 0,

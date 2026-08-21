@@ -42,10 +42,10 @@ fn pool_counts(state: &PoolState) -> PoolCounts {
         |counts, scope| PoolCounts {
             current_connections: counts
                 .current_connections
-                .saturating_add(scope.idle.len())
-                .saturating_add(scope.leased.len())
+                .saturating_add(scope.idle_len())
+                .saturating_add(scope.leased_len())
                 .saturating_add(scope.probing),
-            prewarm: counts.prewarm.saturating_add(scope.idle.len()),
+            prewarm: counts.prewarm.saturating_add(scope.idle_len()),
         },
     )
 }
@@ -113,7 +113,7 @@ fn append_pool_transitions(snapshot: &mut ConnectionSnapshot, state: &PoolState,
         let mut waiting_since: Option<Instant> = None;
         for (session_id, session) in &state.sessions {
             if session.scope_fingerprint != fingerprint
-                || entry.leased.contains_key(session_id)
+                || entry.has_lease(*session_id)
                 || matches!(&session.state, ObservedSessionState::Recovering(_))
             {
                 continue;
@@ -127,12 +127,12 @@ fn append_pool_transitions(snapshot: &mut ConnectionSnapshot, state: &PoolState,
             continue;
         };
         let failure = entry
-            .diagnostics
+            .diagnostics()
             .last_failure
             .map_or_else(String::new, |reason| {
                 format!(
                     " · 最近握手失败：{reason}（累计 {} 次）",
-                    entry.diagnostics.failed_attempts
+                    entry.diagnostics().failed_attempts
                 )
             });
         snapshot.transitions.push(ConnectionTransition {
@@ -143,7 +143,7 @@ fn append_pool_transitions(snapshot: &mut ConnectionSnapshot, state: &PoolState,
             stage: "等待可用连接".to_owned(),
             detail: format!(
                 "连接组 {fingerprint} · {waiting_count} 个会话等待 · 空白预热 {} · 建立中 {} · 检查中 {}{failure}",
-                entry.idle.len(),
+                entry.idle_len(),
                 entry.connecting,
                 entry.probing,
             ),

@@ -9,21 +9,28 @@ use url::Url;
 
 use super::{
     Metrics,
-    private_websocket::{PrivateTlsConfig, PrivateUpstream},
+    private_websocket::{PrivateConnectFailure, PrivateTlsConfig, PrivateUpstream},
 };
 
+mod cleanup;
 mod diagnostics;
+mod lease;
 mod maintenance;
 mod observability;
 mod probe;
 mod scope;
+mod session;
 use diagnostics::ScopeDiagnostics;
+pub(super) use lease::Lease;
+#[cfg(test)]
+pub(super) use lease::LeaseState;
 pub(crate) use observability::ConnectionSnapshot;
 use observability::{ClosedRecord, ObservedSession};
 pub(super) use observability::{ConnectionActivity, ConnectionObservation, LeaseRetirement};
 pub(super) use probe::{probe_idle, probe_idle_detailed};
 pub(super) use scope::HybridScope;
 use scope::blank_connection_headers;
+pub(super) use session::{HandoffCheckoutFailure, SessionHandle};
 
 #[cfg(test)]
 #[path = "hybrid_pool_tests.rs"]
@@ -72,7 +79,7 @@ struct PoolInner {
 
 #[derive(Default)]
 struct PoolState {
-    scopes: HashMap<HybridScope, ScopeState>,
+    scopes: HashMap<HybridScope, ScopeBackend>,
     next_session_id: u64,
     next_connection_id: u64,
     sessions: HashMap<u64, ObservedSession>,
@@ -81,7 +88,7 @@ struct PoolState {
     recent_closed: std::collections::VecDeque<ClosedRecord>,
 }
 
-struct ScopeState {
+pub(super) struct ScopeBackend {
     target: Url,
     headers: HeaderMap,
     diagnostics: ScopeDiagnostics,
@@ -91,6 +98,89 @@ struct ScopeState {
     connecting: usize,
     probing: usize,
     idle: Vec<PoolConnection>,
+}
+
+impl ScopeBackend {
+    fn take_idle_connection(&mut self, session_id: u64) -> Option<(PoolConnection, bool)> {
+        if self.leased.contains_key(&session_id) {
+            return None;
+        }
+        let connection = self.idle.pop()?;
+        let needs_preflight = connection
+            .metadata
+            .last_probe_at
+            .is_none_or(|last_probe| last_probe.elapsed() >= KEEPALIVE_INTERVAL);
+        if needs_preflight {
+            self.probing = self.probing.saturating_add(1);
+        } else {
+            self.insert_lease(session_id, &connection);
+        }
+        Some((connection, needs_preflight))
+    }
+
+    fn insert_lease(&mut self, session_id: u64, connection: &PoolConnection) {
+        self.leased.insert(
+            session_id,
+            ConnectionLease {
+                connection_id: connection.id,
+                server_trace: connection.server_trace.clone(),
+                ordinal: connection.ordinal,
+                metadata: connection.metadata,
+            },
+        );
+    }
+
+    fn remove_lease(&mut self, session_id: u64) -> Option<ConnectionLease> {
+        self.leased.remove(&session_id)
+    }
+
+    fn insert_lease_record(&mut self, session_id: u64, lease: ConnectionLease) {
+        self.leased.insert(session_id, lease);
+    }
+
+    const fn add_active_local(&mut self) {
+        self.active_local = self.active_local.saturating_add(1);
+    }
+
+    const fn remove_active_local(&mut self) {
+        self.active_local = self.active_local.saturating_sub(1);
+    }
+
+    const fn add_connecting(&mut self, count: usize) {
+        self.connecting = self.connecting.saturating_add(count);
+    }
+
+    const fn add_probing(&mut self) {
+        self.probing = self.probing.saturating_add(1);
+    }
+
+    const fn remove_probing(&mut self) {
+        self.probing = self.probing.saturating_sub(1);
+    }
+
+    fn idle_len(&self) -> usize {
+        self.idle.len()
+    }
+
+    fn leased_len(&self) -> usize {
+        self.leased.len()
+    }
+
+    fn has_lease(&self, session_id: u64) -> bool {
+        self.leased.contains_key(&session_id)
+    }
+
+    const fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    const fn record_failure(&mut self, failure: PrivateConnectFailure) {
+        self.diagnostics.record_failure(failure);
+    }
+
+    const fn diagnostics(&self) -> &ScopeDiagnostics {
+        &self.diagnostics
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -151,41 +241,16 @@ fn take_idle_connection(
     if !state.sessions.contains_key(&session_id) {
         return None;
     }
-    let entry = state.scopes.get_mut(scope)?;
-    if entry.leased.contains_key(&session_id) {
-        return None;
-    }
-    entry.idle.pop().map(|connection| {
-        let needs_preflight = connection
-            .metadata
-            .last_probe_at
-            .is_none_or(|last_probe| last_probe.elapsed() >= KEEPALIVE_INTERVAL);
-        if needs_preflight {
-            entry.probing = entry.probing.saturating_add(1);
-        } else {
-            entry.leased.insert(
-                session_id,
-                ConnectionLease {
-                    connection_id: connection.id,
-                    server_trace: connection.server_trace.clone(),
-                    ordinal: connection.ordinal,
-                    metadata: connection.metadata,
-                },
-            );
-        }
-        (connection, needs_preflight)
-    })
+    state
+        .scopes
+        .get_mut(scope)?
+        .take_idle_connection(session_id)
 }
 
 struct CheckoutProbeGuard {
     pool: HybridPool,
     scope: HybridScope,
     connection: Option<PoolConnection>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum HandoffCheckoutFailure {
-    Preflight,
 }
 
 struct HandoffProbeGuard {
@@ -265,7 +330,7 @@ impl Drop for CheckoutProbeGuard {
         tokio::spawn(async move {
             let mut state = pool.inner.state.lock().await;
             if let Some(entry) = state.scopes.get_mut(&scope) {
-                entry.probing = entry.probing.saturating_sub(1);
+                entry.remove_probing();
                 state.push_closed(
                     connection.id,
                     None,
@@ -313,7 +378,7 @@ impl HybridPool {
             let entry = state
                 .scopes
                 .entry(scope.clone())
-                .or_insert_with(|| ScopeState {
+                .or_insert_with(|| ScopeBackend {
                     target,
                     headers,
                     diagnostics: ScopeDiagnostics::default(),
@@ -324,11 +389,21 @@ impl HybridPool {
                     probing: 0,
                     idle: Vec::new(),
                 });
-            entry.active_local = entry.active_local.saturating_add(1);
+            entry.add_active_local();
             state.register_session(scope_fingerprint)
         };
         self.refill(scope).await;
         session_id
+    }
+
+    pub(super) async fn open_session(
+        &self,
+        scope: &HybridScope,
+        target: Url,
+        headers: HeaderMap,
+    ) -> SessionHandle {
+        let session_id = self.register(scope, target, headers).await;
+        SessionHandle::new(self.clone(), scope.clone(), session_id)
     }
 
     pub(super) async fn unregister(&self, scope: &HybridScope, session_id: u64) {
@@ -339,10 +414,9 @@ impl HybridPool {
                 return;
             };
             let (connection_id, to_close) = {
-                entry.active_local = entry.active_local.saturating_sub(1);
+                entry.remove_active_local();
                 let connection_id = entry
-                    .leased
-                    .remove(&session_id)
+                    .remove_lease(session_id)
                     .map(|lease| lease.connection_id);
                 let desired = desired_connections(entry.leased.len());
                 let excess = total_connections(entry).saturating_sub(desired);
@@ -413,13 +487,13 @@ impl HybridPool {
                     probe_idle_detailed(upstream, PONG_TIMEOUT).await
                 };
                 let mut state = self.inner.state.lock().await;
-                let Some(connection) = probe_guard.take_connection() else {
+                let Some(mut connection) = probe_guard.take_connection() else {
                     drop(state);
                     return None;
                 };
                 if !state.sessions.contains_key(&session_id) {
                     if let Some(entry) = state.scopes.get_mut(scope) {
-                        entry.probing = entry.probing.saturating_sub(1);
+                        entry.remove_probing();
                     }
                     drop(state);
                     self.close_detached(vec![connection.upstream]);
@@ -431,17 +505,10 @@ impl HybridPool {
                     self.close_detached(vec![connection.upstream]);
                     return None;
                 };
-                entry.probing = entry.probing.saturating_sub(1);
+                entry.remove_probing();
                 if probe.is_ok() {
-                    entry.leased.insert(
-                        session_id,
-                        ConnectionLease {
-                            connection_id,
-                            server_trace: connection.server_trace,
-                            ordinal: connection.ordinal,
-                            metadata: connection.metadata.verified_now(),
-                        },
-                    );
+                    connection.metadata = connection.metadata.verified_now();
+                    entry.insert_lease(session_id, &connection);
                     drop(state);
                     let pool = self.clone();
                     let scope = scope.clone();
@@ -500,7 +567,7 @@ impl HybridPool {
             .await
             .scopes
             .get(scope)
-            .is_some_and(|entry| entry.initialized)
+            .is_some_and(ScopeBackend::is_initialized)
     }
 
     #[cfg(test)]
@@ -529,7 +596,7 @@ impl HybridPool {
             let connection_id = state
                 .scopes
                 .get_mut(scope)
-                .and_then(|entry| entry.leased.remove(&session_id))
+                .and_then(|entry| entry.remove_lease(session_id))
                 .map(|lease| lease.connection_id);
             state.release_session(session_id, connection_id);
             drop(state);
@@ -559,11 +626,11 @@ impl HybridPool {
             let Some(entry) = state.scopes.get_mut(scope) else {
                 return Err(upstream);
             };
-            let Some(lease) = entry.leased.remove(&session_id) else {
+            let Some(lease) = entry.remove_lease(session_id) else {
                 return Err(upstream);
             };
             let connection_id = lease.connection_id;
-            entry.active_local = entry.active_local.saturating_sub(1);
+            entry.remove_active_local();
             state.release_session(session_id, None);
             state.handoffs.push(ParkedConnection {
                 scope: scope.clone(),
@@ -670,8 +737,8 @@ impl HybridPool {
             self.refill(&parked.scope).await;
             return Ok(None);
         };
-        entry.leased.remove(&parked.session_id);
-        entry.leased.insert(
+        entry.remove_lease(parked.session_id);
+        entry.insert_lease_record(
             session_id,
             ConnectionLease {
                 connection_id: parked.connection_id,
@@ -695,7 +762,7 @@ impl HybridPool {
             };
             let parked = state.handoffs.swap_remove(index);
             if let Some(entry) = state.scopes.get_mut(&parked.scope) {
-                entry.leased.remove(&session_id);
+                entry.remove_lease(session_id);
             }
             state.remove_session(session_id, Some(connection_id));
             state.scopes.retain(|_, candidate| {
@@ -719,7 +786,7 @@ impl HybridPool {
             let connection_id = state
                 .scopes
                 .get_mut(scope)
-                .and_then(|entry| entry.leased.remove(&session_id))
+                .and_then(|entry| entry.remove_lease(session_id))
                 .map(|lease| lease.connection_id);
             state.retire_session(session_id, connection_id, retirement);
             drop(state);
@@ -744,7 +811,7 @@ const fn desired_connections(leased_connections: usize) -> usize {
     }
 }
 
-fn total_connections(scope: &ScopeState) -> usize {
+fn total_connections(scope: &ScopeBackend) -> usize {
     scope
         .idle
         .len()

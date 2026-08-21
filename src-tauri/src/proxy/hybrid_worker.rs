@@ -118,10 +118,7 @@ pub(super) async fn handle_worker_event(
             session.websocket_receipt = Some(receipt);
             true
         }
-        WorkerEvent::Terminal {
-            upstream,
-            response_id,
-        } => {
+        WorkerEvent::Terminal { lease, response_id } => {
             let Some(finished) = active.take() else {
                 return false;
             };
@@ -134,7 +131,7 @@ pub(super) async fn handle_worker_event(
                 if response_id.is_some() {
                     session.last_terminal_response_id = response_id;
                 }
-                session.ready = upstream.map(|upstream| *upstream);
+                session.ready = lease.map(|lease| *lease);
                 if session.ready.is_some() {
                     session.observe_idle().await;
                 } else {

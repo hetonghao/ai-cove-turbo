@@ -5,12 +5,12 @@ use url::Url;
 
 use super::super::{
     ProxyState,
-    hybrid_pool::{ConnectionActivity, ConnectionObservation, HybridScope, LeaseRetirement},
+    hybrid_pool::{
+        ConnectionActivity, ConnectionObservation, HybridScope, Lease, LeaseRetirement,
+        SessionHandle,
+    },
 };
-use super::{
-    Active, ActiveKind, ClientWebSocket, PrivateWebSocket, WebSocketSendReceipt, WorkerEvent, flow,
-    worker,
-};
+use super::{Active, ActiveKind, ClientWebSocket, WebSocketSendReceipt, WorkerEvent, flow, worker};
 
 enum ActiveSelection {
     Client(Option<Result<Message, WebSocketError>>),
@@ -23,11 +23,10 @@ pub(super) struct Session {
     pub(super) request_uri: Uri,
     pub(super) target: Url,
     pub(super) path: String,
-    pub(super) pool_scope: HybridScope,
-    pub(super) ready: Option<PrivateWebSocket>,
+    pub(super) handle: SessionHandle,
+    pub(super) ready: Option<Lease>,
     pub(super) websocket_receipt: Option<WebSocketSendReceipt>,
     pub(super) max_websocket_request_bytes: usize,
-    pub(super) pool_id: u64,
     observed_activity: Option<ConnectionActivity>,
     pub(super) thread_id: Option<String>,
     pub(super) last_terminal_response_id: Option<String>,
@@ -45,9 +44,9 @@ impl Session {
         path: String,
     ) -> Self {
         let pool_scope = HybridScope::new(&target, &client_headers);
-        let pool_id = state
+        let handle = state
             .hybrid_pool
-            .register(&pool_scope, target.clone(), client_headers.clone())
+            .open_session(&pool_scope, target.clone(), client_headers.clone())
             .await;
         Self {
             state,
@@ -55,11 +54,10 @@ impl Session {
             request_uri,
             target,
             path,
-            pool_scope,
+            handle,
             ready: None,
             websocket_receipt: None,
             max_websocket_request_bytes: super::MAX_HYBRID_WEBSOCKET_REQUEST_BYTES,
-            pool_id,
             observed_activity: None,
             thread_id: None,
             last_terminal_response_id: None,
@@ -79,9 +77,8 @@ impl Session {
         let Some(thread_id) = self.thread_id.clone() else {
             return true;
         };
-        self.state
-            .hybrid_pool
-            .observe_session(self.pool_id, ConnectionObservation::Bound { thread_id })
+        self.handle
+            .observe(ConnectionObservation::Bound { thread_id })
             .await;
         self.observed_activity = self.ready.as_ref().map(|_| ConnectionActivity::Idle);
         true
@@ -91,9 +88,8 @@ impl Session {
         if self.thread_id.is_none() || self.observed_activity == Some(activity) {
             return;
         }
-        self.state
-            .hybrid_pool
-            .observe_session(self.pool_id, ConnectionObservation::Active(activity))
+        self.handle
+            .observe(ConnectionObservation::Active(activity))
             .await;
         self.observed_activity = Some(activity);
     }
@@ -102,31 +98,26 @@ impl Session {
         if self.thread_id.is_none() || self.observed_activity == Some(ConnectionActivity::Idle) {
             return;
         }
-        self.state
-            .hybrid_pool
-            .observe_session(self.pool_id, ConnectionObservation::Idle)
-            .await;
+        self.handle.observe(ConnectionObservation::Idle).await;
         self.observed_activity = Some(ConnectionActivity::Idle);
     }
 
     pub(super) async fn discard(&mut self, retirement: LeaseRetirement) {
-        self.state
-            .hybrid_pool
-            .discard(&self.pool_scope, self.pool_id, retirement)
-            .await;
+        if let Some(mut lease) = self.ready.take() {
+            lease.discard(retirement.clone()).await;
+        } else {
+            self.handle.discard_unleased(retirement).await;
+        }
         self.last_terminal_response_id = None;
         self.observed_activity = None;
     }
 
     pub(super) async fn retire_idle_upstream(&mut self, retirement: LeaseRetirement) {
-        let upstream = self.ready.take();
         self.discard(retirement).await;
-        if let Some(upstream) = upstream {
-            self.state.hybrid_pool.close_all(vec![upstream]).await;
-        }
     }
 }
 
+#[allow(clippy::large_futures)]
 pub(super) async fn run(session: &mut Session, mut client: ClientWebSocket) {
     let mut active: Option<Active> = None;
     loop {
@@ -182,44 +173,22 @@ async fn cleanup(session: &mut Session, active: &mut Option<Active>) {
         active.task.abort();
         if active.kind == ActiveKind::WebSocket {
             session.state.metrics.record_websocket_closed();
-            session
-                .state
-                .hybrid_pool
-                .release_session_connection(&session.pool_scope, session.pool_id, None)
-                .await;
+            session.handle.release_unleased().await;
         }
     }
     if let (Some(thread_id), Some(response_id)) = (
         session.thread_id.clone(),
         session.last_terminal_response_id.clone(),
-    ) && let Some(upstream) = session.ready.take()
+    ) && let Some(mut lease) = session.ready.take()
     {
-        match session
-            .state
-            .hybrid_pool
-            .park_session_connection(
-                &session.pool_scope,
-                session.pool_id,
-                thread_id,
-                response_id,
-                upstream,
-            )
-            .await
-        {
-            Ok(()) => return,
-            Err(upstream) => session.ready = Some(upstream),
+        if lease.park(thread_id, response_id).await.is_ok() {
+            session.handle.detach_after_park();
+            return;
         }
+        session.ready = Some(lease);
     }
-    if let Some(upstream) = session.ready.take() {
-        session
-            .state
-            .hybrid_pool
-            .release_session_connection(&session.pool_scope, session.pool_id, Some(upstream))
-            .await;
+    if let Some(mut lease) = session.ready.take() {
+        lease.release().await;
     }
-    session
-        .state
-        .hybrid_pool
-        .unregister(&session.pool_scope, session.pool_id)
-        .await;
+    session.handle.close().await;
 }

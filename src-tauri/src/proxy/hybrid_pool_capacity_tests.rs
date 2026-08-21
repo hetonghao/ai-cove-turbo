@@ -53,7 +53,7 @@ async fn recovering_isolated_scope_reuses_global_warm_reserve() -> io::Result<()
         let mut state = pool.inner.state.lock().await;
         state.scopes.insert(
             first_scope.clone(),
-            ScopeState {
+            ScopeBackend {
                 target: target.clone(),
                 headers: HeaderMap::new(),
                 diagnostics: ScopeDiagnostics::default(),
@@ -73,7 +73,7 @@ async fn recovering_isolated_scope_reuses_global_warm_reserve() -> io::Result<()
         );
         state.scopes.insert(
             second_scope.clone(),
-            ScopeState {
+            ScopeBackend {
                 target,
                 headers: HeaderMap::new(),
                 diagnostics: ScopeDiagnostics::default(),
@@ -140,7 +140,7 @@ async fn released_session_connection_is_not_returned_to_blank_pool() -> io::Resu
         let session_id = state.register_session(scope_fingerprint);
         state.scopes.insert(
             scope.clone(),
-            ScopeState {
+            ScopeBackend {
                 target,
                 headers: HeaderMap::new(),
                 diagnostics: ScopeDiagnostics::default(),
@@ -226,7 +226,7 @@ async fn starved_active_scope_reclaims_one_shared_ready_slot() -> io::Result<()>
             };
             state.scopes.insert(
                 scope.clone(),
-                ScopeState {
+                ScopeBackend {
                     target: target.clone(),
                     headers: HeaderMap::new(),
                     diagnostics: ScopeDiagnostics::default(),
@@ -241,7 +241,7 @@ async fn starved_active_scope_reclaims_one_shared_ready_slot() -> io::Result<()>
         }
         state.scopes.insert(
             starved_scope.clone(),
-            ScopeState {
+            ScopeBackend {
                 target,
                 headers: HeaderMap::new(),
                 diagnostics: ScopeDiagnostics::default(),

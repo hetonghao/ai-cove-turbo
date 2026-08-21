@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Response, StatusCode, header},
 };
 use rustls::ClientConfig;
-use tokio::{net::TcpStream, task::JoinError};
+use tokio::net::TcpStream;
 use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
     tungstenite::{
@@ -20,16 +20,17 @@ use url::Url;
 mod codec;
 mod relay;
 
+#[cfg(test)]
+pub(super) use codec::encode_private_message;
 pub(super) use codec::{
     DecodedPrivateMessage, EncodedPrivateMessage, PRIVATE_ENVELOPE_HEADER_BYTES,
-    PRIVATE_WEBSOCKET_SUBPROTOCOL,
+    PRIVATE_WEBSOCKET_SUBPROTOCOL, PrivateProtocolError, decode_private_message,
+    encode_private_message_with_metadata,
 };
-#[cfg(test)]
-pub(super) use codec::{decode_private_message, encode_private_message};
 pub(super) use relay::{relay_private_from_message, websocket_error_code};
 
-use super::hop_by_hop_headers;
-use codec::{PRIVATE_MESSAGE_MAX_BYTES, PrivateProtocolError};
+use super::{compression::CompressionScheduler, hop_by_hop_headers};
+use codec::PRIVATE_MESSAGE_MAX_BYTES;
 
 const PRIVATE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const PRIVATE_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -52,26 +53,17 @@ pub(super) async fn encode_private_message_async(
     payload: Vec<u8>,
     original_binary: bool,
 ) -> Result<EncodedPrivateMessage, PrivateProtocolError> {
-    if should_offload_private_encoding(payload.len()) {
-        return tokio::task::spawn_blocking(move || {
-            codec::encode_private_message_with_metadata(&payload, original_binary)
-        })
+    CompressionScheduler::shared()
+        .encode_private(payload, original_binary)
         .await
-        .map_err(join_error)?;
-    }
-    codec::encode_private_message_with_metadata(&payload, original_binary)
 }
 
 pub(super) async fn decode_private_message_async(
     envelope: Bytes,
 ) -> Result<codec::DecodedPrivateMessage, PrivateProtocolError> {
-    tokio::task::spawn_blocking(move || codec::decode_private_message(&envelope))
+    CompressionScheduler::shared()
+        .decode_private(envelope)
         .await
-        .map_err(join_error)?
-}
-
-fn join_error(_: JoinError) -> PrivateProtocolError {
-    PrivateProtocolError::internal("private websocket worker failed")
 }
 
 #[derive(Clone, Debug)]

@@ -10,7 +10,7 @@ use tokio_tungstenite::{
 };
 
 use super::sse::{is_success_terminal_event, is_terminal_event};
-use super::{ClientWebSocket, PrivateWebSocket, Session, common::close_client, private_websocket};
+use super::{ClientWebSocket, Session, common::close_client, private_websocket};
 use crate::proxy::{
     Metrics,
     traffic::{self, FailurePhase, TrafficRecord, TrafficResult, TrafficRoute, TrafficTransport},
@@ -22,7 +22,10 @@ pub(super) async fn start_legacy_response(
     payload: Vec<u8>,
     original_binary: bool,
 ) -> bool {
-    if let Some(mut upstream) = take_private(session).await {
+    if let Some(mut lease) = take_private(session).await {
+        let Some(mut upstream) = lease.take_upstream() else {
+            return false;
+        };
         private_websocket::relay_private_from_message(
             client,
             &mut upstream,
@@ -32,11 +35,7 @@ pub(super) async fn start_legacy_response(
         )
         .await;
         session.state.metrics.record_websocket_closed();
-        session
-            .state
-            .hybrid_pool
-            .release_session_connection(&session.pool_scope, session.pool_id, None)
-            .await;
+        lease.release().await;
         return false;
     }
 
@@ -64,15 +63,11 @@ fn legacy_message(payload: Vec<u8>, original_binary: bool) -> Message {
     }
 }
 
-async fn take_private(session: &mut Session) -> Option<PrivateWebSocket> {
+async fn take_private(session: &mut Session) -> Option<super::super::hybrid_pool::Lease> {
     if let Some(upstream) = session.ready.take() {
         return Some(upstream);
     }
-    session
-        .state
-        .hybrid_pool
-        .checkout_wait(&session.pool_scope, session.pool_id, Duration::from_secs(2))
-        .await
+    session.handle.checkout_wait(Duration::from_secs(2)).await
 }
 
 async fn connect_standard(session: &Session) -> Option<ClientWebSocket> {

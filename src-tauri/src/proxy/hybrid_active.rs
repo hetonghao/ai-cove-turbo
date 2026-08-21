@@ -23,7 +23,10 @@ pub(super) async fn handle_idle_upstream(
             let Some(ready) = session.ready.as_mut() else {
                 return false;
             };
-            ready.send(Message::Pong(payload)).await.is_ok()
+            let Some(upstream) = ready.upstream_mut() else {
+                return false;
+            };
+            upstream.send(Message::Pong(payload)).await.is_ok()
         }
         Message::Pong(_) => true,
         Message::Close(frame) => {
@@ -31,7 +34,6 @@ pub(super) async fn handle_idle_upstream(
             let reason = frame
                 .as_ref()
                 .map_or("upstream closed", |frame| frame.reason.as_ref());
-            session.ready.take();
             session.state.metrics.record_websocket_diagnostic(
                 &session.path,
                 code,
@@ -95,7 +97,6 @@ async fn resolve_idle_upstream_message(
     message: Option<Result<Message, WebSocketError>>,
 ) -> Result<Message, bool> {
     let Some(message) = message else {
-        session.ready.take();
         session.state.metrics.record_websocket_diagnostic(
             &session.path,
             1011,
@@ -113,7 +114,6 @@ async fn resolve_idle_upstream_message(
     let Err(error) = message else {
         return message.map_err(|_| false);
     };
-    session.ready.take();
     let reason = error.to_string();
     let code = super::private_websocket::websocket_error_code(&error);
     session.state.metrics.record_websocket_diagnostic(
@@ -158,14 +158,18 @@ async fn recover_unexpected_idle_message(session: &mut Session, reason: &str) ->
 }
 
 pub(super) async fn handle_idle_keepalive(session: &mut Session) -> bool {
-    let Some(upstream) = session.ready.take() else {
+    let Some(mut lease) = session.ready.take() else {
+        return true;
+    };
+    let Some(upstream) = lease.take_upstream() else {
         return true;
     };
     if let Some(upstream) =
         super::super::hybrid_pool::probe_idle(upstream, super::super::hybrid_pool::PONG_TIMEOUT)
             .await
     {
-        session.ready = Some(upstream);
+        lease.put_upstream(upstream);
+        session.ready = Some(lease);
         return true;
     }
     session.state.metrics.record_websocket_diagnostic(
@@ -175,6 +179,7 @@ pub(super) async fn handle_idle_keepalive(session: &mut Session) -> bool {
         "private websocket keepalive failed",
     );
     session.state.metrics.record_websocket_closed();
+    session.ready = Some(lease);
     session
         .discard(LeaseRetirement::Recovering {
             reason: "WebSocket 健康检查未通过".to_owned(),

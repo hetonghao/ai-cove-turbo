@@ -388,6 +388,7 @@ mod tests {
                 crate::benchmark::RoundTransport::Http,
                 crate::benchmark::RoundTransport::WebSocket,
             ],
+            compression_metrics: None,
         };
         let mut output = Vec::new();
 

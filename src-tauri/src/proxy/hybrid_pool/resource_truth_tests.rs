@@ -21,16 +21,14 @@ async fn snapshot_does_not_project_caller_claim_without_a_pool_lease() -> Result
     let target = Url::parse("ftp://pool-without-resources.invalid/v1/responses")?;
     let headers = HeaderMap::new();
     let scope = HybridScope::new(&target, &headers);
-    let session_id = pool.register(&scope, target, headers).await;
+    let session = pool.open_session(&scope, target, headers).await;
 
     // When: the caller claims that the session owns a connection.
-    pool.observe_session(
-        session_id,
-        ConnectionObservation::Bound {
+    session
+        .observe(ConnectionObservation::Bound {
             thread_id: "thread-without-lease".to_owned(),
-        },
-    )
-    .await;
+        })
+        .await;
 
     // Then: the snapshot remains grounded in the empty pool resource state.
     let snapshot = pool.connection_snapshot().await;

@@ -209,6 +209,7 @@ fn rejects_cold_hybrid_evidence_with_retries() {
         messages_per_connection: None,
         retries: 1,
         round_transports: vec![crate::benchmark::RoundTransport::Http],
+        compression_metrics: None,
     };
 
     let error = validate_cold_hybrid_sample(&sample)
@@ -257,6 +258,7 @@ async fn live_three_by_four_benchmark() -> BenchmarkResult<()> {
             return Err(io::Error::other("benchmark has no usable paths"));
         }
         crate::benchmark::report::print_report(&settings, &cases)?;
+        crate::benchmark::report::write_metrics_artifact_if_requested(&settings, &cases)?;
         write_calibration_if_requested(&settings, &cases)?;
         Ok(())
     }
