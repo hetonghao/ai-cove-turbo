@@ -188,7 +188,7 @@ function domNode(name, attributes = {}, children = []) {
   return node;
 }
 
-async function liveTailHarness() {
+async function liveTailHarness(overrides = {}) {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   let status = {
     serviceHealthy: true,
@@ -197,6 +197,7 @@ async function liveTailHarness() {
       { id: 1, timestampMs: 1_000, status: 200, path: "/v1/responses", rawBytes: 100, sentBytes: 60, transport: "HTTP", result: "success" },
     ],
     trafficWindows: [],
+    ...overrides,
   };
   const requestStream = element();
   requestStream.innerHTML = "";
@@ -220,7 +221,10 @@ async function liveTailHarness() {
     ["[data-live-follow]", follow],
     ["[data-live-follow-label]", followLabel],
   ]);
+  const elementsById = new Map();
   let onClick;
+  let onFocusIn;
+  let onPointerOver;
   let onTick;
   const document = {
     hidden: false,
@@ -228,13 +232,17 @@ async function liveTailHarness() {
     body: element(),
     addEventListener(type, handler) {
       if (type === "click") onClick = handler;
+      if (type === "focusin") onFocusIn = handler;
+      if (type === "pointerover") onPointerOver = handler;
     },
+    getElementById(id) { return elementsById.get(id) ?? null; },
     querySelector(selector) { return selectors.get(selector) ?? null; },
     querySelectorAll() { return []; },
   };
   const window = {
     __TAURI__: { core: { invoke: async () => status } },
     location: { href: "tauri://localhost/?tab=live" },
+    innerWidth: 1_280,
     history: { replaceState() {} },
     addEventListener() {},
     setInterval(handler) { onTick = handler; },
@@ -248,6 +256,22 @@ async function liveTailHarness() {
     followLabel,
     requestStream,
     terminal,
+    positionNetworkTooltip({ eventType = "pointerover", tooltipBounds, triggerBounds, viewportWidth }) {
+      window.innerWidth = viewportWidth;
+      const properties = new Map();
+      const tooltipId = "network-error-test";
+      elementsById.set(tooltipId, {
+        getBoundingClientRect: () => tooltipBounds,
+        style: { setProperty(name, value) { properties.set(name, value); } },
+      });
+      const trigger = {
+        closest: (selector) => selector === ".c-transport__network" ? trigger : null,
+        getAttribute: (name) => name === "aria-describedby" ? tooltipId : null,
+        getBoundingClientRect: () => triggerBounds,
+      };
+      (eventType === "focusin" ? onFocusIn : onPointerOver)({ target: trigger });
+      return Object.fromEntries(properties);
+    },
     async click(action) {
       const control = action === "follow-live" ? follow : element({ action });
       control.closest = (selector) => selector === "[data-action]" ? control : null;
@@ -568,6 +592,63 @@ test("WebSocket 已关闭时不把直连 HTTP 误判为降级", async () => {
 
   // Then: 不提示重启 Codex。
   assert.equal(recovery.hidden, true);
+});
+
+test("HTTP 502 记录显示协议、网络异常和可访问排查提示", async () => {
+  const now = Date.now();
+  const networkError = (id, ageSeconds) => ({
+    id,
+    timestampMs: now - ageSeconds * 1_000,
+    status: 502,
+    path: "/v1/responses",
+    route: "directHttp",
+    rawBytes: 675_100,
+    sentBytes: 227_400,
+    transport: "HTTP",
+    result: "error",
+  });
+  const networkErrors = [60, 50, 40, 30, 20, 10].map((ageSeconds, index) => networkError(index + 1, ageSeconds));
+
+  const { recovery } = await liveRecoveryHarness({
+    serviceHealthy: true,
+    configState: "managed",
+    codexState: "active",
+    websocketEnabled: true,
+    websocketState: "connected",
+    recentRequests: networkErrors,
+  });
+
+  assert.equal(recovery.hidden, true);
+
+  const { requestStream } = await liveTailHarness({ recentRequests: [networkErrors.at(-1)] });
+  assert.match(requestStream.innerHTML, /压缩 HTTP/);
+  assert.match(requestStream.innerHTML, /网络异常/);
+  assert.match(requestStream.innerHTML, /aria-describedby="network-error-6"/);
+  assert.match(requestStream.innerHTML, /请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。<br>请尝试切换手机热点排查，如果无法定位请联管理员。/);
+  assert.doesNotMatch(requestStream.innerHTML, /压缩 HTTP · 失败/);
+});
+
+test("网络异常 Hover 和键盘聚焦会把提示定位在视口内", async () => {
+  const { positionNetworkTooltip } = await liveTailHarness();
+
+  assert.deepEqual(positionNetworkTooltip({
+    viewportWidth: 1_280,
+    triggerBounds: { top: 50, right: 1_200, bottom: 70 },
+    tooltipBounds: { width: 420, height: 56 },
+  }), {
+    "--c-network-tooltip-left": "780px",
+    "--c-network-tooltip-top": "79px",
+  });
+
+  assert.deepEqual(positionNetworkTooltip({
+    eventType: "focusin",
+    viewportWidth: 375,
+    triggerBounds: { top: 700, right: 220, bottom: 718 },
+    tooltipBounds: { width: 420, height: 56 },
+  }), {
+    "--c-network-tooltip-left": "16px",
+    "--c-network-tooltip-top": "635px",
+  });
 });
 
 test("状态读取失败时提供就地恢复和折叠技术详情", async () => {

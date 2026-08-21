@@ -18,6 +18,7 @@
   const HTTP_DEGRADATION_WINDOW_MS = 5 * 60_000;
   const HTTP_DEGRADATION_MIN_SPAN_MS = 30_000;
   const HTTP_DEGRADATION_MIN_REQUESTS = 5;
+  const NETWORK_ERROR_MESSAGE = "请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。\n请尝试切换手机热点排查，如果无法定位请联管理员。";
   const invoke = window.__TAURI__?.core?.invoke;
   const telemetry = window.TurboTelemetry;
   const connectionDom = window.TurboConnectionDOM;
@@ -297,6 +298,13 @@
     return totalRequests() > 0 || Number(state.websocketHandshakes) > 0;
   }
 
+  function isNetworkIssue(request) {
+    return request?.path === "/v1/responses"
+      && request?.route === "directHttp"
+      && request?.result === "error"
+      && Number(request?.status) === 502;
+  }
+
   function formatCodexState() {
     const labels = {
       checking: "检查中",
@@ -441,10 +449,12 @@
       const cutoff = Date.now() - HTTP_DEGRADATION_WINDOW_MS;
       const responses = (Array.isArray(state.recentRequests) ? state.recentRequests : [])
         .filter((request) => request.path === "/v1/responses" && Number(request.timestampMs) >= cutoff);
-      const directHttp = responses.filter((request) => request.route === "directHttp");
+      const latestResponse = responses.at(-1);
+      const directHttp = responses.filter((request) => request.route === "directHttp" && !isNetworkIssue(request));
       const timestamps = directHttp.map((request) => Number(request.timestampMs));
       const sustained = directHttp.length >= HTTP_DEGRADATION_MIN_REQUESTS
-        && responses.at(-1)?.route === "directHttp"
+        && latestResponse?.route === "directHttp"
+        && !isNetworkIssue(latestResponse)
         && directHttp.length / responses.length >= 0.8
         && Math.max(...timestamps) - Math.min(...timestamps) >= HTTP_DEGRADATION_MIN_SPAN_MS;
       if (sustained) {
@@ -638,6 +648,21 @@
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#39;");
+  }
+
+  function positionNetworkTooltip(trigger) {
+    const tooltip = document.getElementById?.(trigger.getAttribute?.("aria-describedby"));
+    if (!tooltip) return;
+    const triggerBounds = trigger.getBoundingClientRect();
+    const tooltipBounds = tooltip.getBoundingClientRect();
+    const viewportMargin = 16;
+    const gap = 9;
+    const width = Math.min(tooltipBounds.width, window.innerWidth - viewportMargin * 2);
+    const left = Math.max(viewportMargin, Math.min(triggerBounds.right - width, window.innerWidth - width - viewportMargin));
+    const preferredTop = triggerBounds.top - tooltipBounds.height - gap;
+    const top = preferredTop >= 70 ? preferredTop : triggerBounds.bottom + gap;
+    tooltip.style.setProperty("--c-network-tooltip-left", `${left}px`);
+    tooltip.style.setProperty("--c-network-tooltip-top", `${top}px`);
   }
 
   function normalizeConnectionSnapshot(snapshot) {
@@ -1309,9 +1334,15 @@
     const releaseRebuild = recovering && status === 1012 && request.failureReason === "service restarting";
     const failed = request.result === "error" && !recovering;
     const route = REQUEST_ROUTE_LABELS[request.route];
-    const transport = releaseRebuild ? "Hybrid WS · 发布重建" : recovering ? `${route ?? request.transport} · 连接恢复` : failed ? `${route ?? request.transport} · 失败` : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
+    const protocol = route ?? request.transport;
+    const networkIssue = isNetworkIssue(request);
+    const transport = networkIssue ? `${protocol} · 网络异常` : releaseRebuild ? "Hybrid WS · 发布重建" : recovering ? `${protocol} · 连接恢复` : failed ? `${protocol} · 失败` : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
     const detail = recovering && request.failureReason ? ` title="${escapeHtml(request.failureReason)}"` : "";
-    return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}"${detail}>${escapeHtml(transport)}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
+    const tooltipId = `network-error-${String(request.id).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+    const networkMarkup = networkIssue
+      ? `<span class="c-transport__protocol">${escapeHtml(protocol)}</span><span aria-hidden="true"> · </span><span class="c-transport__network" tabindex="0" aria-describedby="${tooltipId}">网络异常</span><span class="c-transport__tooltip" id="${tooltipId}" role="tooltip">${escapeHtml(NETWORK_ERROR_MESSAGE).replaceAll("\n", "<br>")}</span>`
+      : escapeHtml(transport);
+    return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}"${detail}>${networkMarkup}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
   }
 
   function renderLiveFollow() {
@@ -1753,6 +1784,10 @@
       const tab = event.target.closest?.("[data-tab]");
       if (tab) selectTab(tab.dataset.tab);
     });
+    document.addEventListener("pointerover", (event) => {
+      const trigger = event.target.closest?.(".c-transport__network");
+      if (trigger) positionNetworkTooltip(trigger);
+    });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && aiCoveBubbleOpen) {
         setAiCoveBubbleOpen(false, { restoreFocus: true });
@@ -1768,6 +1803,8 @@
       if (tab) handleTabKeydown(event, tab);
     });
     document.addEventListener("focusin", (event) => {
+      const networkTrigger = event.target.closest?.(".c-transport__network");
+      if (networkTrigger) positionNetworkTooltip(networkTrigger);
       const chartSlot = event.target.closest?.(".c-bar-slot");
       if (!chartSlot) return;
       const slots = Array.from(all("[data-stat-bars] .c-bar-slot"));
