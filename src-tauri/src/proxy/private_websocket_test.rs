@@ -12,7 +12,10 @@ use rustls::{
 };
 use url::Url;
 
-use super::{PRIVATE_WEBSOCKET_SUBPROTOCOL, PrivateTlsConfig, connect_private, derive_accept_key};
+use super::{
+    PRIVATE_WEBSOCKET_SUBPROTOCOL, PrivateTlsConfig, connect_private, derive_accept_key,
+    websocket_error_kind,
+};
 
 const TEST_CERT_DER: &[u8] = &[
     0x30, 0x82, 0x01, 0x95, 0x30, 0x82, 0x01, 0x3c, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x14, 0x34,
@@ -233,4 +236,24 @@ async fn private_connections_reuse_shared_tls_config() -> io::Result<()> {
     assert!(first, "first private handshake failed");
     assert!(second, "second private handshake failed");
     Ok(())
+}
+
+#[test]
+fn websocket_failure_kind_is_stable_and_sanitized() {
+    use tokio_tungstenite::tungstenite::{Error as WebSocketError, error::ProtocolError};
+
+    assert_eq!(
+        websocket_error_kind(&WebSocketError::ConnectionClosed),
+        "connection_closed"
+    );
+    assert_eq!(
+        websocket_error_kind(&WebSocketError::Io(io::Error::other("secret detail"))),
+        "io"
+    );
+    assert_eq!(
+        websocket_error_kind(&WebSocketError::Protocol(
+            ProtocolError::ResetWithoutClosingHandshake,
+        )),
+        "protocol"
+    );
 }

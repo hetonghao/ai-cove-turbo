@@ -67,6 +67,7 @@ async fn recovering_isolated_scope_reuses_global_warm_reserve() -> io::Result<()
                     upstream: idle,
                     server_trace: None,
                     ordinal: 0,
+                    last_probe_at: Some(tokio::time::Instant::now()),
                 }],
             },
         );
@@ -199,6 +200,7 @@ async fn starved_active_scope_reclaims_one_shared_ready_slot() -> io::Result<()>
             upstream,
             server_trace: None,
             ordinal: 0,
+            last_probe_at: Some(tokio::time::Instant::now()),
         });
         servers.push(WebSocketStream::from_raw_socket(server_stream, Role::Server, None).await);
     }

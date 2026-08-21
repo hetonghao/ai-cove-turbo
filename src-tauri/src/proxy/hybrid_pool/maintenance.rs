@@ -1,10 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
 use super::{
     HybridPool, HybridScope, PONG_TIMEOUT, PoolConnection, PoolState, PrivateUpstream,
-    desired_connections, probe_idle, total_connections,
+    desired_connections, probe_idle_detailed, total_connections,
 };
 
 mod connection;
@@ -149,8 +150,7 @@ impl HybridPool {
             let Some(entry) = state.scopes.get_mut(scope) else {
                 return;
             };
-            // ponytail: 唯一 reserve 必须保持可领取；仅在监控确认陈旧失败后再做 replace-before-probe。
-            if entry.idle.len() <= 1 {
+            if entry.idle.is_empty() {
                 return;
             }
             let connection = entry.idle.remove(0);
@@ -159,31 +159,48 @@ impl HybridPool {
             connection
         };
         let connection_id = connection.id;
-        let healthy = probe_idle(connection.upstream, pong_timeout).await;
-        let succeeded = healthy.is_some();
-        {
+        let mut upstream = connection.upstream;
+        let (succeeded, failure_reason) =
+            match probe_idle_detailed(&mut upstream, pong_timeout).await {
+                Ok(()) => (true, None),
+                Err(failure) => (false, Some(failure.reason())),
+            };
+        let failed_upstream = {
             let mut state = self.inner.state.lock().await;
             let Some(entry) = state.scopes.get_mut(scope) else {
+                drop(state);
+                self.close_detached(vec![upstream]);
                 return;
             };
             entry.probing = entry.probing.saturating_sub(1);
-            if let Some(upstream) = healthy {
+            if succeeded {
                 entry.idle.push(PoolConnection {
                     id: connection_id,
                     upstream,
                     server_trace: connection.server_trace,
                     ordinal: connection.ordinal,
+                    last_probe_at: Some(Instant::now()),
                 });
+                drop(state);
+                None
+            } else {
+                state.push_closed(
+                    connection_id,
+                    None,
+                    format!(
+                        "连接池健康检查失败：{}",
+                        failure_reason.unwrap_or("unknown")
+                    ),
+                    false,
+                );
+                drop(state);
+                Some(upstream)
             }
-            if !succeeded {
-                state.push_closed(connection_id, None, "连接池健康检查失败".to_owned(), false);
-            }
-            drop(state);
-        }
-        if succeeded {
+        };
+        if failed_upstream.is_none() {
             self.inner.ready.notify_waiters();
-        } else {
-            self.inner.metrics.record_websocket_closed();
+        } else if let Some(upstream) = failed_upstream {
+            self.close_detached(vec![upstream]);
         }
         self.refill(scope).await;
     }

@@ -236,3 +236,19 @@ pub(super) fn is_client_handshake_header(name: &header::HeaderName) -> bool {
         || *name == header::SEC_WEBSOCKET_PROTOCOL
         || name.as_str() == WS_TRACE_HEADER
 }
+
+pub(super) const fn websocket_error_kind(error: &WebSocketError) -> &'static str {
+    match error {
+        WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed => "connection_closed",
+        WebSocketError::Io(_) => "io",
+        WebSocketError::Tls(_) => "tls",
+        WebSocketError::Protocol(_) => "protocol",
+        WebSocketError::Capacity(_) => "capacity",
+        WebSocketError::Utf8(_) => "utf8",
+        WebSocketError::WriteBufferFull(_) => "write_buffer_full",
+        WebSocketError::AttackAttempt => "attack_attempt",
+        WebSocketError::Url(_) => "url",
+        WebSocketError::Http(_) => "http",
+        WebSocketError::HttpFormat(_) => "http_format",
+    }
+}

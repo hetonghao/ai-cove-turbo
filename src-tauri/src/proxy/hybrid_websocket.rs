@@ -5,6 +5,7 @@ use tokio::{
     sync::mpsc,
     time::{Instant, Sleep},
 };
+use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::{Bytes, Message, protocol::CloseFrame};
 
 use super::{
@@ -67,6 +68,22 @@ enum BinaryOutcome {
     Terminal(Option<String>),
 }
 
+enum SendFailure {
+    PayloadSize,
+    Encoding,
+    WebSocket(&'static str),
+}
+
+impl SendFailure {
+    const fn reason(&self) -> &'static str {
+        match self {
+            Self::PayloadSize => "payload_size",
+            Self::Encoding => "encoding",
+            Self::WebSocket(kind) => kind,
+        }
+    }
+}
+
 async fn run_websocket_worker(
     context: WorkerContext,
     mut upstream: PrivateWebSocket,
@@ -75,10 +92,13 @@ async fn run_websocket_worker(
     mut commands: mpsc::Receiver<WorkerCommand>,
     events: mpsc::Sender<WorkerEvent>,
 ) {
-    let Ok(receipt) = send_private_application(&mut upstream, payload, original_binary).await
-    else {
-        send_worker_error(&events, &context, 1011, "private websocket send failed").await;
-        return;
+    let receipt = match send_private_application(&mut upstream, payload, original_binary).await {
+        Ok(receipt) => receipt,
+        Err(failure) => {
+            let reason = format!("private websocket send failed · {}", failure.reason());
+            send_worker_error(&events, &context, 1011, &reason).await;
+            return;
+        }
     };
     if events
         .send(WorkerEvent::WebSocketSent(receipt))
@@ -96,12 +116,7 @@ async fn run_websocket_worker(
         tokio::select! {
             biased;
             message = upstream.next() => {
-                let Some(message) = message else {
-                    send_worker_error(&events, &context, 1011, "private websocket closed while active").await;
-                    return;
-                };
-                let Ok(message) = message else {
-                    send_worker_error(&events, &context, 1011, "private websocket failed while active").await;
+                let Some(message) = resolve_active_message(message, &events, &context).await else {
                     return;
                 };
                 awaiting_pong = false;
@@ -127,8 +142,12 @@ async fn run_websocket_worker(
                         }
                     },
                     Message::Ping(payload) => {
-                        if upstream.send(Message::Pong(payload)).await.is_err() {
-                            send_worker_error(&events, &context, 1011, "private websocket control frame failed").await;
+                        if let Err(error) = upstream.send(Message::Pong(payload)).await {
+                            let reason = format!(
+                                "private websocket control frame failed · {}",
+                                private_websocket::websocket_error_kind(&error)
+                            );
+                            send_worker_error(&events, &context, 1011, &reason).await;
                             return;
                         }
                     }
@@ -156,8 +175,12 @@ async fn run_websocket_worker(
                     return;
                 }
                 let payload = Bytes::from_static(ACTIVE_KEEPALIVE_PAYLOAD);
-                if upstream.send(Message::Ping(payload)).await.is_err() {
-                    send_worker_error(&events, &context, 1011, "private websocket keepalive failed").await;
+                if let Err(error) = upstream.send(Message::Ping(payload)).await {
+                    let reason = format!(
+                        "private websocket keepalive failed · {}",
+                        private_websocket::websocket_error_kind(&error)
+                    );
+                    send_worker_error(&events, &context, 1011, &reason).await;
                     return;
                 }
                 awaiting_pong = true;
@@ -166,6 +189,34 @@ async fn run_websocket_worker(
                     super::super::hybrid_pool::PONG_TIMEOUT,
                 );
             }
+        }
+    }
+}
+
+async fn resolve_active_message(
+    message: Option<Result<Message, WebSocketError>>,
+    events: &mpsc::Sender<WorkerEvent>,
+    context: &WorkerContext,
+) -> Option<Message> {
+    match message {
+        None => {
+            send_worker_error(
+                events,
+                context,
+                1011,
+                "private websocket closed while active · connection_closed",
+            )
+            .await;
+            None
+        }
+        Some(Ok(message)) => Some(message),
+        Some(Err(error)) => {
+            let reason = format!(
+                "private websocket failed while active · {}",
+                private_websocket::websocket_error_kind(&error)
+            );
+            send_worker_error(events, context, 1011, &reason).await;
+            None
         }
     }
 }
@@ -180,7 +231,7 @@ async fn handle_active_close(
             events,
             context,
             1011,
-            "private websocket closed while active",
+            "private websocket closed while active · connection_closed",
         )
         .await;
         return;
@@ -331,11 +382,9 @@ async fn handle_worker_command(
             (payload, original_binary, "private websocket send failed")
         }
     };
-    if send_private_application(upstream, payload, original_binary)
-        .await
-        .is_err()
-    {
-        send_worker_error(events, context, 1011, message).await;
+    if let Err(failure) = send_private_application(upstream, payload, original_binary).await {
+        let reason = format!("{message} · {}", failure.reason());
+        send_worker_error(events, context, 1011, &reason).await;
         return false;
     }
     true
@@ -360,17 +409,17 @@ async fn send_private_application(
     upstream: &mut PrivateWebSocket,
     payload: Vec<u8>,
     original_binary: bool,
-) -> Result<WebSocketSendReceipt, ()> {
-    let raw_bytes = u64::try_from(payload.len()).map_err(|_| ())?;
+) -> Result<WebSocketSendReceipt, SendFailure> {
+    let raw_bytes = u64::try_from(payload.len()).map_err(|_| SendFailure::PayloadSize)?;
     let encoded = private_websocket::encode_private_message_async(payload, original_binary)
         .await
-        .map_err(|_| ())?;
-    let sent_bytes = u64::try_from(encoded.bytes.len()).map_err(|_| ())?;
+        .map_err(|_| SendFailure::Encoding)?;
+    let sent_bytes = u64::try_from(encoded.bytes.len()).map_err(|_| SendFailure::PayloadSize)?;
     let compressed = encoded.compressed;
     upstream
         .send(Message::Binary(encoded.bytes.into()))
         .await
-        .map_err(|_| ())?;
+        .map_err(|error| SendFailure::WebSocket(private_websocket::websocket_error_kind(&error)))?;
     Ok(WebSocketSendReceipt {
         raw_bytes,
         sent_bytes,

@@ -119,6 +119,7 @@ async fn active_scope_reclaims_dormant_pool_capacity() -> io::Result<()> {
                         upstream,
                         server_trace: None,
                         ordinal: 0,
+                        last_probe_at: Some(tokio::time::Instant::now()),
                     }],
                 },
             );
@@ -194,6 +195,7 @@ async fn inactive_scope_keeps_full_warm_reserve() -> io::Result<()> {
                     upstream,
                     server_trace: None,
                     ordinal: 0,
+                    last_probe_at: Some(tokio::time::Instant::now()),
                 })
                 .map_err(io::Error::other)
         })
@@ -274,6 +276,7 @@ async fn successful_checkout_cannot_be_cancelled_after_lease_assignment() -> io:
                     upstream,
                     server_trace: None,
                     ordinal: 0,
+                    last_probe_at: Some(tokio::time::Instant::now()),
                 }],
             },
         );

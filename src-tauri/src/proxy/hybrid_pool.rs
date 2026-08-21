@@ -1,7 +1,10 @@
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
-use tokio::sync::{Mutex, Notify};
+use tokio::{
+    sync::{Mutex, Notify},
+    time::Instant,
+};
 use url::Url;
 
 use super::{
@@ -18,7 +21,7 @@ use diagnostics::ScopeDiagnostics;
 pub(crate) use observability::ConnectionSnapshot;
 use observability::{ClosedRecord, ObservedSession};
 pub(super) use observability::{ConnectionActivity, ConnectionObservation, LeaseRetirement};
-pub(super) use probe::probe_idle;
+pub(super) use probe::{probe_idle, probe_idle_detailed};
 pub(super) use scope::HybridScope;
 use scope::blank_connection_headers;
 
@@ -48,6 +51,7 @@ const MIN_PREWARM_CONNECTIONS: usize = 1;
 const ACTIVE_CONNECTIONS_PER_PREWARM_REDUCTION: usize = 5;
 pub(super) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 pub(super) const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+const CHECKOUT_REPLACEMENT_WAIT: Duration = Duration::from_secs(2);
 const HANDOFF_WAIT: Duration = Duration::from_millis(250);
 #[cfg(not(test))]
 const HANDOFF_WINDOW: Duration = Duration::from_secs(60);
@@ -94,6 +98,7 @@ struct PoolConnection {
     upstream: PrivateUpstream,
     server_trace: Option<String>,
     ordinal: u64,
+    last_probe_at: Option<Instant>,
 }
 
 struct ConnectionLease {
@@ -111,6 +116,89 @@ struct ParkedConnection {
     server_trace: Option<String>,
     ordinal: u64,
     upstream: PrivateUpstream,
+}
+
+fn take_idle_connection(
+    state: &mut PoolState,
+    scope: &HybridScope,
+    session_id: u64,
+) -> Option<(PoolConnection, bool)> {
+    if !state.sessions.contains_key(&session_id) {
+        return None;
+    }
+    let entry = state.scopes.get_mut(scope)?;
+    if entry.leased.contains_key(&session_id) {
+        return None;
+    }
+    entry.idle.pop().map(|connection| {
+        let needs_preflight = connection
+            .last_probe_at
+            .is_none_or(|last_probe| last_probe.elapsed() >= KEEPALIVE_INTERVAL);
+        if needs_preflight {
+            entry.probing = entry.probing.saturating_add(1);
+        } else {
+            entry.leased.insert(
+                session_id,
+                ConnectionLease {
+                    connection_id: connection.id,
+                    server_trace: connection.server_trace.clone(),
+                    ordinal: connection.ordinal,
+                },
+            );
+        }
+        (connection, needs_preflight)
+    })
+}
+
+struct CheckoutProbeGuard {
+    pool: HybridPool,
+    scope: HybridScope,
+    connection: Option<PoolConnection>,
+}
+
+impl CheckoutProbeGuard {
+    const fn new(pool: HybridPool, scope: HybridScope, connection: PoolConnection) -> Self {
+        Self {
+            pool,
+            scope,
+            connection: Some(connection),
+        }
+    }
+
+    fn upstream_mut(&mut self) -> Option<&mut PrivateUpstream> {
+        self.connection
+            .as_mut()
+            .map(|connection| &mut connection.upstream)
+    }
+
+    const fn take_connection(&mut self) -> Option<PoolConnection> {
+        self.connection.take()
+    }
+}
+
+impl Drop for CheckoutProbeGuard {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        let pool = self.pool.clone();
+        let scope = self.scope.clone();
+        tokio::spawn(async move {
+            let mut state = pool.inner.state.lock().await;
+            if let Some(entry) = state.scopes.get_mut(&scope) {
+                entry.probing = entry.probing.saturating_sub(1);
+                state.push_closed(
+                    connection.id,
+                    None,
+                    "连接池 checkout 预检被取消".to_owned(),
+                    false,
+                );
+            }
+            drop(state);
+            pool.close_all(vec![connection.upstream]).await;
+            pool.refill(&scope).await;
+        });
+    }
 }
 
 impl fmt::Debug for HybridPool {
@@ -204,40 +292,91 @@ impl HybridPool {
         scope: &HybridScope,
         session_id: u64,
     ) -> Option<PrivateUpstream> {
-        let upstream = {
-            let mut state = self.inner.state.lock().await;
-            if !state.sessions.contains_key(&session_id) {
-                return None;
-            }
-            let entry = state.scopes.get_mut(scope)?;
-            if entry.leased.contains_key(&session_id) {
-                return None;
-            }
-            let connection = entry.idle.pop();
-            let upstream = connection.map(|connection| {
-                entry.leased.insert(
-                    session_id,
-                    ConnectionLease {
-                        connection_id: connection.id,
-                        server_trace: connection.server_trace,
-                        ordinal: connection.ordinal,
-                    },
+        let mut replacement_deadline: Option<Instant> = None;
+        loop {
+            let notified = self.inner.ready.notified();
+            let Some((connection, needs_preflight)) = ({
+                let mut state = self.inner.state.lock().await;
+                let candidate = take_idle_connection(&mut state, scope, session_id);
+                drop(state);
+                candidate
+            }) else {
+                let probing = {
+                    let state = self.inner.state.lock().await;
+                    if !state.sessions.contains_key(&session_id) {
+                        return None;
+                    }
+                    let entry = state.scopes.get(scope)?;
+                    if entry.leased.contains_key(&session_id) {
+                        return None;
+                    }
+                    let probing = entry.probing > 0;
+                    drop(state);
+                    probing
+                };
+                self.refill(scope).await;
+                if replacement_deadline.is_none() && probing {
+                    replacement_deadline = Some(Instant::now() + CHECKOUT_REPLACEMENT_WAIT);
+                }
+                let deadline = replacement_deadline?;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() || tokio::time::timeout(remaining, notified).await.is_err() {
+                    return None;
+                }
+                continue;
+            };
+            if needs_preflight {
+                let connection_id = connection.id;
+                let mut probe_guard =
+                    CheckoutProbeGuard::new(self.clone(), scope.clone(), connection);
+                let probe = {
+                    let upstream = probe_guard.upstream_mut()?;
+                    probe_idle_detailed(upstream, PONG_TIMEOUT).await
+                };
+                let mut state = self.inner.state.lock().await;
+                let Some(connection) = probe_guard.take_connection() else {
+                    drop(state);
+                    return None;
+                };
+                let Some(entry) = state.scopes.get_mut(scope) else {
+                    drop(state);
+                    self.close_detached(vec![connection.upstream]);
+                    return None;
+                };
+                entry.probing = entry.probing.saturating_sub(1);
+                if probe.is_ok() {
+                    entry.leased.insert(
+                        session_id,
+                        ConnectionLease {
+                            connection_id,
+                            server_trace: connection.server_trace,
+                            ordinal: connection.ordinal,
+                        },
+                    );
+                    drop(state);
+                    let pool = self.clone();
+                    let scope = scope.clone();
+                    tokio::spawn(async move { pool.refill(&scope).await });
+                    return Some(connection.upstream);
+                }
+                let failure = probe.err()?;
+                state.push_closed(
+                    connection_id,
+                    None,
+                    format!("连接池 checkout 预检失败：{}", failure.reason()),
+                    false,
                 );
-                connection.upstream
-            });
-            drop(state);
-            upstream
-        };
-        if upstream.is_some() {
+                drop(state);
+                self.close_detached(vec![connection.upstream]);
+                replacement_deadline = Some(Instant::now() + CHECKOUT_REPLACEMENT_WAIT);
+                self.refill(scope).await;
+                continue;
+            }
             let pool = self.clone();
             let scope = scope.clone();
-            tokio::spawn(async move {
-                pool.refill(&scope).await;
-            });
-        } else {
-            self.refill(scope).await;
+            tokio::spawn(async move { pool.refill(&scope).await });
+            return Some(connection.upstream);
         }
-        upstream
     }
 
     pub(super) async fn checkout_wait(
