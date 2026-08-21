@@ -1,4 +1,4 @@
-use std::{io, sync::Arc, time::Duration};
+use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
 use axum::Router;
 use tokio::{
@@ -15,6 +15,7 @@ pub(super) enum PrivateBehavior {
     FailFirstBatch,
     HoldResponse,
     HoldResponseNoPong,
+    ProbeDelay,
     HttpPayloadTooLarge,
     IdleError,
     IdleMessage,
@@ -45,6 +46,7 @@ impl PrivateBehavior {
             self,
             Self::HoldResponse
                 | Self::HoldResponseNoPong
+                | Self::ProbeDelay
                 | Self::HttpPayloadTooLarge
                 | Self::IdleError
                 | Self::IdleMessage
@@ -70,6 +72,7 @@ impl PrivateBehavior {
             | Self::FailFirstBatch
             | Self::HoldResponse
             | Self::HoldResponseNoPong
+            | Self::ProbeDelay
             | Self::HttpPayloadTooLarge
             | Self::IdleError
             | Self::IdleMessage
@@ -105,6 +108,7 @@ pub(super) struct Counts {
     pub(super) private_normal_closes: usize,
     pub(super) http_requests: usize,
     pub(super) close_frames_sent: usize,
+    pub(super) private_ready_by_scope: HashMap<String, usize>,
 }
 
 pub(super) struct FixtureState {
@@ -187,6 +191,46 @@ impl Fixture {
         self.wait_count(CountKind::PrivateReady, expected).await
     }
 
+    pub(super) async fn wait_ready_for_scope(&self, scope: &str) -> io::Result<()> {
+        self.wait_ready_for_scope_count(scope, 1).await
+    }
+
+    pub(super) async fn ready_for_scope_count(&self, scope: &str) -> usize {
+        self.state
+            .counts
+            .lock()
+            .await
+            .private_ready_by_scope
+            .get(scope)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(super) async fn wait_ready_for_scope_count(
+        &self,
+        scope: &str,
+        expected: usize,
+    ) -> io::Result<()> {
+        let scope = scope.to_owned();
+        let wait = async {
+            loop {
+                let changed = self.state.changed.notified();
+                if self.ready_for_scope_count(&scope).await >= expected {
+                    return;
+                }
+                changed.await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "scope prewarm did not become ready",
+                )
+            })
+    }
+
     pub(super) async fn wait_messages(&self, expected: usize) -> io::Result<()> {
         self.wait_count(CountKind::PrivateMessage, expected).await
     }
@@ -235,17 +279,31 @@ impl Fixture {
         self.state.release_private.notify_one();
     }
 
+    pub(super) fn release_private_all(&self) {
+        self.state.release_private.notify_waiters();
+    }
+
     pub(super) fn release_http(&self) {
         self.state.release_http.notify_one();
     }
 
-    pub(super) async fn record(&self, update: fn(&mut Counts)) {
+    pub(super) async fn record(&self, update: impl FnOnce(&mut Counts)) {
         let mut counts = self.state.counts.lock().await;
         update(&mut counts);
         self.state.changed.notify_waiters();
     }
 
     async fn wait_count(&self, kind: CountKind, expected: usize) -> io::Result<()> {
+        self.wait_count_with_timeout(kind, expected, Duration::from_secs(3))
+            .await
+    }
+
+    async fn wait_count_with_timeout(
+        &self,
+        kind: CountKind,
+        expected: usize,
+        timeout: Duration,
+    ) -> io::Result<()> {
         let wait = async {
             loop {
                 let changed = self.state.changed.notified();
@@ -267,7 +325,7 @@ impl Fixture {
                 changed.await;
             }
         };
-        tokio::time::timeout(Duration::from_secs(3), wait)
+        tokio::time::timeout(timeout, wait)
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "fixture event timed out"))
     }

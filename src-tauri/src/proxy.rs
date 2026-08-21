@@ -100,9 +100,20 @@ pub(crate) struct Metrics {
     websocket_raw_bytes: AtomicU64,
     websocket_sent_bytes: AtomicU64,
     http_fallbacks: AtomicU64,
+    maintenance_cycles: AtomicU64,
+    maintenance_cycle_elapsed_ms: AtomicU64,
+    maintenance_probe_started: AtomicU64,
+    maintenance_probe_completed: AtomicU64,
+    maintenance_probe_failed: AtomicU64,
+    maintenance_probe_timeouts: AtomicU64,
+    maintenance_slow_cycles: AtomicU64,
+    maintenance_probe_active: AtomicU64,
+    maintenance_probe_max_concurrency: AtomicU64,
     traffic: traffic::TrafficStore,
     #[cfg(test)]
     traffic_recorded: tokio::sync::Notify,
+    #[cfg(test)]
+    maintenance_probe_started_notify: tokio::sync::Notify,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -122,6 +133,14 @@ pub(crate) struct MetricsSnapshot {
     pub(crate) websocket_raw_bytes: u64,
     pub(crate) websocket_sent_bytes: u64,
     pub(crate) http_fallbacks: u64,
+    pub(crate) maintenance_cycles: u64,
+    pub(crate) maintenance_cycle_elapsed_ms: u64,
+    pub(crate) maintenance_probe_started: u64,
+    pub(crate) maintenance_probe_completed: u64,
+    pub(crate) maintenance_probe_failed: u64,
+    pub(crate) maintenance_probe_timeouts: u64,
+    pub(crate) maintenance_slow_cycles: u64,
+    pub(crate) maintenance_probe_max_concurrency: u64,
     pub(crate) hybrid_ws: u64,
     pub(crate) hybrid_cold_start_http: u64,
     pub(crate) hybrid_recovery_http: u64,
@@ -203,6 +222,16 @@ impl Metrics {
             websocket_raw_bytes: self.websocket_raw_bytes.load(Ordering::Relaxed),
             websocket_sent_bytes: self.websocket_sent_bytes.load(Ordering::Relaxed),
             http_fallbacks: self.http_fallbacks.load(Ordering::Relaxed),
+            maintenance_cycles: self.maintenance_cycles.load(Ordering::Relaxed),
+            maintenance_cycle_elapsed_ms: self.maintenance_cycle_elapsed_ms.load(Ordering::Relaxed),
+            maintenance_probe_started: self.maintenance_probe_started.load(Ordering::Relaxed),
+            maintenance_probe_completed: self.maintenance_probe_completed.load(Ordering::Relaxed),
+            maintenance_probe_failed: self.maintenance_probe_failed.load(Ordering::Relaxed),
+            maintenance_probe_timeouts: self.maintenance_probe_timeouts.load(Ordering::Relaxed),
+            maintenance_slow_cycles: self.maintenance_slow_cycles.load(Ordering::Relaxed),
+            maintenance_probe_max_concurrency: self
+                .maintenance_probe_max_concurrency
+                .load(Ordering::Relaxed),
             hybrid_ws: route_counts.hybrid_ws,
             hybrid_cold_start_http: route_counts.hybrid_cold_start_http,
             hybrid_recovery_http: route_counts.hybrid_recovery_http,
@@ -264,6 +293,62 @@ impl Metrics {
         self.websocket_verified.store(true, Ordering::Relaxed);
         self.websocket_handshakes.fetch_add(1, Ordering::Relaxed);
         self.websocket_active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_maintenance_cycle(&self, elapsed: Duration, slow: bool) {
+        self.maintenance_cycles.fetch_add(1, Ordering::Relaxed);
+        if slow {
+            self.maintenance_slow_cycles.fetch_add(1, Ordering::Relaxed);
+        }
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        self.maintenance_cycle_elapsed_ms
+            .fetch_add(elapsed_ms, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_maintenance_probe_started(&self) {
+        self.maintenance_probe_started
+            .fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        self.maintenance_probe_started_notify.notify_waiters();
+        let active = self
+            .maintenance_probe_active
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        self.maintenance_probe_max_concurrency
+            .fetch_max(active, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_maintenance_probe_completed(&self, failed: bool, timed_out: bool) {
+        self.maintenance_probe_completed
+            .fetch_add(1, Ordering::Relaxed);
+        if failed {
+            self.maintenance_probe_failed
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if timed_out {
+            self.maintenance_probe_timeouts
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let _ = self.maintenance_probe_active.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |active| active.checked_sub(1),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_maintenance_probes_for_test(&self, expected: u64) -> bool {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let notified = self.maintenance_probe_started_notify.notified();
+                if self.snapshot().maintenance_probe_started >= expected {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
     }
 
     fn record_websocket_closed(&self) {
@@ -427,6 +512,16 @@ pub(crate) struct ProxyHandle {
 }
 
 impl ProxyHandle {
+    #[cfg(test)]
+    pub(crate) async fn run_maintenance_cycle_for_test(&self, pong_timeout: Duration) {
+        self.hybrid_pool.maintain_for_test(pong_timeout).await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_prewarm_for_test(&self, expected: usize) -> bool {
+        self.hybrid_pool.wait_for_prewarm_for_test(expected).await
+    }
+
     pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
     }

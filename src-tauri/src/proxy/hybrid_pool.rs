@@ -503,6 +503,21 @@ impl HybridPool {
             .is_some_and(|entry| entry.initialized)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn wait_for_prewarm_for_test(&self, expected: usize) -> bool {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let notified = self.inner.ready.notified();
+                if self.connection_snapshot().await.prewarm >= expected {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     pub(super) async fn release_session_connection(
         &self,
         scope: &HybridScope,

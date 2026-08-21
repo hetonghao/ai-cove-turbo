@@ -54,13 +54,14 @@ async fn connect_local_with_authorization(
     proxy: &ProxyHandle,
     authorization: Option<&'static str>,
 ) -> io::Result<(ClientWebSocket, u16)> {
-    connect_local_with_headers(proxy, authorization, None).await
+    connect_local_with_headers(proxy, authorization, None, None).await
 }
 
 async fn connect_local_with_headers(
     proxy: &ProxyHandle,
     authorization: Option<&'static str>,
     thread_id: Option<&str>,
+    scope_state: Option<&'static str>,
 ) -> io::Result<(ClientWebSocket, u16)> {
     let mut endpoint = Url::parse(proxy.endpoint()).map_err(io::Error::other)?;
     endpoint
@@ -82,6 +83,11 @@ async fn connect_local_with_headers(
             "thread-id",
             HeaderValue::from_str(thread_id).map_err(io::Error::other)?,
         );
+    }
+    if let Some(scope_state) = scope_state {
+        request
+            .headers_mut()
+            .insert("x-codex-turn-state", HeaderValue::from_static(scope_state));
     }
     let (client, response) = connect_async(request).await.map_err(io::Error::other)?;
     Ok((client, response.status().as_u16()))
@@ -1149,6 +1155,130 @@ async fn concurrent_create_cancel_and_client_close_do_not_replay() -> io::Result
         server.fixture.release_private();
     }
     assert_counts(server.fixture.counts().await, 6, 0, 2);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn maintenance_probes_multiple_scopes_concurrently_without_application_payloads()
+-> io::Result<()> {
+    // Given: independent connection groups with idle upstream sockets that hold probe Pongs.
+    const PROBE_TIMEOUT: Duration = Duration::from_millis(50);
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::ProbeDelay,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
+    let scope_states = [
+        "scope-a", "scope-b", "scope-c", "scope-d", "scope-e", "scope-f", "scope-g", "scope-h",
+        "scope-i", "scope-j", "scope-k", "scope-l",
+    ];
+    let mut clients = Vec::with_capacity(scope_states.len());
+    for scope_state in scope_states {
+        let (client, status) =
+            connect_local_with_headers(&proxy, None, None, Some(scope_state)).await?;
+        assert_eq!(status, 101);
+        clients.push(client);
+        server.fixture.wait_ready_for_scope(scope_state).await?;
+    }
+    assert!(proxy.wait_for_prewarm_for_test(6).await);
+
+    // When: one maintenance round probes every scope with a short timeout.
+    proxy.run_maintenance_cycle_for_test(PROBE_TIMEOUT).await;
+    server.fixture.release_private_all();
+
+    // Then: probes are bounded and carry no application payload.
+    let metrics_snapshot = metrics.snapshot();
+    assert!(metrics_snapshot.maintenance_probe_started >= 1);
+    assert_eq!(
+        metrics_snapshot.maintenance_probe_completed,
+        metrics_snapshot.maintenance_probe_started
+    );
+    let probe_count = metrics_snapshot.maintenance_probe_started;
+    assert_eq!(metrics_snapshot.maintenance_probe_timeouts, probe_count);
+    assert_eq!(metrics_snapshot.maintenance_probe_failed, probe_count);
+    assert_eq!(metrics_snapshot.maintenance_slow_cycles, 1);
+    let serial_baseline_ms =
+        u64::try_from(PROBE_TIMEOUT.as_millis()).unwrap_or(u64::MAX) * probe_count;
+    if probe_count >= 4 {
+        assert_eq!(metrics_snapshot.maintenance_probe_max_concurrency, 4);
+        assert!(metrics_snapshot.maintenance_cycle_elapsed_ms < serial_baseline_ms * 3 / 4);
+    } else {
+        assert!(metrics_snapshot.maintenance_probe_max_concurrency <= 4);
+    }
+    assert_eq!(server.fixture.counts().await.private_messages, 0);
+    drop(clients);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_maintenance_probe_closes_socket_without_application_payloads() -> io::Result<()>
+{
+    // Given: one idle upstream socket whose probe Pong is held by the fixture.
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+    const SCOPE: &str = "cancelled-scope";
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::ProbeDelay,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
+    let (client, status) = connect_local_with_headers(&proxy, None, None, Some(SCOPE)).await?;
+    assert_eq!(status, 101);
+    server
+        .fixture
+        .wait_ready_for_scope(SCOPE)
+        .await
+        .map_err(|error| io::Error::other(format!("ready: {error}")))?;
+    assert!(proxy.wait_for_prewarm_for_test(1).await);
+    let ready_before = server.fixture.ready_for_scope_count(SCOPE).await;
+
+    // When: the maintenance future is cancelled while its probe is in flight.
+    let mut maintenance = Box::pin(proxy.run_maintenance_cycle_for_test(PROBE_TIMEOUT));
+    tokio::select! {
+        () = &mut maintenance => {
+            return Err(io::Error::other("maintenance round completed before probe started"));
+        }
+        ready = metrics.wait_maintenance_probes_for_test(1) => {
+            if !ready {
+                return Err(io::Error::other("maintenance probe did not start"));
+            }
+        }
+    }
+    drop(maintenance);
+    server.fixture.release_private_all();
+
+    // Then: the guard closes the physical socket and records a failed probe, without payload.
+    server
+        .fixture
+        .wait_normal_closes(1)
+        .await
+        .map_err(|error| io::Error::other(format!("close: {error}")))?;
+    let snapshot = metrics.snapshot();
+    assert!(snapshot.maintenance_probe_started >= 1);
+    assert!(snapshot.maintenance_probe_completed >= 1);
+    assert!(snapshot.maintenance_probe_failed >= 1);
+    assert!(
+        server
+            .fixture
+            .wait_ready_for_scope_count(SCOPE, ready_before + 1)
+            .await
+            .is_ok()
+    );
+    let connection_snapshot = proxy.connection_snapshot().await;
+    assert!(
+        !connection_snapshot
+            .transitions
+            .iter()
+            .any(|transition| transition.id == "POOL-PROBE")
+    );
+    assert_eq!(server.fixture.counts().await.private_messages, 0);
+
+    drop(client);
     proxy.stop().await;
     server.stop().await;
     Ok(())

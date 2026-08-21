@@ -124,6 +124,9 @@ impl Fixture {
         websocket: &mut FixtureWebSocket,
         previous_response_id: Option<&str>,
     ) -> bool {
+        if matches!(self.config.private, PrivateBehavior::ProbeDelay) {
+            self.state.release_private.notified().await;
+        }
         loop {
             let payload = match websocket.next().await {
                 Some(Ok(Message::Binary(payload))) => payload,
@@ -251,6 +254,7 @@ impl Fixture {
             | PrivateBehavior::FailFirstBatch
             | PrivateBehavior::HoldResponse
             | PrivateBehavior::HoldResponseNoPong
+            | PrivateBehavior::ProbeDelay
             | PrivateBehavior::HttpPayloadTooLarge
             | PrivateBehavior::IdleError
             | PrivateBehavior::IdleMessage
@@ -390,6 +394,11 @@ async fn upgrade_response(
     request: &mut Request,
     private: bool,
 ) -> Response<Body> {
+    let scope_state = request
+        .headers()
+        .get("x-codex-turn-state")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     fixture
         .record(|counts| counts.private_handshakes += 1)
         .await;
@@ -425,7 +434,17 @@ async fn upgrade_response(
         let Ok(upgraded) = upgrade.await else {
             return;
         };
-        worker.record(|counts| counts.private_ready += 1).await;
+        worker
+            .record(|counts| {
+                counts.private_ready += 1;
+                if let Some(scope_state) = scope_state {
+                    *counts
+                        .private_ready_by_scope
+                        .entry(scope_state)
+                        .or_default() += 1;
+                }
+            })
+            .await;
         let websocket = WebSocketStream::from_raw_socket(
             hyper_util::rt::TokioIo::new(upgraded),
             Role::Server,

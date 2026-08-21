@@ -5,7 +5,7 @@ use url::Url;
 
 use super::super::{hop_by_hop_headers, private_websocket};
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(in crate::proxy) struct HybridScope {
     pub(super) target: String,
     pub(super) headers: Vec<(String, Vec<u8>)>,

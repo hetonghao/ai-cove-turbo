@@ -96,7 +96,7 @@ async fn canonical_first_request_overrides_stale_handshake_thread() -> io::Resul
     .await?;
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) =
-        connect_local_with_headers(&proxy, None, Some("stale-parent-thread")).await?;
+        connect_local_with_headers(&proxy, None, Some("stale-parent-thread"), None).await?;
     assert_eq!(status, 101);
     server.fixture.wait_ready(6).await?;
 
