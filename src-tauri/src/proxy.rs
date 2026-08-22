@@ -263,7 +263,7 @@ impl Metrics {
         let hybrid_capacity_failure = record.route != traffic::TrafficRoute::DirectHttp
             && is_context_length_exceeded(record.status);
         self.requests.fetch_add(1, Ordering::Relaxed);
-        if record.path == "/v1/responses"
+        if is_responses_path(record.path)
             && (200..300).contains(&record.status)
             && result != traffic::TrafficResult::Error
         {
@@ -441,7 +441,7 @@ impl Metrics {
     }
 
     fn record_websocket_outcome(&self, record: traffic::TrafficRecord<'_>, compressed: bool) {
-        if record.path == "/v1/responses" && record.result == traffic::TrafficResult::Success {
+        if is_responses_path(record.path) && record.result == traffic::TrafficResult::Success {
             self.successful_responses.fetch_add(1, Ordering::Relaxed);
         }
         self.record_websocket_message(record, compressed);
@@ -952,7 +952,7 @@ pub(crate) async fn measure_private_encoding(
 fn resolve_target(upstream: &Url, uri: &axum::http::Uri) -> Url {
     let mut target = upstream.clone();
     let upstream_path = upstream.path().trim_end_matches('/');
-    let incoming_path = uri.path();
+    let incoming_path = canonical_request_path(uri.path());
     let target_path = if upstream_path.is_empty() || upstream_path == "/" {
         incoming_path.to_owned()
     } else if let Some(suffix) = incoming_path.strip_prefix("/v1") {
@@ -963,6 +963,17 @@ fn resolve_target(upstream: &Url, uri: &axum::http::Uri) -> Url {
     target.set_path(&target_path);
     target.set_query(uri.query());
     target
+}
+
+fn canonical_request_path(path: &str) -> &str {
+    match path {
+        "/v1/codex/responses" | "/codex/responses" => "/v1/responses",
+        _ => path,
+    }
+}
+
+fn is_responses_path(path: &str) -> bool {
+    canonical_request_path(path) == "/v1/responses"
 }
 
 fn hop_by_hop_headers(headers: &HeaderMap) -> HashSet<HeaderName> {
@@ -1012,7 +1023,7 @@ mod tests {
     use axum::{
         Router,
         body::{Body, Bytes},
-        extract::State,
+        extract::{OriginalUri, State},
         http::{HeaderMap, StatusCode},
         response::Response,
         routing::post,
@@ -1042,6 +1053,7 @@ mod tests {
     use super::*;
 
     type CapturedRequest = Arc<Mutex<Option<(HeaderMap, Bytes)>>>;
+    type CapturedTarget = Arc<Mutex<Option<(String, HeaderMap, Bytes)>>>;
     type CapturedPrivateMessage = (Vec<u8>, bool, bool);
     type CapturedPrivateMessages = (CapturedPrivateMessage, CapturedPrivateMessage);
 
@@ -1497,6 +1509,19 @@ mod tests {
             .unwrap_or_else(|_| Response::new(Body::empty()))
     }
 
+    async fn capture_target(
+        State(captured): State<CapturedTarget>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response<Body> {
+        *captured.lock().await = Some((uri.to_string(), headers, body));
+        Response::builder()
+            .status(StatusCode::CREATED)
+            .body(Body::from("ok"))
+            .unwrap_or_else(|_| Response::new(Body::empty()))
+    }
+
     async fn streaming_upstream() -> Response<Body> {
         let stream = futures_util::stream::unfold(0_u8, |state| async move {
             match state {
@@ -1522,6 +1547,90 @@ mod tests {
                 .unwrap_or_else(|_| axum::http::HeaderValue::from_static("text/plain")),
         );
         response
+    }
+
+    #[tokio::test]
+    async fn responses_aliases_share_canonical_http_route_and_preserve_identity()
+    -> Result<(), Box<dyn Error>> {
+        // Given: the New API exposes only its canonical Responses route.
+        let captured = CapturedTarget::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let app = Router::new()
+            .route("/v1/responses", post(capture_target))
+            .with_state(Arc::clone(&captured));
+        let upstream_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let metrics = Arc::new(Metrics::default());
+        let proxy = start_proxy(ProxyOptions {
+            upstream: Url::parse(&format!("http://{address}/v1"))?,
+            compression_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            websocket_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ai_cove_private_websocket_zstd: false,
+            metrics: Arc::clone(&metrics),
+            preferred_ports: vec![0],
+            max_request_body_bytes: 1024 * 1024,
+        })
+        .await?;
+        let mut local = Url::parse(proxy.endpoint())?;
+        let body = r#"{"model":"alias-model","input":"hello"}"#;
+        let client = reqwest::Client::new();
+
+        for (path, query) in [
+            ("/v1/responses", "trace=canonical"),
+            ("/v1/codex/responses", "trace=codex-v1"),
+            ("/codex/responses", "trace=codex-root"),
+        ] {
+            // When: a canonical request or an explicit Responses alias is posted.
+            local.set_path(path);
+            local.set_query(Some(query));
+            let response = client
+                .post(local.as_str())
+                .header("authorization", "Bearer alias-test")
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await?;
+
+            // Then: New API sees one canonical path with the original query, headers, and body.
+            let status = response.status();
+            let response_body = response.text().await?;
+            assert_eq!(status, StatusCode::CREATED, "body={response_body}");
+            let (target, headers, forwarded_body) = captured
+                .lock()
+                .await
+                .take()
+                .ok_or("canonical upstream request missing")?;
+            assert_eq!(target, format!("/v1/responses?{query}"));
+            assert_eq!(
+                headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer alias-test")
+            );
+            assert_eq!(forwarded_body, body.as_bytes());
+        }
+        assert_eq!(metrics.snapshot().successful_responses, 3);
+
+        // When: an unallowlisted path is posted.
+        local.set_path("/v1/codex/chat/completions");
+        local.set_query(None);
+        let response = client
+            .post(local.as_str())
+            .header("authorization", "Bearer alias-test")
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await?;
+
+        // Then: Turbo does not silently rewrite it into Responses.
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(captured.lock().await.is_none());
+
+        proxy.stop().await;
+        upstream_task.abort();
+        Ok(())
     }
 
     #[tokio::test]
@@ -2330,7 +2439,7 @@ mod tests {
             TcpStream::connect(("127.0.0.1", endpoint.port().ok_or("missing port")?)).await?;
         client
             .write_all(
-                b"GET /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: test-only\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Extensions: permessage-deflate\r\nAuthorization: Bearer test-only\r\n\r\n",
+                b"GET /v1/codex/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: test-only\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Extensions: permessage-deflate\r\nAuthorization: Bearer test-only\r\n\r\n",
             )
             .await?;
 
