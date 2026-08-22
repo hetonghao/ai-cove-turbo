@@ -563,16 +563,23 @@ h2 {
 }
 
 .b-model-catalog__meta {
-  justify-content: space-between;
+  flex-wrap: wrap;
+  justify-content: flex-start;
   gap: 12px;
 }
 
 .b-model-catalog__meta code {
+  min-width: 0;
+  flex: 1 1 180px;
   overflow: hidden;
   color: var(--b-muted);
   font: 0.6875rem/1.4 var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.b-model-catalog__meta > .state-indicator {
+  flex: 0 0 auto;
 }
 
 .b-model-catalog__list {
@@ -2529,6 +2536,12 @@ body[data-active-tab="statistics"] {
 
 .tab-panel#panel-config .b-stage {
   min-height: calc(100% - 44px);
+}
+
+#panel-config .b-stage {
+  justify-content: flex-start;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .b-config-layout {

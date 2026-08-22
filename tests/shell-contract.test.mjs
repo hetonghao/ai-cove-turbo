@@ -216,6 +216,10 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(css, /\.b-model-catalog__actions button:hover:not\(:disabled\)\s*\{[\s\S]*?color:\s*var\(--b-accent\);[\s\S]*?background:\s*var\(--b-accent-soft\);/);
   assert.match(css, /\.b-model-catalog__actions button:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--b-accent\);/);
   assert.match(css, /\.b-model-catalog__actions button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;[\s\S]*?opacity:\s*0\.45;/);
+  assert.match(css, /\.b-model-catalog__meta\s*\{[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?justify-content:\s*flex-start;/);
+  assert.match(css, /\.b-model-catalog__meta code\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?flex:\s*1 1 180px;/);
+  assert.match(css, /\.b-model-catalog__meta > \.state-indicator\s*\{[\s\S]*?flex:\s*0 0 auto;/);
+  assert.match(css, /#panel-config \.b-stage\s*\{[\s\S]*?justify-content:\s*flex-start;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overscroll-behavior:\s*contain;/);
   assert.match(rust, /get_model_catalog/);
   assert.match(rust, /update_model_catalog/);
   assert.match(rust, /restore_model_catalog/);
