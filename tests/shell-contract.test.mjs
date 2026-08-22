@@ -177,6 +177,9 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
     "confirm_non_ai_cove",
     "check_for_updates",
     "install_update",
+    "update_model_catalog",
+    "restore_model_catalog",
+    "reclaim_model_catalog",
   ];
 
   // When: 前端加载并进入真实桌面运行时。
@@ -189,6 +192,28 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
   assert.match(app, /visible/);
   assert.match(app, /command === "confirm_non_ai_cove"\) state\.nonAiCoveConfirmed = true/);
   assert.match(app, /"set-ai-cove-upstream": \["set_ai_cove_upstream"\]/);
+});
+
+test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存", async () => {
+  const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const app = await readFile(new URL("app.js", sourceUrl), "utf8");
+  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const configPanel = html.slice(html.indexOf('id="panel-config"'));
+
+  assert.match(configPanel, /data-model-catalog-list/);
+  assert.match(configPanel, /data-action="save-model-catalog"/);
+  assert.match(configPanel, /data-action="cancel-model-catalog"/);
+  assert.match(configPanel, /data-action="restore-model-catalog"/);
+  assert.match(configPanel, /data-action="reclaim-model-catalog"/);
+  assert.match(app, /option value=\"list\"/);
+  assert.match(app, /option value=\"hide\"/);
+  assert.match(app, /option value=\"none\" disabled/);
+  assert.match(app, /document\.addEventListener\("drop"/);
+  assert.match(app, /priority: priority \+ 1/);
+  assert.match(rust, /get_model_catalog/);
+  assert.match(rust, /update_model_catalog/);
+  assert.match(rust, /restore_model_catalog/);
+  assert.match(rust, /reclaim_model_catalog/);
 });
 
 test("Windows 重启 Codex 不闪出 PowerShell 并返回新进程", async () => {

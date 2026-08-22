@@ -20,6 +20,7 @@ use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use url::Url;
 
 use crate::{
+    catalog::{self, CatalogModelUpdate, CatalogStatus},
     config::{
         AI_COVE_UPSTREAM, ConfigError, ManagedConfig, ManagedOwnership, Preflight, RestoreOutcome,
         SessionHandoff, StaleRecovery, UpstreamCompatibility, managed_ownership, preflight,
@@ -50,6 +51,10 @@ impl RuntimePaths {
 
     fn session_handoff_path(&self) -> PathBuf {
         self.data_dir.join("handoff.json")
+    }
+
+    fn catalog_recovery_path(&self) -> PathBuf {
+        self.data_dir.join("catalog-recovery.json")
     }
 
     fn preferences_path(&self) -> PathBuf {
@@ -133,6 +138,7 @@ pub(crate) struct AppStatus {
     pub(crate) update_state: String,
     pub(crate) update_message: String,
     pub(crate) update_progress: u8,
+    pub(crate) catalog: CatalogStatus,
 }
 
 impl AppStatus {
@@ -181,6 +187,17 @@ impl AppStatus {
             update_state: "idle".to_owned(),
             update_message: "尚未检查更新".to_owned(),
             update_progress: 0,
+            catalog: CatalogStatus {
+                path: "—".to_owned(),
+                state: "starting".to_owned(),
+                source_path: None,
+                models: Vec::new(),
+                changes: Vec::new(),
+                restart_required: false,
+                loaded: false,
+                request_verified: false,
+                revision: String::new(),
+            },
         }
     }
 }
@@ -190,6 +207,7 @@ pub(crate) struct AppRuntime {
     paths: RuntimePaths,
     preferences: Mutex<Preferences>,
     status: RwLock<AppStatus>,
+    catalog: Mutex<CatalogStatus>,
     compression_enabled: Arc<AtomicBool>,
     websocket_enabled: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
@@ -211,7 +229,14 @@ struct TrafficPersistence {
 impl AppRuntime {
     pub(crate) fn new(paths: RuntimePaths) -> Arc<Self> {
         let preferences = load_preferences(&paths.preferences_path());
-        let status = AppStatus::starting(&preferences);
+        let mut status = AppStatus::starting(&preferences);
+        let home = paths
+            .config_path
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let catalog_status = catalog::starting_status(&home);
+        status.catalog = catalog_status.clone();
         let metrics = Arc::new(Metrics::load_traffic(&paths.traffic_path()));
         Arc::new(Self {
             paths,
@@ -219,6 +244,7 @@ impl AppRuntime {
             websocket_enabled: Arc::new(AtomicBool::new(preferences.websocket_enabled)),
             preferences: Mutex::new(preferences),
             status: RwLock::new(status),
+            catalog: Mutex::new(catalog_status),
             metrics,
             managed: Mutex::new(None),
             proxy: AsyncMutex::new(None),
@@ -263,6 +289,35 @@ impl AppRuntime {
                 return;
             }
         };
+
+        let home = self
+            .paths
+            .config_path
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        match catalog::ensure_catalog(
+            &home,
+            &self.paths.config_path,
+            &self.paths.catalog_recovery_path(),
+        ) {
+            Ok(catalog) => {
+                *lock_mutex(&self.catalog) = catalog.clone();
+                self.update_status(|status| status.catalog = catalog);
+            }
+            Err(error) => {
+                self.update_status(|status| {
+                    status.catalog.state =
+                        if matches!(error, catalog::CatalogError::OwnershipConflict) {
+                            "conflict".to_owned()
+                        } else {
+                            "error".to_owned()
+                        };
+                    status.catalog.restart_required = false;
+                    status.catalog.loaded = false;
+                });
+            }
+        }
         let upstream = check.upstream.as_str().to_owned();
         let ai_cove = check.compatibility == UpstreamCompatibility::AiCove;
         self.update_status(|status| {
@@ -329,6 +384,7 @@ impl AppRuntime {
     }
 
     pub(crate) async fn status(&self) -> AppStatus {
+        self.refresh_catalog();
         self.refresh_ownership().await;
         self.verify_codex_restart().await;
         let metrics = self.metrics.snapshot();
@@ -342,6 +398,19 @@ impl AppRuntime {
                 status.restart_required = false;
                 status.config_message = "已观察到本次配置后的成功 Responses 请求".to_owned();
             });
+            let mut catalog = lock_mutex(&self.catalog);
+            if catalog.loaded {
+                catalog.request_verified = true;
+                self.update_status(|status| status.catalog = catalog.clone());
+            }
+        }
+        let mut catalog = lock_mutex(&self.catalog);
+        if catalog.loaded
+            && !catalog.request_verified
+            && metrics.successful_responses > self.activation_baseline.load(Ordering::Relaxed)
+        {
+            catalog.request_verified = true;
+            self.update_status(|status| status.catalog = catalog.clone());
         }
         let mut status = read_lock(&self.status).clone();
         status.requests = metrics.requests;
@@ -513,6 +582,78 @@ impl AppRuntime {
             status.restart_required = false;
             status.config_message = "已检测到 Codex 重新启动，等待首次请求验证".to_owned();
         });
+        let mut catalog = lock_mutex(&self.catalog);
+        if catalog.restart_required {
+            catalog.restart_required = false;
+            catalog.loaded = true;
+            self.update_status(|status| status.catalog = catalog.clone());
+        }
+    }
+
+    pub(crate) async fn model_catalog(&self) -> CatalogStatus {
+        self.refresh_catalog();
+        lock_mutex(&self.catalog).clone()
+    }
+
+    pub(crate) async fn update_model_catalog(
+        &self,
+        updates: Vec<CatalogModelUpdate>,
+        expected_revision: String,
+    ) -> Result<CatalogStatus, catalog::CatalogError> {
+        let home = self
+            .paths
+            .config_path
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let current = catalog::update_catalog(
+            &home,
+            &self.paths.config_path,
+            &self.paths.catalog_recovery_path(),
+            &updates,
+            &expected_revision,
+        )?;
+        *lock_mutex(&self.catalog) = current.clone();
+        self.update_status(|status| status.catalog = current.clone());
+        Ok(current)
+    }
+
+    pub(crate) async fn restore_model_catalog(
+        &self,
+    ) -> Result<CatalogStatus, catalog::CatalogError> {
+        let home = self
+            .paths
+            .config_path
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let current = catalog::restore_catalog(
+            &home,
+            &self.paths.config_path,
+            &self.paths.catalog_recovery_path(),
+        )?;
+        *lock_mutex(&self.catalog) = current.clone();
+        self.update_status(|status| status.catalog = current.clone());
+        Ok(current)
+    }
+
+    pub(crate) async fn reclaim_model_catalog(
+        &self,
+    ) -> Result<CatalogStatus, catalog::CatalogError> {
+        let home = self
+            .paths
+            .config_path
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let current = catalog::reclaim_catalog(
+            &home,
+            &self.paths.config_path,
+            &self.paths.catalog_recovery_path(),
+        )?;
+        *lock_mutex(&self.catalog) = current.clone();
+        self.update_status(|status| status.catalog = current.clone());
+        Ok(current)
     }
 
     pub(crate) async fn verify_codex_restart(&self) {
@@ -633,6 +774,22 @@ impl AppRuntime {
                     return Err(error);
                 }
             }
+        }
+        if self.paths.catalog_recovery_path().exists() {
+            let home = self
+                .paths
+                .config_path
+                .parent()
+                .and_then(Path::parent)
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            let restored = catalog::restore_catalog(
+                &home,
+                &self.paths.config_path,
+                &self.paths.catalog_recovery_path(),
+            )
+            .map_err(|error| ConfigError::Write(std::io::Error::other(error.to_string())))?;
+            *lock_mutex(&self.catalog) = restored.clone();
+            self.update_status(|status| status.catalog = restored);
         }
         let proxy = self.proxy.lock().await.take();
         if let Some(proxy) = proxy {
@@ -821,6 +978,44 @@ impl AppRuntime {
 
     fn update_status(&self, update: impl FnOnce(&mut AppStatus)) {
         update(&mut write_lock(&self.status));
+    }
+
+    fn refresh_catalog(&self) {
+        let current = lock_mutex(&self.catalog).clone();
+        if current.state == "restored" {
+            return;
+        }
+        let home = self
+            .paths
+            .config_path
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        match catalog::read_catalog(
+            &home,
+            &self.paths.config_path,
+            &self.paths.catalog_recovery_path(),
+            current.restart_required,
+            current.loaded,
+            current.request_verified,
+        ) {
+            Ok(updated) => {
+                *lock_mutex(&self.catalog) = updated.clone();
+                self.update_status(|status| status.catalog = updated);
+            }
+            Err(error) => {
+                let mut blocked = current;
+                blocked.state = if matches!(error, catalog::CatalogError::OwnershipConflict) {
+                    "conflict".to_owned()
+                } else {
+                    "error".to_owned()
+                };
+                blocked.restart_required = false;
+                blocked.loaded = false;
+                *lock_mutex(&self.catalog) = blocked.clone();
+                self.update_status(|status| status.catalog = blocked);
+            }
+        }
     }
 
     fn report_session_handoff_error(&self, error: &ConfigError) {
@@ -1089,6 +1284,54 @@ supports_websockets = false
         assert!(restored.contains("https://api.ai-cove.com/v1"));
         assert!(restored.contains("supports_websockets = false"));
         assert!(!restored.contains("http://127.0.0.1:"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn catalog_restart_and_request_states_are_independent_from_transport_restart()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let home = root.path().join("home");
+        let config_dir = home.join(".codex");
+        fs::create_dir_all(&config_dir)?;
+        let source = root.path().join("models.json");
+        fs::write(
+            &source,
+            r#"{"models":[{"slug":"alpha","visibility":"list","priority":1}]}"#,
+        )?;
+        let config_path = config_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
+                source.display()
+            ),
+        )?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: config_path.clone(),
+            data_dir: root.path().join("data"),
+        });
+        let recovery = runtime.paths.catalog_recovery_path();
+        let initial = catalog::ensure_catalog(&home, &config_path, &recovery)?;
+        let saved = runtime
+            .update_model_catalog(
+                vec![CatalogModelUpdate {
+                    slug: "alpha".to_owned(),
+                    visibility: Some("hide".to_owned()),
+                    priority: Some(1),
+                }],
+                initial.revision,
+            )
+            .await?;
+        assert!(saved.restart_required);
+        assert!(!runtime.status().await.restart_required);
+
+        runtime.mark_desktop_restarted(Some(42));
+        let loaded = runtime.model_catalog().await;
+        assert!(loaded.loaded);
+        assert!(!loaded.request_verified);
+        runtime.metrics.record_successful_response_for_test();
+        assert!(runtime.status().await.catalog.request_verified);
         Ok(())
     }
 

@@ -42,6 +42,125 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
+async function catalogHarness({ failSave = false } = {}) {
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  const catalog = {
+    path: "/home/test/.codex/model-catalogs/ai_cove_turbo.json",
+    state: "owned",
+    sourcePath: "/home/test/models.json",
+    models: [
+      { slug: "alpha", displayName: "Alpha", description: "a", visibility: "list", priority: 1 },
+      { slug: "beta", displayName: "Beta", description: "b", visibility: "hide", priority: 2 },
+    ],
+    changes: [],
+    restartRequired: false,
+    loaded: true,
+    requestVerified: false,
+    revision: "revision-1",
+  };
+  const status = { serviceHealthy: true, configState: "managed", catalog };
+  const path = element({ modelCatalogPath: "" });
+  const indicator = element({ modelCatalogState: "" });
+  const list = element({ modelCatalogList: "" });
+  const message = element({ modelCatalogMessage: "" });
+  const actions = ["save-model-catalog", "cancel-model-catalog", "restore-model-catalog", "reclaim-model-catalog"].map((action) => {
+    const target = element({ action });
+    target.closest = (selector) => selector === "[data-action]" ? target : null;
+    return target;
+  });
+  const selectors = new Map([
+    ["[data-model-catalog-path]", path],
+    ["[data-model-catalog-state]", indicator],
+    ["[data-model-catalog-list]", list],
+    ["[data-model-catalog-message]", message],
+  ]);
+  const listeners = new Map();
+  const calls = [];
+  let tick;
+  const invoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "get_app_status") return status;
+    if (command === "update_model_catalog") {
+      if (failSave) throw new Error("save failed");
+      return { ...catalog, models: args.updates, restartRequired: true, loaded: false, revision: "revision-2" };
+    }
+    return { ...catalog, state: command === "restore_model_catalog" ? "restored" : "owned" };
+  };
+  const document = {
+    hidden: false,
+    readyState: "complete",
+    body: element(),
+    addEventListener(type, handler) { listeners.set(type, handler); },
+    querySelector(selector) { return selectors.get(selector) ?? null; },
+    querySelectorAll(selector) { return selector === "[data-action]" ? actions : []; },
+  };
+  const window = {
+    __TAURI__: { core: { invoke } },
+    location: { href: "tauri://localhost/?tab=config" },
+    history: { replaceState() {} },
+    addEventListener() {},
+    setInterval(handler) { tick = handler; },
+    matchMedia: () => ({ matches: false }),
+  };
+  await runApp(source, { document, window, URL, Intl, Error });
+  await new Promise((resolve) => setImmediate(resolve));
+  calls.length = 0;
+  const row = (slug) => ({ dataset: { modelSlug: slug } });
+  return {
+    calls,
+    indicator,
+    list,
+    async click(action) {
+      listeners.get("click")?.({ target: actions.find((target) => target.dataset.action === action) });
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+    change(slug, value) {
+      listeners.get("change")?.({
+        target: {
+          value,
+          matches: (selector) => selector === "[data-model-visibility]",
+          closest: (selector) => selector === "[data-model-slug]" ? row(slug) : null,
+        },
+      });
+    },
+    drag(from, to) {
+      listeners.get("dragstart")?.({ target: { closest: () => row(from) }, dataTransfer: { setData() {}, effectAllowed: "" } });
+      listeners.get("drop")?.({ target: { closest: () => row(to) }, preventDefault() {} });
+      listeners.get("dragend")?.({});
+    },
+    async tick() {
+      await tick?.();
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  };
+}
+
+test("模型目录保存、取消、拖拽和失败恢复走真实命令边界", async () => {
+  const saved = await catalogHarness();
+  saved.change("alpha", "hide");
+  saved.drag("alpha", "beta");
+  await saved.click("save-model-catalog");
+  const save = saved.calls.find((call) => call.command === "update_model_catalog");
+  assert.deepEqual(save.args.updates.map(({ slug, visibility, priority }) => ({ slug, visibility, priority })), [
+    { slug: "beta", visibility: "hide", priority: 1 },
+    { slug: "alpha", visibility: "hide", priority: 2 },
+  ]);
+  assert.equal(save.args.expectedRevision, "revision-1");
+
+  const cancelled = await catalogHarness();
+  cancelled.change("alpha", "hide");
+  await cancelled.click("cancel-model-catalog");
+  await cancelled.click("save-model-catalog");
+  const cancelledSave = cancelled.calls.find((call) => call.command === "update_model_catalog");
+  assert.equal(cancelledSave.args.updates[0].visibility, "list");
+
+  const failed = await catalogHarness({ failSave: true });
+  await failed.click("save-model-catalog");
+  assert.equal(failed.indicator.textContent, "目录不可用");
+  await failed.tick();
+  assert.equal(failed.indicator.textContent, "Codex 已加载");
+});
+
 test("产品图标气泡支持轻触关闭并打开 AI Cove", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const trigger = element({ action: "toggle-ai-cove-bubble", aiCoveTrigger: "" });

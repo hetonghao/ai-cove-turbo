@@ -541,6 +541,119 @@ h2 {
   line-height: 1.4;
 }
 
+.b-model-catalog {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--b-line);
+  border-radius: 12px;
+  background: rgba(8, 13, 11, 0.56);
+}
+
+.b-config-heading--catalog {
+  gap: 3px;
+}
+
+.b-model-catalog__meta,
+.b-model-catalog__actions,
+.b-model-row {
+  display: flex;
+  align-items: center;
+}
+
+.b-model-catalog__meta {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.b-model-catalog__meta code {
+  overflow: hidden;
+  color: var(--b-muted);
+  font: 0.6875rem/1.4 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.b-model-catalog__list {
+  display: grid;
+  gap: 8px;
+  max-height: 330px;
+  overflow-y: auto;
+}
+
+.b-model-row {
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(214, 236, 221, 0.12);
+  border-radius: 9px;
+  background: rgba(16, 24, 20, 0.74);
+}
+
+.b-model-row__drag {
+  min-width: 30px;
+  min-height: 30px;
+  cursor: grab;
+}
+
+.b-model-row__copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.b-model-row__copy strong,
+.b-model-row__copy code,
+.b-model-row__copy small {
+  display: block;
+}
+
+.b-model-row__copy code,
+.b-model-row__copy small,
+.b-model-row label span,
+.b-model-row__priority,
+.b-model-catalog__message {
+  color: var(--b-muted);
+  font-size: 0.6875rem;
+}
+
+.b-model-row__copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.b-model-row label {
+  display: grid;
+  gap: 3px;
+}
+
+.b-model-row select {
+  min-height: 30px;
+  border: 1px solid var(--b-line);
+  border-radius: 6px;
+  color: var(--b-ink);
+  background: #101713;
+}
+
+.b-model-row__priority {
+  min-width: 28px;
+  font-family: var(--font-mono);
+  text-align: right;
+}
+
+.b-model-catalog__message:empty {
+  display: none;
+}
+
+.b-model-catalog__actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.b-model-catalog__actions button {
+  min-height: 34px;
+}
+
 .b-action-feedback[data-tone="success"] {
   color: var(--b-success);
 }

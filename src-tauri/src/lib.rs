@@ -3,6 +3,7 @@
 #![allow(clippy::unreachable)] // Tauri's command macro emits an internal unreachable branch.
 #![allow(clippy::redundant_pub_crate)] // Private modules expose crate-scoped test seams.
 
+pub(crate) mod catalog;
 mod codex_thread_title;
 pub(crate) mod config;
 pub(crate) mod proxy;
@@ -90,6 +91,10 @@ pub fn run() -> tauri::Result<()> {
             get_app_status,
             get_connection_snapshot,
             get_codex_thread_info,
+            get_model_catalog,
+            update_model_catalog,
+            restore_model_catalog,
+            reclaim_model_catalog,
             open_ai_cove,
             set_compression,
             set_websocket,
@@ -306,6 +311,45 @@ async fn get_codex_thread_info(
     let codex_home = std::env::var_os("CODEX_HOME")
         .map_or_else(|| home.join(".codex"), std::path::PathBuf::from);
     codex_thread_title::read(codex_home.join("state_5.sqlite"), thread_id).await
+}
+
+#[tauri::command]
+async fn get_model_catalog(
+    runtime: State<'_, Arc<AppRuntime>>,
+) -> Result<catalog::CatalogStatus, String> {
+    Ok(runtime.model_catalog().await)
+}
+
+#[tauri::command]
+async fn update_model_catalog(
+    runtime: State<'_, Arc<AppRuntime>>,
+    updates: Vec<catalog::CatalogModelUpdate>,
+    expected_revision: String,
+) -> Result<catalog::CatalogStatus, String> {
+    runtime
+        .update_model_catalog(updates, expected_revision)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn restore_model_catalog(
+    runtime: State<'_, Arc<AppRuntime>>,
+) -> Result<catalog::CatalogStatus, String> {
+    runtime
+        .restore_model_catalog()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn reclaim_model_catalog(
+    runtime: State<'_, Arc<AppRuntime>>,
+) -> Result<catalog::CatalogStatus, String> {
+    runtime
+        .reclaim_model_catalog()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

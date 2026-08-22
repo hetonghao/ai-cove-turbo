@@ -78,6 +78,7 @@
     updateState: "idle",
     updateMessage: "尚未检查更新",
     updateProgress: 0,
+    catalog: { path: "~/.codex/model-catalogs/ai_cove_turbo.json", state: "starting", sourcePath: null, models: [], changes: [], restartRequired: false, loaded: false, requestVerified: false, revision: "" },
   };
 
   function buildPreviewTelemetry() {
@@ -204,6 +205,8 @@
     "check-for-updates": ["check_for_updates"],
     "install-update": ["install_update"],
   };
+  let catalogDraft = null;
+  let draggedCatalogSlug = "";
 
   function readTab() {
     const requestedTab = new URL(window.location.href).searchParams.get("tab");
@@ -590,6 +593,51 @@
     });
   }
 
+  function catalogStatusLabel(catalog) {
+    if (catalog.state === "conflict") return ["接管已丢失", "blocked"];
+    if (catalog.state === "error") return ["目录不可用", "blocked"];
+    if (catalog.requestVerified) return ["真实请求已验证", "verified"];
+    if (catalog.restartRequired) return ["需要重启 Codex", "required"];
+    if (catalog.loaded) return ["Codex 已加载", "verified"];
+    if (catalog.state === "owned") return ["目录已写入", "verified"];
+    if (catalog.state === "restored") return ["已恢复原指针", "verified"];
+    return ["检查中", "waiting"];
+  }
+
+  function catalogModels() {
+    if (!catalogDraft) catalogDraft = (state.catalog?.models ?? []).map((model) => ({ ...model }));
+    return catalogDraft;
+  }
+
+  function catalogVisibilityOptions(visibility) {
+    const preserved = ["list", "hide", "none"].includes(visibility)
+      ? ""
+      : `<option value="${escapeHtml(visibility)}" disabled selected>保留 ${escapeHtml(visibility)}</option>`;
+    return `<option value="list"${visibility === "list" ? " selected" : ""}>显示</option><option value="hide"${visibility === "hide" ? " selected" : ""}>隐藏</option><option value="none" disabled${visibility === "none" ? " selected" : ""}>保留 none</option>${preserved}`;
+  }
+
+  function renderModelCatalog() {
+    const catalog = state.catalog ?? desktopStatus.catalog;
+    const path = $("[data-model-catalog-path]");
+    const indicator = $("[data-model-catalog-state]");
+    const list = $("[data-model-catalog-list]");
+    const message = $("[data-model-catalog-message]");
+    if (path) path.textContent = catalog.path || desktopStatus.catalog.path;
+    const [label, status] = catalogStatusLabel(catalog);
+    if (indicator) {
+      indicator.textContent = label;
+      indicator.dataset.status = status;
+    }
+    if (message) {
+      const changes = Array.isArray(catalog.changes) ? catalog.changes : [];
+      message.textContent = changes.length
+        ? changes.map((change) => `${change.slug} · ${change.field}: ${change.before ?? "—"} → ${change.after ?? "—"}`).join("；")
+        : catalog.state === "conflict" ? "Codex 配置中的目录指针已被外部修改。" : "";
+    }
+    if (!list) return;
+    list.innerHTML = catalogModels().map((model) => `<article class="b-model-row" draggable="true" data-model-slug="${escapeHtml(model.slug)}"><button class="b-model-row__drag" type="button" aria-label="拖动 ${escapeHtml(model.displayName || model.slug)} 调整优先级">↕</button><span class="b-model-row__copy"><strong>${escapeHtml(model.displayName || model.slug)}</strong><code>${escapeHtml(model.slug)}</code><small>${escapeHtml(model.description || "")}</small></span><label><span>显示</span><select data-model-visibility>${catalogVisibilityOptions(model.visibility)}</select></label><span class="b-model-row__priority">#${Number(model.priority) || 0}</span></article>`).join("");
+  }
+
   function renderState(options = {}) {
     document.body.dataset.serviceHealthy = String(Boolean(state.serviceHealthy));
     all("[data-state]").forEach((target) => {
@@ -614,6 +662,7 @@
     renderVisibility();
     renderLiveRecovery();
     renderControls();
+    renderModelCatalog();
     if (state.tab === "live" && statusHydrated) renderLiveStream(options);
     if (state.tab === "statistics") renderStatistics();
   }
@@ -1516,7 +1565,11 @@
   }
 
   function applyStatus(status, options = {}) {
-    if (status && typeof status === "object") state = { ...state, ...status, technicalDetail: "" };
+    if (status && typeof status === "object") {
+      const previousModels = state.catalog?.models;
+      state = { ...state, ...status, technicalDetail: "" };
+      if (status.catalog && status.catalog.models !== previousModels) catalogDraft = null;
+    }
     syncLiveRequests();
     renderState(options);
   }
@@ -1611,6 +1664,61 @@
       unseenLiveRequests = 0;
       liveStreamChanged = true;
       renderLiveStream();
+      return;
+    }
+    if (action === "cancel-model-catalog") {
+      catalogDraft = null;
+      renderModelCatalog();
+      return;
+    }
+    if (action === "save-model-catalog") {
+      if (pendingAction) return;
+      pendingAction = action;
+      renderControls();
+      try {
+        const updates = catalogModels().map((model, priority) => ({ slug: model.slug, visibility: model.visibility, priority: priority + 1 }));
+        const catalog = invoke ? await invoke("update_model_catalog", { updates, expectedRevision: state.catalog.revision }) : { ...state.catalog, models: updates.map((update) => ({ ...catalogModels().find((model) => model.slug === update.slug), ...update })), restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
+        state.catalog = catalog;
+        catalogDraft = null;
+      } catch (error) {
+        state.catalog = { ...state.catalog, state: "error" };
+        state.technicalDetail = error instanceof Error ? error.message : String(error);
+      } finally {
+        pendingAction = "";
+        renderState();
+      }
+      return;
+    }
+    if (action === "restore-model-catalog") {
+      if (pendingAction) return;
+      pendingAction = action;
+      renderControls();
+      try {
+        state.catalog = invoke ? await invoke("restore_model_catalog") : { ...state.catalog, state: "restored", restartRequired: false };
+        catalogDraft = null;
+      } catch (error) {
+        state.catalog = { ...state.catalog, state: "error" };
+        state.technicalDetail = error instanceof Error ? error.message : String(error);
+      } finally {
+        pendingAction = "";
+        renderState();
+      }
+      return;
+    }
+    if (action === "reclaim-model-catalog") {
+      if (pendingAction) return;
+      pendingAction = action;
+      renderControls();
+      try {
+        state.catalog = invoke ? await invoke("reclaim_model_catalog") : { ...state.catalog, state: "owned", restartRequired: true };
+        catalogDraft = null;
+      } catch (error) {
+        state.catalog = { ...state.catalog, state: "error" };
+        state.technicalDetail = error instanceof Error ? error.message : String(error);
+      } finally {
+        pendingAction = "";
+        renderState();
+      }
       return;
     }
     const [command, buildArgs] = actions[action] ?? [];
@@ -1829,7 +1937,36 @@
     });
     document.addEventListener("change", (event) => {
       if (event.target.matches?.("[data-filter]")) renderStatistics();
+      const row = event.target.closest?.("[data-model-slug]");
+      if (row && event.target.matches?.("[data-model-visibility]")) {
+        const model = catalogModels().find((candidate) => candidate.slug === row.dataset.modelSlug);
+        if (model) model.visibility = event.target.value;
+      }
     });
+    document.addEventListener("dragstart", (event) => {
+      const row = event.target.closest?.("[data-model-slug]");
+      if (!row) return;
+      draggedCatalogSlug = row.dataset.modelSlug;
+      event.dataTransfer?.setData("text/plain", draggedCatalogSlug);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    });
+    document.addEventListener("dragover", (event) => {
+      if (draggedCatalogSlug && event.target.closest?.("[data-model-slug]")) event.preventDefault();
+    });
+    document.addEventListener("drop", (event) => {
+      const target = event.target.closest?.("[data-model-slug]");
+      if (!target || !draggedCatalogSlug || target.dataset.modelSlug === draggedCatalogSlug) return;
+      event.preventDefault();
+      const models = catalogModels();
+      const from = models.findIndex((model) => model.slug === draggedCatalogSlug);
+      const to = models.findIndex((model) => model.slug === target.dataset.modelSlug);
+      if (from < 0 || to < 0) return;
+      const [moved] = models.splice(from, 1);
+      models.splice(to, 0, moved);
+      models.forEach((model, index) => { model.priority = index + 1; });
+      renderModelCatalog();
+    });
+    document.addEventListener("dragend", () => { draggedCatalogSlug = ""; });
     window.addEventListener("popstate", () => selectTab(readTab(), { updateUrl: false }));
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && invoke) void refreshStatus();
