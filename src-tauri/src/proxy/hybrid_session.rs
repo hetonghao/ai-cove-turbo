@@ -9,6 +9,7 @@ use super::super::{
         ConnectionActivity, ConnectionObservation, HybridScope, Lease, LeaseRetirement,
         SessionHandle,
     },
+    model_policy::ModelPolicy,
 };
 use super::{Active, ActiveKind, ClientWebSocket, WebSocketSendReceipt, WorkerEvent, flow, worker};
 
@@ -32,6 +33,7 @@ pub(super) struct Session {
     pub(super) last_terminal_response_id: Option<String>,
     pub(super) response_started: bool,
     pub(super) drain_reconnect_pending: bool,
+    pub(super) policy: ModelPolicy,
 }
 
 impl Session {
@@ -48,6 +50,10 @@ impl Session {
             .hybrid_pool
             .open_session(&pool_scope, target.clone(), client_headers.clone())
             .await;
+        let policy = state
+            .model_policy_path
+            .as_deref()
+            .map_or_else(ModelPolicy::load_current, ModelPolicy::load_path);
         Self {
             state,
             client_headers,
@@ -63,6 +69,7 @@ impl Session {
             last_terminal_response_id: None,
             response_started: false,
             drain_reconnect_pending: false,
+            policy,
         }
     }
 

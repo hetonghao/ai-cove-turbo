@@ -65,6 +65,7 @@ pub(crate) async fn start(upstream: Url, metrics: Arc<Metrics>) -> Result<ProxyH
         hybrid_pool,
         shutdown: Some(shutdown),
         task,
+        prewarm_state: std::sync::Arc::new(std::sync::Mutex::new("disabled".to_owned())),
     })
 }
 

@@ -5,7 +5,10 @@ use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
 use crate::proxy::HttpTraffic;
 
-use super::super::hybrid_pool::{Lease, LeaseRetirement};
+use super::super::{
+    hybrid_pool::{Lease, LeaseRetirement},
+    model_policy::Transport,
+};
 use super::{
     Active, ClientWebSocket, Session,
     common::{close_client, event_type, reject_thread_switch, send_error},
@@ -199,6 +202,15 @@ async fn start_response(
     if reject_missing_continuation(client, session, true, previous_response_id.as_deref()).await {
         return true;
     }
+    if previous_response_id.is_none()
+        && session
+            .policy
+            .transport_for_payload_with_hint(&payload, None)
+            == Transport::Http
+    {
+        start_http_only_response(session, active, fallback).await;
+        return true;
+    }
     if !large_http_request {
         checkout_response_websocket(
             session,
@@ -250,6 +262,22 @@ async fn start_response(
     }
     *active = Some(http::start_http_worker(session, http_payload, traffic));
     true
+}
+
+async fn start_http_only_response(
+    session: &Session,
+    active: &mut Option<Active>,
+    fallback: HttpFallback,
+) {
+    let HttpFallback::Request(http_payload) = fallback else {
+        return;
+    };
+    let traffic = if session.handle.has_initialized().await {
+        HttpTraffic::HYBRID_RECOVERY
+    } else {
+        HttpTraffic::HYBRID_COLD_START
+    };
+    *active = Some(http::start_http_worker(session, http_payload, traffic));
 }
 
 async fn checkout_handoff_websocket(session: &mut Session, previous_response_id: Option<&str>) {

@@ -50,6 +50,7 @@ impl HybridPool {
     pub(super) async fn refill(&self, scope: &HybridScope) {
         let plan = {
             let mut state = self.inner.state.lock().await;
+            let bootstrap_scope = state.bootstrap_scopes.contains(scope);
             let global_total = state.scopes.values().map(total_connections).sum::<usize>();
             let global_leased = state
                 .scopes
@@ -71,7 +72,7 @@ impl HybridPool {
                 return;
             };
             let current_total = total_connections(entry);
-            if entry.active_local == 0 && current_total == 0 {
+            if entry.active_local == 0 && current_total == 0 && !bootstrap_scope {
                 state.scopes.remove(scope);
                 return;
             }

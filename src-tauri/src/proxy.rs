@@ -29,9 +29,13 @@ use serde::Serialize;
 use tokio::{io::copy_bidirectional, net::TcpListener, sync::oneshot, task::JoinHandle};
 use url::Url;
 
+#[path = "codex_auth.rs"]
+mod codex_auth;
 mod compression;
 mod hybrid;
 mod hybrid_pool;
+#[path = "model_policy.rs"]
+mod model_policy;
 mod private_websocket;
 #[cfg(test)]
 #[path = "proxy/private_websocket_benchmark.rs"]
@@ -523,6 +527,7 @@ pub(crate) struct ProxyHandle {
     hybrid_pool: hybrid_pool::HybridPool,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
+    prewarm_state: Arc<std::sync::Mutex<String>>,
 }
 
 impl ProxyHandle {
@@ -542,6 +547,13 @@ impl ProxyHandle {
 
     pub(crate) async fn connection_snapshot(&self) -> ConnectionSnapshot {
         self.hybrid_pool.connection_snapshot().await
+    }
+
+    pub(crate) fn prewarm_state(&self) -> String {
+        match self.prewarm_state.lock() {
+            Ok(state) => state.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     pub(crate) async fn stop(mut self) {
@@ -586,11 +598,23 @@ struct ProxyState {
     websocket_client: WebSocketClient,
     hybrid_pool: hybrid_pool::HybridPool,
     max_request_body_bytes: usize,
+    model_policy_path: Option<std::path::PathBuf>,
 }
 
 type WebSocketClient = Client<HttpsConnector<HttpConnector>, Empty<Bytes>>;
 
+#[cfg(test)]
 pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, ProxyError> {
+    start_proxy_with_policy(options, None, None, false).await
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn start_proxy_with_policy(
+    options: ProxyOptions,
+    model_policy_path: Option<std::path::PathBuf>,
+    codex_config_path: Option<std::path::PathBuf>,
+    enable_bootstrap_prewarm: bool,
+) -> Result<ProxyHandle, ProxyError> {
     let listener = bind_preferred(&options.preferred_ports).await?;
     let address = listener.local_addr().map_err(ProxyError::Bind)?;
     let endpoint = format!("http://{address}/v1");
@@ -626,7 +650,35 @@ pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, Pr
         } else {
             options.max_request_body_bytes
         },
+        model_policy_path,
     };
+    let bootstrap = if enable_bootstrap_prewarm
+        && state.ai_cove_private_websocket_zstd
+        && state.websocket_enabled.load(Ordering::Relaxed)
+    {
+        codex_auth::effective_auth_headers(codex_config_path.as_deref()).map(|headers| {
+            let target = resolve_target(&state.upstream, &Uri::from_static("/v1/responses"));
+            let scope = hybrid_pool::HybridScope::new(&target, &headers);
+            (target, scope, headers)
+        })
+    } else {
+        None
+    };
+    let prewarm_state =
+        Arc::new(std::sync::Mutex::new(
+            if state.ai_cove_private_websocket_zstd
+                && state.websocket_enabled.load(Ordering::Relaxed)
+            {
+                if bootstrap.is_some() {
+                    "starting"
+                } else {
+                    "unavailable"
+                }
+            } else {
+                "disabled"
+            }
+            .to_owned(),
+        ));
     let app = Router::new()
         .route("/healthz", get(health))
         .fallback(proxy_request)
@@ -645,11 +697,32 @@ pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, Pr
         return Err(error);
     }
 
+    if let Some((target, scope, headers)) = bootstrap {
+        let pool = hybrid_pool.clone();
+        let state = Arc::clone(&prewarm_state);
+        tokio::spawn(async move {
+            pool.prewarm(&scope, target, headers).await;
+            for _ in 0..100 {
+                if pool.connection_snapshot().await.prewarm > 0 {
+                    if let Ok(mut status) = state.lock() {
+                        "ready".clone_into(&mut status);
+                    }
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if let Ok(mut status) = state.lock() {
+                "failed".clone_into(&mut status);
+            }
+        });
+    }
+
     Ok(ProxyHandle {
         endpoint,
         hybrid_pool,
         shutdown: Some(shutdown_tx),
         task,
+        prewarm_state,
     })
 }
 

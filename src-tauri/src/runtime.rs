@@ -29,7 +29,7 @@ use crate::{
         write_session_handoff,
     },
     proxy::{
-        ConnectionSnapshot, Metrics, ProxyHandle, ProxyOptions, start_proxy,
+        ConnectionSnapshot, Metrics, ProxyHandle, ProxyOptions, start_proxy_with_policy,
         traffic::{RequestEvent, TrafficWindow},
     },
 };
@@ -59,6 +59,10 @@ impl RuntimePaths {
 
     fn preferences_path(&self) -> PathBuf {
         self.data_dir.join("preferences.json")
+    }
+
+    fn model_policy_path(&self) -> PathBuf {
+        self.data_dir.join("ai_cove_turbo_model_policy.json")
     }
 
     fn traffic_path(&self) -> PathBuf {
@@ -113,6 +117,7 @@ pub(crate) struct AppStatus {
     pub(crate) websocket_verified: bool,
     pub(crate) websocket_zstd_verified: bool,
     pub(crate) websocket_state: String,
+    pub(crate) prewarm_state: String,
     pub(crate) websocket_handshakes: u64,
     pub(crate) websocket_raw_bytes: u64,
     pub(crate) websocket_sent_bytes: u64,
@@ -162,6 +167,7 @@ impl AppStatus {
             } else {
                 "disabled".to_owned()
             },
+            prewarm_state: "disabled".to_owned(),
             websocket_handshakes: 0,
             websocket_raw_bytes: 0,
             websocket_sent_bytes: 0,
@@ -336,15 +342,20 @@ impl AppRuntime {
         }
 
         let preferred_ports = self.preferred_ports();
-        let proxy = match start_proxy(ProxyOptions {
-            upstream: check.upstream.clone(),
-            compression_enabled: Arc::clone(&self.compression_enabled),
-            websocket_enabled: Arc::clone(&self.websocket_enabled),
-            ai_cove_private_websocket_zstd: ai_cove,
-            metrics: Arc::clone(&self.metrics),
-            preferred_ports,
-            max_request_body_bytes: 128 * 1024 * 1024,
-        })
+        let proxy = match start_proxy_with_policy(
+            ProxyOptions {
+                upstream: check.upstream.clone(),
+                compression_enabled: Arc::clone(&self.compression_enabled),
+                websocket_enabled: Arc::clone(&self.websocket_enabled),
+                ai_cove_private_websocket_zstd: ai_cove,
+                metrics: Arc::clone(&self.metrics),
+                preferred_ports,
+                max_request_body_bytes: 128 * 1024 * 1024,
+            },
+            Some(self.paths.model_policy_path()),
+            Some(self.paths.config_path.clone()),
+            true,
+        )
         .await
         {
             Ok(proxy) => proxy,
@@ -398,21 +409,41 @@ impl AppRuntime {
                 status.restart_required = false;
                 status.config_message = "已观察到本次配置后的成功 Responses 请求".to_owned();
             });
-            let mut catalog = lock_mutex(&self.catalog);
-            if catalog.loaded {
-                catalog.request_verified = true;
-                self.update_status(|status| status.catalog = catalog.clone());
+            let catalog_update = {
+                let mut catalog = lock_mutex(&self.catalog);
+                if catalog.loaded {
+                    catalog.request_verified = true;
+                    Some(catalog.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(catalog) = catalog_update {
+                self.update_status(|status| status.catalog = catalog);
             }
         }
-        let mut catalog = lock_mutex(&self.catalog);
-        if catalog.loaded
-            && !catalog.request_verified
-            && metrics.successful_responses > self.activation_baseline.load(Ordering::Relaxed)
-        {
-            catalog.request_verified = true;
-            self.update_status(|status| status.catalog = catalog.clone());
+        let catalog_update = {
+            let mut catalog = lock_mutex(&self.catalog);
+            if catalog.loaded
+                && !catalog.request_verified
+                && metrics.successful_responses > self.activation_baseline.load(Ordering::Relaxed)
+            {
+                catalog.request_verified = true;
+                Some(catalog.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(catalog) = catalog_update {
+            self.update_status(|status| status.catalog = catalog);
         }
         let mut status = read_lock(&self.status).clone();
+        status.prewarm_state = self
+            .proxy
+            .lock()
+            .await
+            .as_ref()
+            .map_or_else(|| "disabled".to_owned(), ProxyHandle::prewarm_state);
         status.requests = metrics.requests;
         status.raw_bytes = metrics.raw_bytes;
         status.sent_bytes = metrics.sent_bytes;

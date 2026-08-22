@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::http::HeaderMap;
 use tokio::{
@@ -86,6 +91,7 @@ struct PoolState {
     handoffs: Vec<ParkedConnection>,
     next_closed_id: u64,
     recent_closed: std::collections::VecDeque<ClosedRecord>,
+    bootstrap_scopes: HashSet<HybridScope>,
 }
 
 pub(super) struct ScopeBackend {
@@ -394,6 +400,29 @@ impl HybridPool {
         };
         self.refill(scope).await;
         session_id
+    }
+
+    pub(super) async fn prewarm(&self, scope: &HybridScope, target: Url, headers: HeaderMap) {
+        let headers = blank_connection_headers(&headers);
+        {
+            let mut state = self.inner.state.lock().await;
+            state
+                .scopes
+                .entry(scope.clone())
+                .or_insert_with(|| ScopeBackend {
+                    target,
+                    headers,
+                    diagnostics: ScopeDiagnostics::default(),
+                    initialized: false,
+                    active_local: 0,
+                    leased: HashMap::new(),
+                    connecting: 0,
+                    probing: 0,
+                    idle: Vec::new(),
+                });
+            state.bootstrap_scopes.insert(scope.clone());
+        }
+        self.refill(scope).await;
     }
 
     pub(super) async fn open_session(
