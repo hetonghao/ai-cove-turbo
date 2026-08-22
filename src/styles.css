@@ -651,7 +651,31 @@ h2 {
 }
 
 .b-model-catalog__actions button {
+  border: 1px solid var(--b-line);
+  border-radius: 6px;
+  padding: 7px 11px;
+  color: var(--b-ink);
+  background: var(--b-surface-2);
+  font: 0.6875rem/1.2 var(--font-mono);
+  cursor: pointer;
   min-height: 34px;
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
+}
+
+.b-model-catalog__actions button:hover:not(:disabled) {
+  border-color: rgba(112, 216, 238, 0.55);
+  color: var(--b-accent);
+  background: var(--b-accent-soft);
+}
+
+.b-model-catalog__actions button:focus-visible {
+  outline: 2px solid var(--b-accent);
+  outline-offset: 2px;
+}
+
+.b-model-catalog__actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .b-action-feedback[data-tone="success"] {

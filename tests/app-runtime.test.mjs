@@ -70,6 +70,7 @@ async function catalogHarness({ failSave = false } = {}) {
   };
   const path = element({ modelCatalogPath: "" });
   const indicator = element({ modelCatalogState: "" });
+  const policyIndicator = element({ modelPolicyState: "" });
   const list = element({ modelCatalogList: "" });
   const message = element({ modelCatalogMessage: "" });
   const actions = ["save-model-catalog", "save-model-policy", "cancel-model-catalog", "restore-model-catalog", "reclaim-model-catalog"].map((action) => {
@@ -80,6 +81,7 @@ async function catalogHarness({ failSave = false } = {}) {
   const selectors = new Map([
     ["[data-model-catalog-path]", path],
     ["[data-model-catalog-state]", indicator],
+    ["[data-model-policy-state]", policyIndicator],
     ["[data-model-catalog-list]", list],
     ["[data-model-catalog-message]", message],
   ]);
@@ -122,6 +124,7 @@ async function catalogHarness({ failSave = false } = {}) {
   return {
     calls,
     indicator,
+    policyIndicator,
     list,
     async click(action) {
       listeners.get("click")?.({ target: actions.find((target) => target.dataset.action === action) });
@@ -176,6 +179,7 @@ test("模型目录保存、取消、拖拽和失败恢复走真实命令边界",
 
 test("模型传输策略编辑保存并显示能力摘要", async () => {
   const harness = await catalogHarness();
+  assert.equal(harness.policyIndicator.textContent, "默认 auto");
   assert.match(harness.list.innerHTML, /WS 可用 · ok/);
   assert.match(harness.list.innerHTML, /仅 HTTP · no_responses_websocket_channel/);
   harness.change("alpha", "http", "[data-model-transport]");
