@@ -69,6 +69,9 @@ pub(crate) async fn start(upstream: Url, metrics: Arc<Metrics>) -> Result<ProxyH
         model_policy: std::sync::Arc::new(super::model_policy::ModelPolicyStore::new(
             std::path::PathBuf::from("ai_cove_turbo_model_policy.json"),
         )),
+        capability_cache: std::sync::Arc::new(
+            super::transport_capability::CapabilityCache::default(),
+        ),
     })
 }
 

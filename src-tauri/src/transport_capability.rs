@@ -5,7 +5,7 @@ use std::{
 };
 
 use axum::http::HeaderMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 const CAPABILITY_TTL: Duration = Duration::from_secs(30);
@@ -14,6 +14,13 @@ const CAPABILITY_TTL: Duration = Duration::from_secs(30);
 pub(super) struct CapabilityHint {
     pub(super) http_available: bool,
     pub(super) responses_websocket_available: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CapabilityModelStatus {
+    pub(crate) transport: String,
+    pub(crate) reason_code: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +37,7 @@ struct CapabilityItem {
     allowed: bool,
     http: bool,
     responses_websocket: bool,
+    reason_code: String,
 }
 
 impl CapabilityResponse {
@@ -49,13 +57,14 @@ struct CacheState {
     hints: HashMap<String, CapabilityHint>,
     models: Vec<String>,
     reason: Option<String>,
+    statuses: HashMap<String, CapabilityModelStatus>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct CapabilityCache(Mutex<CacheState>);
 
 impl CapabilityCache {
-    pub(super) fn apply(&self, response: CapabilityResponse, ttl: Duration) {
+    pub(super) fn apply(&self, response: &CapabilityResponse, ttl: Duration) {
         let mut models = response
             .data
             .iter()
@@ -64,11 +73,11 @@ impl CapabilityCache {
         models.sort_unstable();
         let hints = response
             .data
-            .into_iter()
+            .iter()
             .filter(|item| item.allowed)
             .map(|item| {
                 (
-                    item.model,
+                    item.model.clone(),
                     CapabilityHint {
                         http_available: item.http,
                         responses_websocket_available: item.responses_websocket,
@@ -76,9 +85,30 @@ impl CapabilityCache {
                 )
             })
             .collect();
+        let statuses = response
+            .data
+            .iter()
+            .map(|item| {
+                let transport = if item.responses_websocket {
+                    "websocket"
+                } else if item.http {
+                    "http"
+                } else {
+                    "unknown"
+                };
+                (
+                    item.model.clone(),
+                    CapabilityModelStatus {
+                        transport: transport.to_owned(),
+                        reason_code: item.reason_code.clone(),
+                    },
+                )
+            })
+            .collect();
         let mut state = lock(&self.0);
         state.hints = hints;
         state.models = models;
+        state.statuses = statuses;
         state.expires_at = Some(Instant::now() + ttl);
         state.reason = None;
     }
@@ -102,12 +132,24 @@ impl CapabilityCache {
                 .is_none_or(|expires_at| Instant::now() >= expires_at)
     }
 
+    pub(super) fn statuses(&self) -> HashMap<String, CapabilityModelStatus> {
+        let state = lock(&self.0);
+        if state
+            .expires_at
+            .is_none_or(|expires_at| Instant::now() >= expires_at)
+        {
+            return HashMap::new();
+        }
+        state.statuses.clone()
+    }
+
     pub(super) fn mark_attempt(&self, models: &[String], reason: Option<String>) {
         let mut state = lock(&self.0);
         state.models = models.to_vec();
         state.reason = reason;
         if state.reason.is_some() {
             state.hints.clear();
+            state.statuses.clear();
             state.expires_at = Some(Instant::now() + Duration::from_secs(5));
         }
     }
@@ -163,7 +205,7 @@ mod tests {
     fn batch_snapshot_expires_back_to_unknown_without_networking() {
         let cache = CapabilityCache::default();
         cache.apply(
-            CapabilityResponse::parse(
+            &CapabilityResponse::parse(
                 br#"{"success":true,"version":1,"object":"transport_capabilities","data":[{"model":"gpt-http","allowed":true,"http":true,"responses_websocket":false,"reason_code":"no_responses_websocket_channel"}]}"#,
             )
             .expect("valid capability response"),
@@ -181,7 +223,7 @@ mod tests {
             br#"{"success":true,"version":1,"object":"transport_capabilities","data":[{"model":"gpt-http","allowed":true,"http":true,"responses_websocket":false,"reason_code":"no_responses_websocket_channel"}]}"#,
         )
         .expect("valid capability response");
-        cache.apply(response, Duration::from_secs(30));
+        cache.apply(&response, Duration::from_secs(30));
         assert!(!cache.needs_refresh(&["gpt-http".to_owned()]));
     }
 }

@@ -208,6 +208,7 @@
     "install-update": ["install_update"],
   };
   let catalogDraft = null;
+  let modelPolicyDraft = null;
   let draggedCatalogSlug = "";
 
   function readTab() {
@@ -618,6 +619,22 @@
     return `<option value="list"${visibility === "list" ? " selected" : ""}>显示</option><option value="hide"${visibility === "hide" ? " selected" : ""}>隐藏</option><option value="none" disabled${visibility === "none" ? " selected" : ""}>保留 none</option>${preserved}`;
   }
 
+  function policyModels() {
+    if (!modelPolicyDraft) modelPolicyDraft = { ...(state.modelPolicy?.models || {}) };
+    return modelPolicyDraft;
+  }
+
+  function transportOptions(transport) {
+    return `<option value="auto"${transport === "auto" ? " selected" : ""}>自动</option><option value="http"${transport === "http" ? " selected" : ""}>HTTP</option>`;
+  }
+
+  function capabilityBadge(slug) {
+    const capability = state.transportCapabilities?.[slug];
+    if (!capability) return '<span class="state-indicator" data-status="waiting">能力未知</span>';
+    const label = capability.transport === "websocket" ? "WS 可用" : capability.transport === "http" ? "仅 HTTP" : "不可用";
+    return `<span class="state-indicator" data-status="${capability.transport === "unknown" ? "blocked" : "verified"}" title="${escapeHtml(capability.reasonCode || "")}">${label} · ${escapeHtml(capability.reasonCode || "ok")}</span>`;
+  }
+
   function renderModelCatalog() {
     const catalog = state.catalog ?? desktopStatus.catalog;
     const path = $("[data-model-catalog-path]");
@@ -637,7 +654,8 @@
         : catalog.state === "conflict" ? "Codex 配置中的目录指针已被外部修改。" : "";
     }
     if (!list) return;
-    list.innerHTML = catalogModels().map((model) => `<article class="b-model-row" draggable="true" data-model-slug="${escapeHtml(model.slug)}"><button class="b-model-row__drag" type="button" aria-label="拖动 ${escapeHtml(model.displayName || model.slug)} 调整优先级">↕</button><span class="b-model-row__copy"><strong>${escapeHtml(model.displayName || model.slug)}</strong><code>${escapeHtml(model.slug)}</code><small>${escapeHtml(model.description || "")}</small></span><label><span>显示</span><select data-model-visibility>${catalogVisibilityOptions(model.visibility)}</select></label><span class="b-model-row__priority">#${Number(model.priority) || 0}</span></article>`).join("");
+    const policies = policyModels();
+    list.innerHTML = catalogModels().map((model) => `<article class="b-model-row" draggable="true" data-model-slug="${escapeHtml(model.slug)}"><button class="b-model-row__drag" type="button" aria-label="拖动 ${escapeHtml(model.displayName || model.slug)} 调整优先级">↕</button><span class="b-model-row__copy"><strong>${escapeHtml(model.displayName || model.slug)}</strong><code>${escapeHtml(model.slug)}</code><small>${escapeHtml(model.description || "")}</small>${capabilityBadge(model.slug)}</span><label><span>显示</span><select data-model-visibility>${catalogVisibilityOptions(model.visibility)}</select></label><label><span>传输</span><select data-model-transport>${transportOptions(policies[model.slug] || "auto")}</select></label><span class="b-model-row__priority">#${Number(model.priority) || 0}</span></article>`).join("");
   }
 
   function renderState(options = {}) {
@@ -1569,8 +1587,10 @@
   function applyStatus(status, options = {}) {
     if (status && typeof status === "object") {
       const previousModels = state.catalog?.models;
+      const previousPolicy = JSON.stringify(state.modelPolicy?.models || {});
       state = { ...state, ...status, technicalDetail: "" };
       if (status.catalog && status.catalog.models !== previousModels) catalogDraft = null;
+      if (status.modelPolicy && JSON.stringify(status.modelPolicy.models || {}) !== previousPolicy) modelPolicyDraft = null;
       renderModelPolicy();
     }
     syncLiveRequests();
@@ -1690,7 +1710,7 @@
       pendingAction = action;
       renderControls();
       try {
-        const current = state.modelPolicy || { defaultTransport: "auto", models: {} };
+        const current = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...policyModels() } };
         const update = invoke ? await invoke("update_model_policy", { update: current }) : current;
         state.modelPolicy = update;
       } catch (error) {
@@ -1971,6 +1991,11 @@
       if (row && event.target.matches?.("[data-model-visibility]")) {
         const model = catalogModels().find((candidate) => candidate.slug === row.dataset.modelSlug);
         if (model) model.visibility = event.target.value;
+      }
+      if (row && event.target.matches?.("[data-model-transport]")) {
+        const policies = policyModels();
+        if (event.target.value === "http") policies[row.dataset.modelSlug] = "http";
+        else delete policies[row.dataset.modelSlug];
       }
     });
     document.addEventListener("dragstart", (event) => {

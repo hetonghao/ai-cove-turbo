@@ -37,6 +37,7 @@ mod hybrid_pool;
 #[path = "model_policy.rs"]
 mod model_policy;
 pub(crate) use model_policy::{ModelPolicyStatus, ModelPolicyUpdate};
+pub(crate) use transport_capability::CapabilityModelStatus;
 mod private_websocket;
 #[cfg(test)]
 #[path = "proxy/private_websocket_benchmark.rs"]
@@ -532,6 +533,7 @@ pub(crate) struct ProxyHandle {
     task: JoinHandle<()>,
     prewarm_state: Arc<std::sync::Mutex<String>>,
     model_policy: Arc<model_policy::ModelPolicyStore>,
+    capability_cache: Arc<transport_capability::CapabilityCache>,
 }
 
 impl ProxyHandle {
@@ -569,6 +571,12 @@ impl ProxyHandle {
         update: model_policy::ModelPolicyUpdate,
     ) -> Result<model_policy::ModelPolicyStatus, String> {
         self.model_policy.update(update)
+    }
+
+    pub(crate) fn capability_statuses(
+        &self,
+    ) -> std::collections::HashMap<String, CapabilityModelStatus> {
+        self.capability_cache.statuses()
     }
 
     pub(crate) async fn stop(mut self) {
@@ -653,6 +661,7 @@ pub(crate) async fn start_proxy_with_policy(
         model_policy_path
             .unwrap_or_else(|| std::path::PathBuf::from("ai_cove_turbo_model_policy.json")),
     ));
+    let capability_cache = Arc::new(transport_capability::CapabilityCache::default());
     let state = ProxyState {
         upstream: options.upstream,
         compression_enabled: options.compression_enabled,
@@ -671,7 +680,7 @@ pub(crate) async fn start_proxy_with_policy(
             options.max_request_body_bytes
         },
         model_policy: Arc::clone(&model_policy),
-        capability_cache: Arc::new(transport_capability::CapabilityCache::default()),
+        capability_cache: Arc::clone(&capability_cache),
     };
     let bootstrap = if enable_bootstrap_prewarm
         && state.ai_cove_private_websocket_zstd
@@ -753,6 +762,7 @@ pub(crate) async fn start_proxy_with_policy(
         task,
         prewarm_state,
         model_policy,
+        capability_cache,
     })
 }
 

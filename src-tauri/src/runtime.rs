@@ -29,8 +29,8 @@ use crate::{
         write_session_handoff,
     },
     proxy::{
-        ConnectionSnapshot, Metrics, ModelPolicyStatus, ModelPolicyUpdate, ProxyHandle,
-        ProxyOptions, start_proxy_with_policy,
+        CapabilityModelStatus, ConnectionSnapshot, Metrics, ModelPolicyStatus, ModelPolicyUpdate,
+        ProxyHandle, ProxyOptions, start_proxy_with_policy,
         traffic::{RequestEvent, TrafficWindow},
     },
 };
@@ -120,6 +120,7 @@ pub(crate) struct AppStatus {
     pub(crate) websocket_state: String,
     pub(crate) prewarm_state: String,
     pub(crate) model_policy: ModelPolicyStatus,
+    pub(crate) transport_capabilities: std::collections::HashMap<String, CapabilityModelStatus>,
     pub(crate) websocket_handshakes: u64,
     pub(crate) websocket_raw_bytes: u64,
     pub(crate) websocket_sent_bytes: u64,
@@ -175,6 +176,7 @@ impl AppStatus {
                 models: std::collections::HashMap::new(),
                 reason: None,
             },
+            transport_capabilities: std::collections::HashMap::new(),
             websocket_handshakes: 0,
             websocket_raw_bytes: 0,
             websocket_sent_bytes: 0,
@@ -446,12 +448,7 @@ impl AppRuntime {
             self.update_status(|status| status.catalog = catalog);
         }
         let mut status = read_lock(&self.status).clone();
-        let (prewarm_state, model_policy) = self.proxy.lock().await.as_ref().map_or_else(
-            || ("disabled".to_owned(), status.model_policy.clone()),
-            |proxy| (proxy.prewarm_state(), proxy.model_policy_status()),
-        );
-        status.prewarm_state = prewarm_state;
-        status.model_policy = model_policy;
+        self.refresh_transport_status(&mut status).await;
         status.requests = metrics.requests;
         status.raw_bytes = metrics.raw_bytes;
         status.sent_bytes = metrics.sent_bytes;
@@ -493,6 +490,27 @@ impl AppRuntime {
             f64::from(u32::try_from(basis_points).unwrap_or_default()) / 100.0
         };
         status
+    }
+
+    async fn refresh_transport_status(&self, status: &mut AppStatus) {
+        let values = {
+            let proxy = self.proxy.lock().await;
+            proxy.as_ref().map(|proxy| {
+                (
+                    proxy.prewarm_state(),
+                    proxy.model_policy_status(),
+                    proxy.capability_statuses(),
+                )
+            })
+        };
+        let Some((prewarm_state, model_policy, transport_capabilities)) = values else {
+            status.prewarm_state = "disabled".to_owned();
+            status.transport_capabilities.clear();
+            return;
+        };
+        status.prewarm_state = prewarm_state;
+        status.model_policy = model_policy;
+        status.transport_capabilities = transport_capabilities;
     }
 
     pub(crate) async fn connection_snapshot(&self) -> ConnectionSnapshot {

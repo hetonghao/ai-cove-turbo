@@ -151,7 +151,7 @@ impl Session {
             Ok(response) => {
                 self.state
                     .capability_cache
-                    .apply(response, super::super::transport_capability::ttl());
+                    .apply(&response, super::super::transport_capability::ttl());
             }
             Err(reason) => self
                 .state

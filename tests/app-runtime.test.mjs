@@ -58,12 +58,21 @@ async function catalogHarness({ failSave = false } = {}) {
     requestVerified: false,
     revision: "revision-1",
   };
-  const status = { serviceHealthy: true, configState: "managed", catalog };
+  const status = {
+    serviceHealthy: true,
+    configState: "managed",
+    catalog,
+    modelPolicy: { defaultTransport: "auto", models: { beta: "http" }, reason: null },
+    transportCapabilities: {
+      alpha: { transport: "websocket", reasonCode: "ok" },
+      beta: { transport: "http", reasonCode: "no_responses_websocket_channel" },
+    },
+  };
   const path = element({ modelCatalogPath: "" });
   const indicator = element({ modelCatalogState: "" });
   const list = element({ modelCatalogList: "" });
   const message = element({ modelCatalogMessage: "" });
-  const actions = ["save-model-catalog", "cancel-model-catalog", "restore-model-catalog", "reclaim-model-catalog"].map((action) => {
+  const actions = ["save-model-catalog", "save-model-policy", "cancel-model-catalog", "restore-model-catalog", "reclaim-model-catalog"].map((action) => {
     const target = element({ action });
     target.closest = (selector) => selector === "[data-action]" ? target : null;
     return target;
@@ -83,6 +92,10 @@ async function catalogHarness({ failSave = false } = {}) {
     if (command === "update_model_catalog") {
       if (failSave) throw new Error("save failed");
       return { ...catalog, models: args.updates, restartRequired: true, loaded: false, revision: "revision-2" };
+    }
+    if (command === "update_model_policy") {
+      if (failSave) throw new Error("policy save failed");
+      return args.update;
     }
     return { ...catalog, state: command === "restore_model_catalog" ? "restored" : "owned" };
   };
@@ -114,11 +127,11 @@ async function catalogHarness({ failSave = false } = {}) {
       listeners.get("click")?.({ target: actions.find((target) => target.dataset.action === action) });
       await new Promise((resolve) => setImmediate(resolve));
     },
-    change(slug, value) {
+    change(slug, value, selector = "[data-model-visibility]") {
       listeners.get("change")?.({
         target: {
           value,
-          matches: (selector) => selector === "[data-model-visibility]",
+          matches: (candidate) => candidate === selector,
           closest: (selector) => selector === "[data-model-slug]" ? row(slug) : null,
         },
       });
@@ -159,6 +172,21 @@ test("模型目录保存、取消、拖拽和失败恢复走真实命令边界",
   assert.equal(failed.indicator.textContent, "目录不可用");
   await failed.tick();
   assert.equal(failed.indicator.textContent, "Codex 已加载");
+});
+
+test("模型传输策略编辑保存并显示能力摘要", async () => {
+  const harness = await catalogHarness();
+  assert.match(harness.list.innerHTML, /WS 可用 · ok/);
+  assert.match(harness.list.innerHTML, /仅 HTTP · no_responses_websocket_channel/);
+  harness.change("alpha", "http", "[data-model-transport]");
+  harness.change("beta", "auto", "[data-model-transport]");
+  await harness.click("save-model-policy");
+  const save = harness.calls.find((call) => call.command === "update_model_policy");
+  assert.equal(JSON.stringify(save.args.update), JSON.stringify({ defaultTransport: "auto", models: { alpha: "http" } }));
+
+  const failed = await catalogHarness({ failSave: true });
+  await failed.click("save-model-policy");
+  assert.match(failed.list.innerHTML, /WS 可用/);
 });
 
 test("产品图标气泡支持轻触关闭并打开 AI Cove", async () => {
