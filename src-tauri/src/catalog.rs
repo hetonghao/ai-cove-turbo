@@ -1,99 +1,27 @@
 use std::{
-    fmt, fs,
-    io::Write,
+    fs,
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use tempfile::NamedTempFile;
-use toml_edit::{DocumentMut, Item, value};
+use serde_json::Value;
+
+#[path = "catalog_diff.rs"]
+mod catalog_diff;
+#[path = "catalog_storage.rs"]
+mod catalog_storage;
+#[path = "catalog_types.rs"]
+mod catalog_types;
+
+use catalog_storage::{
+    digest, parse_models, read_catalog_pointer, read_record, set_number, set_string,
+    status_from_file, write_atomic, write_catalog_pointer, write_record,
+};
+use catalog_types::OwnershipRecord;
+pub(crate) use catalog_types::{
+    CatalogChange, CatalogError, CatalogModel, CatalogModelUpdate, CatalogStatus,
+};
 
 pub(crate) const FIXED_CATALOG_RELATIVE_PATH: &str = ".codex/model-catalogs/ai_cove_turbo.json";
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CatalogModel {
-    pub(crate) slug: String,
-    pub(crate) display_name: String,
-    pub(crate) description: String,
-    pub(crate) visibility: String,
-    pub(crate) priority: i64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CatalogChange {
-    pub(crate) slug: String,
-    pub(crate) field: String,
-    pub(crate) before: Option<String>,
-    pub(crate) after: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CatalogStatus {
-    pub(crate) path: String,
-    pub(crate) state: String,
-    pub(crate) source_path: Option<String>,
-    pub(crate) models: Vec<CatalogModel>,
-    pub(crate) changes: Vec<CatalogChange>,
-    pub(crate) restart_required: bool,
-    pub(crate) loaded: bool,
-    pub(crate) request_verified: bool,
-    pub(crate) revision: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CatalogModelUpdate {
-    pub(crate) slug: String,
-    pub(crate) visibility: Option<String>,
-    pub(crate) priority: Option<i64>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct OwnershipRecord {
-    config_path: PathBuf,
-    fixed_path: PathBuf,
-    original_model_catalog_json: Option<String>,
-    source_path: Option<PathBuf>,
-    baseline_models: Vec<CatalogModel>,
-}
-
-#[derive(Debug)]
-pub(crate) enum CatalogError {
-    Read(std::io::Error),
-    Write(std::io::Error),
-    Json(serde_json::Error),
-    Toml(toml_edit::TomlError),
-    InvalidSchema(String),
-    SourceUnavailable,
-    OwnershipConflict,
-    InvalidModel(String),
-    ContentChanged,
-}
-
-impl fmt::Display for CatalogError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read(error) => write!(formatter, "无法读取模型目录：{error}"),
-            Self::Write(error) => write!(formatter, "无法写入模型目录：{error}"),
-            Self::Json(error) => write!(formatter, "模型目录 JSON 无效：{error}"),
-            Self::Toml(error) => write!(formatter, "Codex 配置 TOML 无法解析：{error}"),
-            Self::InvalidSchema(message) => write!(formatter, "模型目录结构无效：{message}"),
-            Self::SourceUnavailable => write!(formatter, "没有可验证的 Codex 模型目录来源"),
-            Self::OwnershipConflict => {
-                write!(formatter, "Codex 的 model_catalog_json 已被外部修改")
-            }
-            Self::InvalidModel(slug) => write!(formatter, "模型目录更新包含未知模型：{slug}"),
-            Self::ContentChanged => write!(formatter, "模型目录已被外部修改，请重新加载后保存"),
-        }
-    }
-}
-
-impl std::error::Error for CatalogError {}
 
 pub(crate) fn fixed_catalog_path(home: &Path) -> PathBuf {
     home.join(FIXED_CATALOG_RELATIVE_PATH)
@@ -131,21 +59,29 @@ pub(crate) fn ensure_catalog(
     }
 
     let current_pointer = read_catalog_pointer(config_path)?;
-    let mut source_path = None;
-    if !fixed_path.exists() {
-        let Some(source) = current_pointer.clone() else {
-            return Err(CatalogError::SourceUnavailable);
-        };
-        let bytes = fs::read(&source).map_err(CatalogError::Read)?;
-        let _ = parse_models(&bytes)?;
-        write_atomic(&fixed_path, &bytes)?;
-        source_path = Some(source);
-    } else {
+    let source_path = match current_pointer.as_ref() {
+        Some(source) if source != &fixed_path => {
+            let bytes = fs::read(source).map_err(CatalogError::Read)?;
+            let _ = parse_models(&bytes)?;
+            write_atomic(&fixed_path, &bytes)?;
+            Some(source.clone())
+        }
+        Some(_) | None if fixed_path.exists() => None,
+        Some(source) => {
+            let bytes = fs::read(source).map_err(CatalogError::Read)?;
+            let _ = parse_models(&bytes)?;
+            write_atomic(&fixed_path, &bytes)?;
+            Some(source.clone())
+        }
+        None => return Err(CatalogError::SourceUnavailable),
+    };
+    if source_path.is_none() && fixed_path.exists() {
         let bytes = fs::read(&fixed_path).map_err(CatalogError::Read)?;
         let _ = parse_models(&bytes)?;
     }
 
     let bytes = fs::read(&fixed_path).map_err(CatalogError::Read)?;
+    let baseline_document: Value = serde_json::from_slice(&bytes).map_err(CatalogError::Json)?;
     let baseline_models = parse_models(&bytes)?;
     let record = OwnershipRecord {
         config_path: config_path.to_path_buf(),
@@ -155,6 +91,7 @@ pub(crate) fn ensure_catalog(
             .map(|path| path.display().to_string()),
         source_path,
         baseline_models,
+        baseline_document,
     };
     write_record(recovery_path, &record)?;
     let changed_config = current_pointer.as_deref() != Some(fixed_path.as_path());
@@ -324,199 +261,6 @@ pub(crate) fn restore_catalog(
     })
 }
 
-fn status_from_file(
-    fixed_path: &Path,
-    record: &OwnershipRecord,
-    restart_required: bool,
-    loaded: bool,
-    request_verified: bool,
-) -> Result<CatalogStatus, CatalogError> {
-    let bytes = fs::read(fixed_path).map_err(CatalogError::Read)?;
-    let models = parse_models(&bytes)?;
-    let changes = diff_models(&record.baseline_models, &models);
-    Ok(CatalogStatus {
-        path: fixed_path.display().to_string(),
-        state: "owned".to_owned(),
-        source_path: record
-            .source_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        models,
-        changes,
-        restart_required,
-        loaded,
-        request_verified,
-        revision: digest(&bytes),
-    })
-}
-
-fn parse_models(bytes: &[u8]) -> Result<Vec<CatalogModel>, CatalogError> {
-    let document: Value = serde_json::from_slice(bytes).map_err(CatalogError::Json)?;
-    let models = document
-        .get("models")
-        .and_then(Value::as_array)
-        .ok_or_else(|| CatalogError::InvalidSchema("缺少 models 数组".to_owned()))?;
-    let mut result = Vec::with_capacity(models.len());
-    let mut seen = std::collections::HashSet::new();
-    for model in models {
-        let slug = model
-            .get("slug")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| CatalogError::InvalidSchema("模型缺少 slug".to_owned()))?
-            .to_owned();
-        if !seen.insert(slug.clone()) {
-            return Err(CatalogError::InvalidSchema(format!(
-                "模型 slug 重复：{slug}"
-            )));
-        }
-        result.push(CatalogModel {
-            display_name: string_field(model, "display_name"),
-            description: string_field(model, "description"),
-            visibility: string_field_or(model, "visibility", "list"),
-            priority: model
-                .get("priority")
-                .and_then(Value::as_i64)
-                .unwrap_or_default(),
-            slug,
-        });
-    }
-    Ok(result)
-}
-
-fn diff_models(before: &[CatalogModel], after: &[CatalogModel]) -> Vec<CatalogChange> {
-    let mut changes = Vec::new();
-    for next in after {
-        let Some(previous) = before.iter().find(|model| model.slug == next.slug) else {
-            changes.push(CatalogChange {
-                slug: next.slug.clone(),
-                field: "model".to_owned(),
-                before: None,
-                after: Some(next.display_name.clone()),
-            });
-            continue;
-        };
-        for (field, before, after) in [
-            (
-                "visibility",
-                previous.visibility.clone(),
-                next.visibility.clone(),
-            ),
-            (
-                "priority",
-                previous.priority.to_string(),
-                next.priority.to_string(),
-            ),
-        ] {
-            if before != after {
-                changes.push(CatalogChange {
-                    slug: next.slug.clone(),
-                    field: field.to_owned(),
-                    before: Some(before),
-                    after: Some(after),
-                });
-            }
-        }
-    }
-    changes
-}
-
-fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-fn string_field(model: &Value, key: &str) -> String {
-    model
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
-}
-
-fn string_field_or(model: &Value, key: &str, fallback: &str) -> String {
-    model
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or(fallback)
-        .to_owned()
-}
-
-fn set_string(model: &mut Value, key: &str, value: &str) {
-    if let Some(object) = model.as_object_mut() {
-        object.insert(key.to_owned(), Value::String(value.to_owned()));
-    }
-}
-
-fn set_number(model: &mut Value, key: &str, value: i64) {
-    if let Some(object) = model.as_object_mut() {
-        object.insert(key.to_owned(), json!(value));
-    }
-}
-
-fn read_catalog_pointer(config_path: &Path) -> Result<Option<PathBuf>, CatalogError> {
-    let source = fs::read_to_string(config_path).map_err(CatalogError::Read)?;
-    let document = source.parse::<DocumentMut>().map_err(CatalogError::Toml)?;
-    Ok(document
-        .get("model_catalog_json")
-        .and_then(Item::as_str)
-        .map(PathBuf::from))
-}
-
-fn write_catalog_pointer(config_path: &Path, pointer: Option<&Path>) -> Result<(), CatalogError> {
-    let source = fs::read_to_string(config_path).map_err(CatalogError::Read)?;
-    let mut document = source.parse::<DocumentMut>().map_err(CatalogError::Toml)?;
-    match pointer {
-        Some(path) => {
-            document.insert("model_catalog_json", value(path.display().to_string()));
-        }
-        None => {
-            document.remove("model_catalog_json");
-        }
-    }
-    write_atomic(config_path, document.to_string().as_bytes())
-}
-
-fn read_record(path: &Path) -> Result<Option<OwnershipRecord>, CatalogError> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(CatalogError::Read(error)),
-    };
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(CatalogError::Json)
-}
-
-fn write_record(path: &Path, record: &OwnershipRecord) -> Result<(), CatalogError> {
-    write_atomic(
-        path,
-        &serde_json::to_vec(record).map_err(CatalogError::Json)?,
-    )
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CatalogError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| CatalogError::Write(std::io::Error::other("target has no parent")))?;
-    fs::create_dir_all(parent).map_err(CatalogError::Write)?;
-    let mut temporary = NamedTempFile::new_in(parent).map_err(CatalogError::Write)?;
-    temporary.write_all(bytes).map_err(CatalogError::Write)?;
-    temporary
-        .as_file()
-        .sync_all()
-        .map_err(CatalogError::Write)?;
-    if let Ok(metadata) = fs::metadata(path) {
-        temporary
-            .as_file()
-            .set_permissions(metadata.permissions())
-            .map_err(CatalogError::Write)?;
-    }
-    temporary
-        .persist(path)
-        .map_err(|error| CatalogError::Write(error.error))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{error::Error, fs};
@@ -581,6 +325,35 @@ mod tests {
     }
 
     #[test]
+    fn external_source_refreshes_an_existing_fixed_catalog_before_takeover()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let fixed = fixed_catalog_path(root.path());
+        fs::create_dir_all(fixed.parent().expect("catalog parent"))?;
+        fs::write(
+            &fixed,
+            r#"{"models":[{"slug":"stale","display_name":"Stale","visibility":"hide","priority":9}]}"#,
+        )?;
+        let recovery = root.path().join("recovery.json");
+
+        let status = ensure_catalog(root.path(), &config, &recovery)?;
+
+        assert_eq!(
+            status.source_path.as_deref(),
+            Some(source.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            status.models.first().map(|model| model.slug.as_str()),
+            Some("alpha")
+        );
+        assert!(fs::read_to_string(fixed)?.contains("\"beta\""));
+        assert!(fs::read_to_string(config)?.contains("ai_cove_turbo.json"));
+        Ok(())
+    }
+
+    #[test]
     fn external_pointer_edit_is_conflict_and_recovery_reclaims_it() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let source = root.path().join("source.json");
@@ -638,6 +411,33 @@ mod tests {
         fs::write(fixed_catalog_path(root.path()), r#"{"models":[]}"#)?;
         let result = update_catalog(root.path(), &config, &recovery, &[], &status.revision);
         assert!(matches!(result, Err(CatalogError::ContentChanged)));
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_diff_reports_known_unknown_added_and_removed_content() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        ensure_catalog(root.path(), &config, &recovery)?;
+        fs::write(
+            fixed_catalog_path(root.path()),
+            r#"{"models":[{"slug":"alpha","display_name":"Alpha v2","description":"a2","visibility":"list","priority":2,"unknown":"changed"},{"slug":"gamma","display_name":"Gamma","description":"g","visibility":"list","priority":3,"new_field":{"nested":true}}]}"#,
+        )?;
+
+        let status = read_catalog(root.path(), &config, &recovery, true, false, false)?;
+        let fields = status
+            .changes
+            .iter()
+            .map(|change| (change.slug.as_str(), change.field.as_str()))
+            .collect::<std::collections::HashSet<_>>();
+        assert!(fields.contains(&("alpha", "display_name")));
+        assert!(fields.contains(&("alpha", "description")));
+        assert!(fields.contains(&("alpha", "unknown")));
+        assert!(fields.contains(&("beta", "model")));
+        assert!(fields.contains(&("gamma", "model")));
         Ok(())
     }
 }
