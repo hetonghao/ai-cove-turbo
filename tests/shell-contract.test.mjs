@@ -196,11 +196,13 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
 
 test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存", async () => {
   const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const css = await readFile(new URL("styles.css", sourceUrl), "utf8");
   const app = await readFile(new URL("app.js", sourceUrl), "utf8");
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   const configPanel = html.slice(html.indexOf('id="panel-config"'));
 
   assert.match(configPanel, /data-model-catalog-list/);
+  assert.match(configPanel, /data-model-policy-state[^>]*>默认 auto</);
   assert.match(configPanel, /data-action="save-model-catalog"/);
   assert.match(configPanel, /data-action="cancel-model-catalog"/);
   assert.match(configPanel, /data-action="restore-model-catalog"/);
@@ -210,6 +212,10 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(app, /option value=\"none\" disabled/);
   assert.match(app, /document\.addEventListener\("drop"/);
   assert.match(app, /priority: priority \+ 1/);
+  assert.match(css, /\.b-model-catalog__actions button\s*\{[\s\S]*?border:\s*1px solid var\(--b-line\);[\s\S]*?background:\s*var\(--b-surface-2\);/);
+  assert.match(css, /\.b-model-catalog__actions button:hover:not\(:disabled\)\s*\{[\s\S]*?color:\s*var\(--b-accent\);[\s\S]*?background:\s*var\(--b-accent-soft\);/);
+  assert.match(css, /\.b-model-catalog__actions button:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--b-accent\);/);
+  assert.match(css, /\.b-model-catalog__actions button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;[\s\S]*?opacity:\s*0\.45;/);
   assert.match(rust, /get_model_catalog/);
   assert.match(rust, /update_model_catalog/);
   assert.match(rust, /restore_model_catalog/);
