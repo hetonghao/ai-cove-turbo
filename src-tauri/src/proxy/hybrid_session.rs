@@ -10,6 +10,7 @@ use super::super::{
         SessionHandle,
     },
     model_policy::ModelPolicy,
+    transport_capability::CapabilityHint,
 };
 use super::{Active, ActiveKind, ClientWebSocket, WebSocketSendReceipt, WorkerEvent, flow, worker};
 
@@ -50,10 +51,7 @@ impl Session {
             .hybrid_pool
             .open_session(&pool_scope, target.clone(), client_headers.clone())
             .await;
-        let policy = state
-            .model_policy_path
-            .as_deref()
-            .map_or_else(ModelPolicy::load_current, ModelPolicy::load_path);
+        let policy = state.model_policy.reload();
         Self {
             state,
             client_headers,
@@ -117,6 +115,50 @@ impl Session {
         }
         self.last_terminal_response_id = None;
         self.observed_activity = None;
+    }
+
+    pub(super) async fn capability_hint(&self, payload: &[u8]) -> Option<CapabilityHint> {
+        if !self
+            .state
+            .upstream
+            .host_str()
+            .is_some_and(|host| host == "ai-cove.com" || host.ends_with(".ai-cove.com"))
+        {
+            return None;
+        }
+        let model = ModelPolicy::model_from_payload(payload)?;
+        if let Some(hint) = self.state.capability_cache.hint(&model) {
+            return Some(hint);
+        }
+        let mut models = self.policy.model_slugs();
+        if !models.iter().any(|candidate| candidate == &model) {
+            models.push(model.clone());
+        }
+        models.sort_unstable();
+        models.dedup();
+        if !self.state.capability_cache.needs_refresh(&models) {
+            return None;
+        }
+        let headers = self.client_headers.clone();
+        let result = super::super::transport_capability::fetch_batch(
+            &self.state.client,
+            &self.state.upstream,
+            &headers,
+            &models,
+        )
+        .await;
+        match result {
+            Ok(response) => {
+                self.state
+                    .capability_cache
+                    .apply(response, super::super::transport_capability::ttl());
+            }
+            Err(reason) => self
+                .state
+                .capability_cache
+                .mark_attempt(&models, Some(reason.to_owned())),
+        }
+        self.state.capability_cache.hint(&model)
     }
 
     pub(super) async fn retire_idle_upstream(&mut self, retirement: LeaseRetirement) {

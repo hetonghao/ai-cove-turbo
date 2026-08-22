@@ -90,6 +90,7 @@ pub fn run() -> tauri::Result<()> {
         .invoke_handler(tauri::generate_handler![
             get_app_status,
             get_connection_snapshot,
+            update_model_policy,
             get_codex_thread_info,
             get_model_catalog,
             update_model_catalog,
@@ -300,6 +301,14 @@ async fn get_connection_snapshot(
     runtime: State<'_, Arc<AppRuntime>>,
 ) -> Result<ConnectionSnapshot, String> {
     Ok(runtime.connection_snapshot().await)
+}
+
+#[tauri::command]
+async fn update_model_policy(
+    runtime: State<'_, Arc<AppRuntime>>,
+    update: proxy::ModelPolicyUpdate,
+) -> Result<proxy::ModelPolicyStatus, String> {
+    runtime.update_model_policy(update).await
 }
 
 #[tauri::command]

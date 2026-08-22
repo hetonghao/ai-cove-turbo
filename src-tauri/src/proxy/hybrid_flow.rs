@@ -191,6 +191,9 @@ async fn start_response(
     }
     session.response_started = true;
     let previous_response_id = prepared.previous_response_id;
+    if previous_response_id.is_none() {
+        session.policy = session.state.model_policy.reload();
+    }
     let fallback = prepared.fallback;
     let large_http_request = payload.len() >= session.max_websocket_request_bytes
         && matches!(&fallback, HttpFallback::Request(_));
@@ -202,12 +205,7 @@ async fn start_response(
     if reject_missing_continuation(client, session, true, previous_response_id.as_deref()).await {
         return true;
     }
-    if previous_response_id.is_none()
-        && session
-            .policy
-            .transport_for_payload_with_hint(&payload, None)
-            == Transport::Http
-    {
+    if previous_response_id.is_none() && policy_requires_http(session, &payload).await {
         start_http_only_response(session, active, fallback).await;
         return true;
     }
@@ -278,6 +276,14 @@ async fn start_http_only_response(
         HttpTraffic::HYBRID_COLD_START
     };
     *active = Some(http::start_http_worker(session, http_payload, traffic));
+}
+
+async fn policy_requires_http(session: &Session, payload: &[u8]) -> bool {
+    let capability_hint = session.capability_hint(payload).await;
+    session
+        .policy
+        .transport_for_payload_with_hint(payload, capability_hint)
+        == Transport::Http
 }
 
 async fn checkout_handoff_websocket(session: &mut Session, previous_response_id: Option<&str>) {

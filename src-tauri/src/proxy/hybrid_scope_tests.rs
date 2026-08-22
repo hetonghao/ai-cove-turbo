@@ -69,6 +69,31 @@ fn authorization_and_turn_state_still_isolate_pool_scope() {
 }
 
 #[test]
+fn bootstrap_scope_matches_first_codex_session_stable_headers() {
+    let target = Url::parse("https://api.ai-cove.com/v1/responses").expect("valid URL");
+    let mut bootstrap = HeaderMap::new();
+    bootstrap.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer account"),
+    );
+    bootstrap.insert("x-ai-cove-client", HeaderValue::from_static("turbo"));
+    bootstrap.insert(
+        "x-ai-cove-client-version",
+        HeaderValue::from_static("mac/0.1.0"),
+    );
+    let mut first = metadata_headers("first", "root");
+    first.insert("x-ai-cove-client", HeaderValue::from_static("turbo"));
+    first.insert(
+        "x-ai-cove-client-version",
+        HeaderValue::from_static("mac/0.1.0"),
+    );
+    assert_eq!(
+        HybridScope::new(&target, &bootstrap),
+        HybridScope::new(&target, &first)
+    );
+}
+
+#[test]
 fn blank_connection_headers_remove_dynamic_session_metadata() {
     let mut headers = metadata_headers("child", "root");
     headers.insert("x-codex-turn-state", HeaderValue::from_static("sticky"));

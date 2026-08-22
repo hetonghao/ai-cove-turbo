@@ -29,7 +29,8 @@ use crate::{
         write_session_handoff,
     },
     proxy::{
-        ConnectionSnapshot, Metrics, ProxyHandle, ProxyOptions, start_proxy_with_policy,
+        ConnectionSnapshot, Metrics, ModelPolicyStatus, ModelPolicyUpdate, ProxyHandle,
+        ProxyOptions, start_proxy_with_policy,
         traffic::{RequestEvent, TrafficWindow},
     },
 };
@@ -118,6 +119,7 @@ pub(crate) struct AppStatus {
     pub(crate) websocket_zstd_verified: bool,
     pub(crate) websocket_state: String,
     pub(crate) prewarm_state: String,
+    pub(crate) model_policy: ModelPolicyStatus,
     pub(crate) websocket_handshakes: u64,
     pub(crate) websocket_raw_bytes: u64,
     pub(crate) websocket_sent_bytes: u64,
@@ -168,6 +170,11 @@ impl AppStatus {
                 "disabled".to_owned()
             },
             prewarm_state: "disabled".to_owned(),
+            model_policy: ModelPolicyStatus {
+                default_transport: "auto".to_owned(),
+                models: std::collections::HashMap::new(),
+                reason: None,
+            },
             websocket_handshakes: 0,
             websocket_raw_bytes: 0,
             websocket_sent_bytes: 0,
@@ -262,6 +269,7 @@ impl AppRuntime {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn initialize(&self) {
         let _guard = self.lifecycle_lock.lock().await;
         if self.shutting_down.load(Ordering::Relaxed) {
@@ -438,12 +446,12 @@ impl AppRuntime {
             self.update_status(|status| status.catalog = catalog);
         }
         let mut status = read_lock(&self.status).clone();
-        status.prewarm_state = self
-            .proxy
-            .lock()
-            .await
-            .as_ref()
-            .map_or_else(|| "disabled".to_owned(), ProxyHandle::prewarm_state);
+        let (prewarm_state, model_policy) = self.proxy.lock().await.as_ref().map_or_else(
+            || ("disabled".to_owned(), status.model_policy.clone()),
+            |proxy| (proxy.prewarm_state(), proxy.model_policy_status()),
+        );
+        status.prewarm_state = prewarm_state;
+        status.model_policy = model_policy;
         status.requests = metrics.requests;
         status.raw_bytes = metrics.raw_bytes;
         status.sent_bytes = metrics.sent_bytes;
@@ -493,6 +501,18 @@ impl AppRuntime {
             Some(proxy) => proxy.connection_snapshot().await,
             None => ConnectionSnapshot::default(),
         }
+    }
+
+    pub(crate) async fn update_model_policy(
+        &self,
+        update: ModelPolicyUpdate,
+    ) -> Result<ModelPolicyStatus, String> {
+        self.proxy
+            .lock()
+            .await
+            .as_ref()
+            .ok_or_else(|| "Turbo 代理尚未启动".to_owned())?
+            .update_model_policy(update)
     }
 
     pub(crate) fn set_compression(&self, enabled: bool) {
@@ -613,19 +633,28 @@ impl AppRuntime {
             status.restart_required = false;
             status.config_message = "已检测到 Codex 重新启动，等待首次请求验证".to_owned();
         });
-        let mut catalog = lock_mutex(&self.catalog);
-        if catalog.restart_required {
-            catalog.restart_required = false;
-            catalog.loaded = true;
-            self.update_status(|status| status.catalog = catalog.clone());
+        let catalog_update = {
+            let mut catalog = lock_mutex(&self.catalog);
+            if catalog.restart_required {
+                catalog.restart_required = false;
+                catalog.loaded = true;
+                Some(catalog.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(catalog) = catalog_update {
+            self.update_status(|status| status.catalog = catalog);
         }
     }
 
+    #[allow(clippy::unused_async)]
     pub(crate) async fn model_catalog(&self) -> CatalogStatus {
         self.refresh_catalog();
         lock_mutex(&self.catalog).clone()
     }
 
+    #[allow(clippy::unused_async)]
     pub(crate) async fn update_model_catalog(
         &self,
         updates: Vec<CatalogModelUpdate>,
@@ -649,6 +678,7 @@ impl AppRuntime {
         Ok(current)
     }
 
+    #[allow(clippy::unused_async)]
     pub(crate) async fn restore_model_catalog(
         &self,
     ) -> Result<CatalogStatus, catalog::CatalogError> {
@@ -668,6 +698,7 @@ impl AppRuntime {
         Ok(current)
     }
 
+    #[allow(clippy::unused_async)]
     pub(crate) async fn reclaim_model_catalog(
         &self,
     ) -> Result<CatalogStatus, catalog::CatalogError> {

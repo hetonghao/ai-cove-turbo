@@ -1,28 +1,22 @@
 use std::{
     collections::HashMap,
-    env, fs,
+    fs,
+    io::Write,
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex},
-    time::SystemTime,
+    sync::Mutex,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
+
+use super::transport_capability::CapabilityHint;
 
 const POLICY_VERSION: u64 = 1;
-static LAST_GOOD: LazyLock<Mutex<HashMap<PathBuf, ModelPolicy>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Transport {
     Auto,
     Http,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct CapabilityHint {
-    pub(super) expires_at: SystemTime,
-    pub(super) http_available: bool,
-    pub(super) responses_websocket_available: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -47,6 +41,33 @@ pub(super) struct ModelPolicy {
     models: HashMap<String, Transport>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelPolicyStatus {
+    pub(crate) default_transport: String,
+    pub(crate) models: HashMap<String, String>,
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelPolicyUpdate {
+    pub(crate) default_transport: String,
+    pub(crate) models: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+struct StoreState {
+    policy: ModelPolicy,
+    reason: Option<String>,
+}
+
+#[derive(Debug)]
+pub(super) struct ModelPolicyStore {
+    path: PathBuf,
+    state: Mutex<StoreState>,
+}
+
 impl Default for ModelPolicy {
     fn default() -> Self {
         Self {
@@ -57,32 +78,6 @@ impl Default for ModelPolicy {
 }
 
 impl ModelPolicy {
-    pub(super) fn load_current() -> Self {
-        let Some(path) = env::var_os("AI_COVE_TURBO_MODEL_POLICY")
-            .map(PathBuf::from)
-            .or_else(|| {
-                env::var_os("AI_COVE_TURBO_APP_DATA_DIR")
-                    .map(|dir| PathBuf::from(dir).join("ai_cove_turbo_model_policy.json"))
-            })
-        else {
-            return Self::default();
-        };
-        Self::load_path(&path)
-    }
-
-    pub(super) fn load_path(path: &Path) -> Self {
-        let mut snapshot = match LAST_GOOD.lock() {
-            Ok(snapshot) => snapshot,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let previous = snapshot.get(path).cloned();
-        let (policy, reason) = Self::load(path, previous.as_ref());
-        if reason.is_none() {
-            snapshot.insert(path.to_path_buf(), policy.clone());
-        }
-        policy
-    }
-
     pub(super) fn load(path: &Path, previous: Option<&Self>) -> (Self, Option<String>) {
         match fs::read_to_string(path)
             .map_err(|error| error.to_string())
@@ -122,14 +117,7 @@ impl ModelPolicy {
     }
 
     pub(super) fn transport_for_payload(&self, payload: &[u8]) -> Transport {
-        let model = serde_json::from_slice::<serde_json::Value>(payload)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("model")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            });
+        let model = Self::model_from_payload(payload);
         self.transport_for(model.as_deref())
     }
 
@@ -145,14 +133,110 @@ impl ModelPolicy {
         let Some(hint) = hint else {
             return policy;
         };
-        if SystemTime::now() >= hint.expires_at
-            || hint.responses_websocket_available
-            || !hint.http_available
-        {
+        if hint.responses_websocket_available || !hint.http_available {
             Transport::Auto
         } else {
             Transport::Http
         }
+    }
+
+    pub(super) fn model_from_payload(payload: &[u8]) -> Option<String> {
+        serde_json::from_slice::<serde_json::Value>(payload)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+    }
+
+    pub(super) fn model_slugs(&self) -> Vec<String> {
+        let mut models = self.models.keys().cloned().collect::<Vec<_>>();
+        models.sort_unstable();
+        models
+    }
+}
+
+impl ModelPolicyStore {
+    pub(super) fn new(path: PathBuf) -> Self {
+        let (policy, reason) = ModelPolicy::load(&path, None);
+        Self {
+            path,
+            state: Mutex::new(StoreState { policy, reason }),
+        }
+    }
+
+    pub(super) fn reload(&self) -> ModelPolicy {
+        let mut state = lock(&self.state);
+        let (policy, reason) = ModelPolicy::load(&self.path, Some(&state.policy));
+        if reason.is_none() {
+            state.policy = policy;
+        }
+        state.reason = reason;
+        state.policy.clone()
+    }
+
+    pub(super) fn status(&self) -> ModelPolicyStatus {
+        let state = lock(&self.state);
+        ModelPolicyStatus {
+            default_transport: state.policy.default.as_str().to_owned(),
+            models: state
+                .policy
+                .models
+                .iter()
+                .map(|(model, transport)| (model.clone(), transport.as_str().to_owned()))
+                .collect(),
+            reason: state.reason.clone(),
+        }
+    }
+
+    pub(super) fn update(&self, update: ModelPolicyUpdate) -> Result<ModelPolicyStatus, String> {
+        let source = serde_json::json!({
+            "version": POLICY_VERSION,
+            "default_transport": update.default_transport,
+            "models": update.models.into_iter().map(|(model, transport)| {
+                (model, serde_json::json!({"transport": transport}))
+            }).collect::<serde_json::Map<_, _>>(),
+        });
+        let bytes = serde_json::to_vec_pretty(&source).map_err(|_| "serialize_failed")?;
+        let policy =
+            ModelPolicy::parse(std::str::from_utf8(&bytes).map_err(|_| "serialize_failed")?)
+                .map_err(str::to_owned)?;
+        write_atomic(&self.path, &bytes).map_err(|_| "write_failed")?;
+        let mut state = lock(&self.state);
+        state.policy = policy;
+        state.reason = None;
+        drop(state);
+        Ok(self.status())
+    }
+}
+
+impl Transport {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Http => "http",
+        }
+    }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("policy path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let mut temp = NamedTempFile::new_in(parent)?;
+    temp.write_all(bytes)?;
+    temp.flush()?;
+    temp.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -170,7 +254,8 @@ fn parse_transport(value: &str) -> Option<Transport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelPolicy, Transport};
+    use super::{ModelPolicy, ModelPolicyStore, ModelPolicyUpdate, Transport};
+    use crate::proxy::transport_capability::CapabilityHint;
     use std::fs;
 
     #[test]
@@ -200,8 +285,7 @@ mod tests {
     #[test]
     fn expired_or_unavailable_capability_hint_falls_back_to_auto() {
         let policy = ModelPolicy::default();
-        let hint = super::CapabilityHint {
-            expires_at: std::time::SystemTime::now() + std::time::Duration::from_secs(30),
+        let hint = CapabilityHint {
             http_available: true,
             responses_websocket_available: false,
         };
@@ -209,12 +293,8 @@ mod tests {
             policy.transport_for_payload_with_hint(br#"{"model":"gpt"}"#, Some(hint)),
             Transport::Http
         );
-        let expired = super::CapabilityHint {
-            expires_at: std::time::SystemTime::UNIX_EPOCH,
-            ..hint
-        };
         assert_eq!(
-            policy.transport_for_payload_with_hint(br#"{"model":"gpt"}"#, Some(expired)),
+            policy.transport_for_payload_with_hint(br#"{"model":"gpt"}"#, None),
             Transport::Auto
         );
     }
@@ -226,5 +306,42 @@ mod tests {
         let (loaded, reason) = ModelPolicy::load(&path, None);
         assert_eq!(loaded.transport_for(Some("any-model")), Transport::Auto);
         assert!(reason.is_some_and(|reason| !reason.is_empty()));
+    }
+
+    #[test]
+    fn reload_keeps_last_good_and_exposes_failure_reason() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("ai_cove_turbo_model_policy.json");
+        fs::write(
+            &path,
+            r#"{"version":1,"default_transport":"http","models":{}}"#,
+        )
+        .expect("write policy");
+        let store = ModelPolicyStore::new(path.clone());
+        fs::write(path, "{bad").expect("break policy");
+        assert_eq!(store.reload().transport_for(None), Transport::Http);
+        assert_eq!(store.status().reason.as_deref(), Some("invalid_json"));
+    }
+
+    #[test]
+    fn update_writes_hidden_policy_and_reloads_new_snapshot() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("ai_cove_turbo_model_policy.json");
+        let store = ModelPolicyStore::new(path.clone());
+        let status = store
+            .update(ModelPolicyUpdate {
+                default_transport: "auto".to_owned(),
+                models: std::iter::once(("gpt-http".to_owned(), "http".to_owned())).collect(),
+            })
+            .expect("update policy");
+        assert_eq!(
+            status.models.get("gpt-http").map(String::as_str),
+            Some("http")
+        );
+        assert!(
+            fs::read_to_string(path)
+                .expect("read policy")
+                .contains("gpt-http")
+        );
     }
 }

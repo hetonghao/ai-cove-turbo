@@ -7,18 +7,16 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use toml_edit::DocumentMut;
 
 pub(super) fn effective_auth_headers(config_path: Option<&Path>) -> Option<HeaderMap> {
-    let key = env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            let codex_home = env::var_os("CODEX_HOME")
-                .map(PathBuf::from)
-                .or_else(|| config_path.and_then(Path::parent).map(Path::to_path_buf))
-                .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
-            let config_path =
-                config_path.map_or_else(|| codex_home.join("config.toml"), Path::to_path_buf);
-            resolve_api_key(&codex_home, &config_path)
-        })?;
+    let codex_home = env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| config_path.and_then(Path::parent).map(Path::to_path_buf))
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
+    let config_path = config_path.map_or_else(|| codex_home.join("config.toml"), Path::to_path_buf);
+    let key = resolve_api_key(&codex_home, &config_path).or_else(|| {
+        env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })?;
     let authorization = HeaderValue::from_str(&format!("Bearer {}", key.trim())).ok()?;
     let mut headers = HeaderMap::new();
     headers.insert(header::AUTHORIZATION, authorization);
@@ -28,6 +26,11 @@ pub(super) fn effective_auth_headers(config_path: Option<&Path>) -> Option<Heade
 fn resolve_api_key(codex_home: &Path, config_path: &Path) -> Option<String> {
     if let Some(env_key) = provider_env_key(config_path)
         && let Ok(value) = env::var(env_key)
+        && !value.trim().is_empty()
+    {
+        return Some(value.trim().to_owned());
+    }
+    if let Ok(value) = env::var("OPENAI_API_KEY")
         && !value.trim().is_empty()
     {
         return Some(value.trim().to_owned());

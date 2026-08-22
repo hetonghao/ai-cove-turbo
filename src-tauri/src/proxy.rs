@@ -36,11 +36,14 @@ mod hybrid;
 mod hybrid_pool;
 #[path = "model_policy.rs"]
 mod model_policy;
+pub(crate) use model_policy::{ModelPolicyStatus, ModelPolicyUpdate};
 mod private_websocket;
 #[cfg(test)]
 #[path = "proxy/private_websocket_benchmark.rs"]
 pub(crate) mod private_websocket_benchmark;
 pub(crate) mod traffic;
+#[path = "transport_capability.rs"]
+mod transport_capability;
 
 use compression::CompressionScheduler;
 pub(crate) use hybrid_pool::ConnectionSnapshot;
@@ -528,6 +531,7 @@ pub(crate) struct ProxyHandle {
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
     prewarm_state: Arc<std::sync::Mutex<String>>,
+    model_policy: Arc<model_policy::ModelPolicyStore>,
 }
 
 impl ProxyHandle {
@@ -554,6 +558,17 @@ impl ProxyHandle {
             Ok(state) => state.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         }
+    }
+
+    pub(crate) fn model_policy_status(&self) -> model_policy::ModelPolicyStatus {
+        self.model_policy.status()
+    }
+
+    pub(crate) fn update_model_policy(
+        &self,
+        update: model_policy::ModelPolicyUpdate,
+    ) -> Result<model_policy::ModelPolicyStatus, String> {
+        self.model_policy.update(update)
     }
 
     pub(crate) async fn stop(mut self) {
@@ -598,7 +613,8 @@ struct ProxyState {
     websocket_client: WebSocketClient,
     hybrid_pool: hybrid_pool::HybridPool,
     max_request_body_bytes: usize,
-    model_policy_path: Option<std::path::PathBuf>,
+    model_policy: Arc<model_policy::ModelPolicyStore>,
+    capability_cache: Arc<transport_capability::CapabilityCache>,
 }
 
 type WebSocketClient = Client<HttpsConnector<HttpConnector>, Empty<Bytes>>;
@@ -633,6 +649,10 @@ pub(crate) async fn start_proxy_with_policy(
     let private_tls_config = PrivateTlsConfig::new(Arc::new(private_tls_config));
     let hybrid_pool =
         hybrid_pool::HybridPool::new(private_tls_config.clone(), Arc::clone(&options.metrics));
+    let model_policy = Arc::new(model_policy::ModelPolicyStore::new(
+        model_policy_path
+            .unwrap_or_else(|| std::path::PathBuf::from("ai_cove_turbo_model_policy.json")),
+    ));
     let state = ProxyState {
         upstream: options.upstream,
         compression_enabled: options.compression_enabled,
@@ -650,13 +670,22 @@ pub(crate) async fn start_proxy_with_policy(
         } else {
             options.max_request_body_bytes
         },
-        model_policy_path,
+        model_policy: Arc::clone(&model_policy),
+        capability_cache: Arc::new(transport_capability::CapabilityCache::default()),
     };
     let bootstrap = if enable_bootstrap_prewarm
         && state.ai_cove_private_websocket_zstd
         && state.websocket_enabled.load(Ordering::Relaxed)
     {
-        codex_auth::effective_auth_headers(codex_config_path.as_deref()).map(|headers| {
+        codex_auth::effective_auth_headers(codex_config_path.as_deref()).map(|mut headers| {
+            headers.insert(
+                HeaderName::from_static("x-ai-cove-client"),
+                header::HeaderValue::from_static("turbo"),
+            );
+            headers.insert(
+                HeaderName::from_static("x-ai-cove-client-version"),
+                header::HeaderValue::from_static(turbo_client_version()),
+            );
             let target = resolve_target(&state.upstream, &Uri::from_static("/v1/responses"));
             let scope = hybrid_pool::HybridScope::new(&target, &headers);
             (target, scope, headers)
@@ -672,7 +701,7 @@ pub(crate) async fn start_proxy_with_policy(
                 if bootstrap.is_some() {
                     "starting"
                 } else {
-                    "unavailable"
+                    "waiting_auth"
                 }
             } else {
                 "disabled"
@@ -723,6 +752,7 @@ pub(crate) async fn start_proxy_with_policy(
         shutdown: Some(shutdown_tx),
         task,
         prewarm_state,
+        model_policy,
     })
 }
 

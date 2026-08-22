@@ -54,6 +54,8 @@
     websocketVerified: false,
     websocketZstdVerified: false,
     websocketState: "waiting",
+    prewarmState: "disabled",
+    modelPolicy: { defaultTransport: "auto", models: {}, reason: null },
     websocketHandshakes: 0,
     websocketMessages: 0,
     websocketRawBytes: 0,
@@ -1569,9 +1571,21 @@
       const previousModels = state.catalog?.models;
       state = { ...state, ...status, technicalDetail: "" };
       if (status.catalog && status.catalog.models !== previousModels) catalogDraft = null;
+      renderModelPolicy();
     }
     syncLiveRequests();
     renderState(options);
+  }
+
+  function renderModelPolicy() {
+    const policy = state.modelPolicy || { defaultTransport: "auto", models: {}, reason: null };
+    const indicator = $("[data-model-policy-state]");
+    const message = $("[data-model-policy-message]");
+    if (indicator) {
+      indicator.textContent = policy.reason ? "保留上次有效" : `默认 ${policy.defaultTransport || "auto"}`;
+      indicator.dataset.status = policy.reason ? "blocked" : "verified";
+    }
+    if (message) message.textContent = policy.reason ? `策略热加载失败：${policy.reason}` : "新建 WebSocket 会话读取最新策略；活动会话保持原快照。";
   }
 
   function applyPreviewAction(command, args) {
@@ -1669,6 +1683,22 @@
     if (action === "cancel-model-catalog") {
       catalogDraft = null;
       renderModelCatalog();
+      return;
+    }
+    if (action === "save-model-policy") {
+      if (pendingAction) return;
+      pendingAction = action;
+      renderControls();
+      try {
+        const current = state.modelPolicy || { defaultTransport: "auto", models: {} };
+        const update = invoke ? await invoke("update_model_policy", { update: current }) : current;
+        state.modelPolicy = update;
+      } catch (error) {
+        state.technicalDetail = error instanceof Error ? error.message : String(error);
+      } finally {
+        pendingAction = "";
+        renderState();
+      }
       return;
     }
     if (action === "save-model-catalog") {
