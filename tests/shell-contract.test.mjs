@@ -202,6 +202,7 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   const configPanel = html.slice(html.indexOf('id="panel-config"'));
 
   assert.match(configPanel, /data-model-catalog-list/);
+  assert.match(configPanel, /b-model-catalog b-model-catalog--wide/);
   assert.match(configPanel, /data-model-policy-state[^>]*>默认 auto</);
   assert.match(configPanel, /data-action="save-model-catalog"/);
   assert.match(configPanel, /data-action="cancel-model-catalog"/);
@@ -220,6 +221,9 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(css, /\.b-model-catalog__meta code\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?flex:\s*1 1 180px;/);
   assert.match(css, /\.b-model-catalog__meta > \.state-indicator\s*\{[\s\S]*?flex:\s*0 0 auto;/);
   assert.match(css, /#panel-config \.b-stage\s*\{[\s\S]*?justify-content:\s*flex-start;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overscroll-behavior:\s*contain;/);
+  assert.match(css, /\.b-model-catalog--wide\s*\{[\s\S]*?width:\s*auto;/);
+  assert.match(css, /\.b-model-row__drag:hover[\s\S]*?color:\s*var\(--b-accent\);/);
+  assert.match(css, /\.b-model-row select:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--b-accent\);/);
   assert.match(rust, /get_model_catalog/);
   assert.match(rust, /update_model_catalog/);
   assert.match(rust, /restore_model_catalog/);

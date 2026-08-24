@@ -1601,11 +1601,23 @@
     const policy = state.modelPolicy || { defaultTransport: "auto", models: {}, reason: null };
     const indicator = $("[data-model-policy-state]");
     const message = $("[data-model-policy-message]");
+    const reasonLabels = {
+      invalid_json: "文件格式无效",
+      unsupported_version: "文件版本不兼容",
+      invalid_default_transport: "默认传输方式无效",
+      invalid_model_transport: "模型传输方式无效",
+      write_failed: "文件写入失败",
+    };
     if (indicator) {
       indicator.textContent = policy.reason ? "保留上次有效" : `默认 ${policy.defaultTransport || "auto"}`;
       indicator.dataset.status = policy.reason ? "blocked" : "verified";
     }
-    if (message) message.textContent = policy.reason ? `策略热加载失败：${policy.reason}` : "新建 WebSocket 会话读取最新策略；活动会话保持原快照。";
+    if (message) {
+      const reason = reasonLabels[policy.reason] || policy.reason;
+      message.textContent = policy.reason
+        ? `策略文件读取失败，已回退到上次有效策略：${reason}。保存策略可恢复。`
+        : "新建 WebSocket 会话读取最新策略；活动会话保持原快照。";
+    }
   }
 
   function applyPreviewAction(command, args) {

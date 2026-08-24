@@ -42,7 +42,7 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
-async function catalogHarness({ failSave = false } = {}) {
+async function catalogHarness({ failSave = false, policyReason = null } = {}) {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const catalog = {
     path: "/home/test/.codex/model-catalogs/ai_cove_turbo.json",
@@ -62,7 +62,7 @@ async function catalogHarness({ failSave = false } = {}) {
     serviceHealthy: true,
     configState: "managed",
     catalog,
-    modelPolicy: { defaultTransport: "auto", models: { beta: "http" }, reason: null },
+    modelPolicy: { defaultTransport: "auto", models: { beta: "http" }, reason: policyReason },
     transportCapabilities: {
       alpha: { transport: "websocket", reasonCode: "ok" },
       beta: { transport: "http", reasonCode: "no_responses_websocket_channel" },
@@ -71,6 +71,7 @@ async function catalogHarness({ failSave = false } = {}) {
   const path = element({ modelCatalogPath: "" });
   const indicator = element({ modelCatalogState: "" });
   const policyIndicator = element({ modelPolicyState: "" });
+  const policyMessage = element({ modelPolicyMessage: "" });
   const list = element({ modelCatalogList: "" });
   const message = element({ modelCatalogMessage: "" });
   const actions = ["save-model-catalog", "save-model-policy", "cancel-model-catalog", "restore-model-catalog", "reclaim-model-catalog"].map((action) => {
@@ -82,6 +83,7 @@ async function catalogHarness({ failSave = false } = {}) {
     ["[data-model-catalog-path]", path],
     ["[data-model-catalog-state]", indicator],
     ["[data-model-policy-state]", policyIndicator],
+    ["[data-model-policy-message]", policyMessage],
     ["[data-model-catalog-list]", list],
     ["[data-model-catalog-message]", message],
   ]);
@@ -125,6 +127,7 @@ async function catalogHarness({ failSave = false } = {}) {
     calls,
     indicator,
     policyIndicator,
+    policyMessage,
     list,
     async click(action) {
       listeners.get("click")?.({ target: actions.find((target) => target.dataset.action === action) });
@@ -191,6 +194,13 @@ test("模型传输策略编辑保存并显示能力摘要", async () => {
   const failed = await catalogHarness({ failSave: true });
   await failed.click("save-model-policy");
   assert.match(failed.list.innerHTML, /WS 可用/);
+});
+
+test("策略文件读取失败时说明回退策略和恢复动作", async () => {
+  const harness = await catalogHarness({ policyReason: "invalid_json" });
+  assert.equal(harness.policyIndicator.textContent, "保留上次有效");
+  assert.match(harness.policyMessage.textContent, /策略文件读取失败/);
+  assert.match(harness.policyMessage.textContent, /保存策略可恢复/);
 });
 
 test("产品图标气泡支持轻触关闭并打开 AI Cove", async () => {

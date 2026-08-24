@@ -218,17 +218,17 @@
                     <button class="b-control" type="button" data-action="toggle-autostart" aria-pressed="true"><span class="b-control__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2v10M18.4 6.6a8 8 0 1 1-12.8 0" /></svg></span><span><strong>开机自启动</strong><small>登录系统后在后台启动 Turbo</small></span><span class="b-control__state" data-state="autostart">开</span><span class="b-switch" aria-hidden="true"><i></i></span></button>
                     <button class="b-control is-conditional" type="button" data-action="toggle-dock" data-visible="dock" aria-pressed="false" hidden><span class="b-control__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 15h18M9 18h.01M12 18h.01M15 18h.01" /></svg></span><span><strong>显示 Dock 图标</strong><small>关闭后仅保留菜单栏入口</small></span><span class="b-control__state" data-state="dock">关</span><span class="b-switch" aria-hidden="true"><i></i></span></button>
                   </section>
-                  <section class="b-model-catalog" aria-labelledby="b-model-catalog-title">
-                    <header class="b-config-heading b-config-heading--catalog"><p class="eyebrow">MODEL CATALOG</p><h2 id="b-model-catalog-title">模型候选</h2><p>固定目录由 Turbo 维护；slug 只读，拖动优先级后保存。</p></header>
-                    <div class="b-model-catalog__meta"><code data-model-catalog-path>~/.codex/model-catalogs/ai_cove_turbo.json</code><span class="state-indicator" data-model-catalog-state data-status="waiting">检查中</span><span class="state-indicator" data-model-policy-state data-status="waiting">默认 auto</span></div>
-                    <div class="b-model-catalog__list" data-model-catalog-list aria-live="polite"></div>
-                    <p class="b-model-catalog__message" data-model-catalog-message role="status" aria-live="polite"></p>
-                    <p class="b-model-catalog__message" data-model-policy-message role="status" aria-live="polite"></p>
-                    <div class="b-model-catalog__actions"><button type="button" data-action="save-model-catalog">保存目录</button><button type="button" data-action="save-model-policy">保存传输策略</button><button type="button" data-action="cancel-model-catalog">取消</button><button type="button" data-action="reclaim-model-catalog">重新接管</button><button type="button" data-action="restore-model-catalog">恢复原目录指针</button></div>
-                  </section>
-                  <p class="b-action-feedback" data-state="config-message" data-tone="neutral" role="status" aria-live="polite">正在读取 Turbo 状态</p>
                 </div>
               </div>
+              <section class="b-model-catalog b-model-catalog--wide" aria-labelledby="b-model-catalog-title">
+                <header class="b-config-heading b-config-heading--catalog"><p class="eyebrow">MODEL CATALOG</p><h2 id="b-model-catalog-title">模型候选</h2><p>固定目录由 Turbo 维护；slug 只读，拖动优先级后保存。</p></header>
+                <div class="b-model-catalog__meta"><code data-model-catalog-path>~/.codex/model-catalogs/ai_cove_turbo.json</code><span class="state-indicator" data-model-catalog-state data-status="waiting">检查中</span><span class="state-indicator" data-model-policy-state data-status="waiting">默认 auto</span></div>
+                <div class="b-model-catalog__list" data-model-catalog-list aria-live="polite"></div>
+                <p class="b-model-catalog__message" data-model-catalog-message role="status" aria-live="polite"></p>
+                <p class="b-model-catalog__message" data-model-policy-message role="status" aria-live="polite"></p>
+                <div class="b-model-catalog__actions"><button type="button" data-action="save-model-catalog">保存目录</button><button type="button" data-action="save-model-policy">保存传输策略</button><button type="button" data-action="cancel-model-catalog">取消</button><button type="button" data-action="reclaim-model-catalog">重新接管</button><button type="button" data-action="restore-model-catalog">恢复原目录指针</button></div>
+              </section>
+              <p class="b-action-feedback" data-state="config-message" data-tone="neutral" role="status" aria-live="polite">正在读取 Turbo 状态</p>
             </article>
             <p class="b-hint">从菜单栏或系统托盘重新打开 · 关闭窗口不会停止 Turbo</p>
           </div>

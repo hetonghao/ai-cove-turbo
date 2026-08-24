@@ -79,12 +79,24 @@ impl Default for ModelPolicy {
 
 impl ModelPolicy {
     pub(super) fn load(path: &Path, previous: Option<&Self>) -> (Self, Option<String>) {
-        match fs::read_to_string(path)
-            .map_err(|error| error.to_string())
-            .and_then(|source| Self::parse(&source).map_err(str::to_owned))
-        {
+        let source = match fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return (Self::default(), None);
+            }
+            Err(error) => {
+                return (
+                    previous.cloned().unwrap_or_default(),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        match Self::parse(&source) {
             Ok(policy) => (policy, None),
-            Err(reason) => (previous.cloned().unwrap_or_default(), Some(reason)),
+            Err(reason) => (
+                previous.cloned().unwrap_or_default(),
+                Some(reason.to_owned()),
+            ),
         }
     }
 
@@ -300,12 +312,26 @@ mod tests {
     }
 
     #[test]
-    fn missing_policy_uses_builtin_auto() {
+    fn missing_policy_uses_builtin_auto_without_failure() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("missing.json");
         let (loaded, reason) = ModelPolicy::load(&path, None);
         assert_eq!(loaded.transport_for(Some("any-model")), Transport::Auto);
-        assert!(reason.is_some_and(|reason| !reason.is_empty()));
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn removed_policy_returns_builtin_auto_after_last_good_snapshot() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("removed.json");
+        let previous = ModelPolicy::parse(
+            r#"{"version":1,"default_transport":"http","models":{"gpt":{"transport":"http"}}}"#,
+        )
+        .expect("valid policy");
+        let (loaded, reason) = ModelPolicy::load(&path, Some(&previous));
+        assert_eq!(loaded.transport_for(Some("gpt")), Transport::Auto);
+        assert_eq!(loaded.transport_for(None), Transport::Auto);
+        assert!(reason.is_none());
     }
 
     #[test]
