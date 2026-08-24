@@ -180,6 +180,15 @@
             <div class="b-progress is-conditional" data-visible="update-progress" role="progressbar" aria-label="更新进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i data-state-progress="update-progress"></i></div>
           </header>
           <div class="b-stage">
+            <div class="b-config-page">
+              <header class="b-config-page__header">
+                <div class="b-config-page__copy"><p class="eyebrow">CONFIG / WORKSPACES</p><h1>配置</h1><p>运行配置和模型候选分别进入独立工作区，切换不会改变全局运行配置卡片。</p></div>
+                <div class="b-config-view-tabs" role="tablist" aria-label="配置工作区">
+                  <button id="config-view-settings" type="button" role="tab" aria-selected="true" aria-controls="config-view-panel-settings" data-config-view="settings" tabindex="0"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="10" cy="18" r="2"/></svg><span>运行配置</span></button>
+                  <button id="config-view-catalog" type="button" role="tab" aria-selected="false" aria-controls="config-view-panel-catalog" data-config-view="catalog" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg><span>模型候选</span><b data-model-catalog-count>0</b></button>
+                </div>
+              </header>
+              <div id="config-view-panel-settings" class="b-config-view" data-config-view-panel="settings" role="tabpanel" aria-labelledby="config-view-settings">
             <article class="b-popover b-popover--wide">
               <div class="b-config-layout">
                 <div class="b-config-column b-config-column--status">
@@ -220,16 +229,19 @@
                   </section>
                 </div>
               </div>
-              <section class="b-model-catalog b-model-catalog--wide" aria-labelledby="b-model-catalog-title">
-                <header class="b-config-heading b-config-heading--catalog"><p class="eyebrow">MODEL CATALOG</p><h2 id="b-model-catalog-title">模型候选</h2><p>固定目录由 Turbo 维护；slug 只读，拖动优先级后保存。</p></header>
-                <div class="b-model-catalog__meta"><code data-model-catalog-path>~/.codex/model-catalogs/ai_cove_turbo.json</code><span class="state-indicator" data-model-catalog-state data-status="waiting">检查中</span><span class="state-indicator" data-model-policy-state data-status="waiting">默认 auto</span></div>
-                <div class="b-model-catalog__list" data-model-catalog-list aria-live="polite"></div>
-                <p class="b-model-catalog__message" data-model-catalog-message role="status" aria-live="polite"></p>
-                <p class="b-model-catalog__message" data-model-policy-message role="status" aria-live="polite"></p>
-                <div class="b-model-catalog__actions"><button type="button" data-action="save-model-catalog">保存目录</button><button type="button" data-action="save-model-policy">保存传输策略</button><button type="button" data-action="cancel-model-catalog">取消</button><button type="button" data-action="reclaim-model-catalog">重新接管</button><button type="button" data-action="restore-model-catalog">恢复原目录指针</button></div>
-              </section>
               <p class="b-action-feedback" data-state="config-message" data-tone="neutral" role="status" aria-live="polite">正在读取 Turbo 状态</p>
             </article>
+              </div>
+              <div id="config-view-panel-catalog" class="b-config-view" data-config-view-panel="catalog" role="tabpanel" aria-labelledby="config-view-catalog" hidden>
+                <section class="b-model-catalog b-model-catalog--wide" aria-labelledby="b-model-catalog-title">
+                  <header class="b-config-heading b-config-heading--catalog"><div><p class="eyebrow">MODEL CATALOG</p><h2 id="b-model-catalog-title">模型候选</h2><p>眼睛控制显示，把手控制优先级；每个模型独立选择自动或压缩 HTTP。</p></div><button class="b-model-catalog__info" type="button" data-model-catalog-info aria-label="查看模型候选源文件" title="模型候选源文件：正在读取">!</button></header>
+                  <div class="b-model-catalog__toolbar"><span><strong data-model-catalog-visible-count>0</strong> / <span data-model-catalog-total-count>0</span> 个候选显示给 Codex</span><span>目录变化保存后需要重启</span></div>
+                  <div class="b-model-catalog__list" data-model-catalog-list aria-live="polite"></div>
+                  <p class="b-model-catalog__message" data-model-catalog-message role="status" aria-live="polite"></p>
+                  <div class="b-model-catalog__actions"><button type="button" data-action="save-model-settings" disabled>保存</button><button type="button" data-action="undo-model-settings" disabled>撤销修改</button><span class="b-model-catalog__restart is-conditional" data-model-catalog-restart hidden><span data-model-catalog-restart-message>模型候选已保存，需要重启 Codex</span><button type="button" data-action="restart-codex" data-catalog-restart data-restart-hint>重启</button></span></div>
+                </section>
+              </div>
+            </div>
             <p class="b-hint">从菜单栏或系统托盘重新打开 · 关闭窗口不会停止 Turbo</p>
           </div>
         </section>

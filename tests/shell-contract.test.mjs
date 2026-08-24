@@ -23,7 +23,8 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   const updateProgressIndex = configPanel.indexOf('class="b-progress', versionBarIndex);
 
   // Then: 实时、统计和配置页可访问，业务控制仍只出现在配置页。
-  assert.equal(tabs.length, 3);
+  assert.equal((html.match(/data-tab="/g) ?? []).length, 3);
+  assert.equal(tabs.length, 5);
   assert.match(html, /data-tab="live"/);
   assert.match(html, /data-tab="statistics"/);
   assert.match(html, /data-tab="config"/);
@@ -178,8 +179,6 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
     "check_for_updates",
     "install_update",
     "update_model_catalog",
-    "restore_model_catalog",
-    "reclaim_model_catalog",
   ];
 
   // When: 前端加载并进入真实桌面运行时。
@@ -200,34 +199,41 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   const app = await readFile(new URL("app.js", sourceUrl), "utf8");
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   const configPanel = html.slice(html.indexOf('id="panel-config"'));
+  const globalSettings = configPanel.slice(configPanel.indexOf('data-config-view-panel="settings"'), configPanel.indexOf('data-config-view-panel="catalog"'));
 
+  assert.match(configPanel, /role="tablist" aria-label="配置工作区"/);
+  assert.match(configPanel, /aria-selected="true"[^>]*data-config-view="settings"/);
+  assert.match(configPanel, /aria-selected="false"[^>]*data-config-view="catalog"/);
+  assert.match(configPanel, /data-config-view-panel="settings"/);
+  assert.match(configPanel, /data-config-view-panel="catalog"[^>]*hidden/);
   assert.match(configPanel, /data-model-catalog-list/);
   assert.match(configPanel, /b-model-catalog b-model-catalog--wide/);
-  assert.match(configPanel, /data-model-policy-state[^>]*>默认 auto</);
-  assert.match(configPanel, /data-action="save-model-catalog"/);
-  assert.match(configPanel, /data-action="cancel-model-catalog"/);
-  assert.match(configPanel, /data-action="restore-model-catalog"/);
-  assert.match(configPanel, /data-action="reclaim-model-catalog"/);
-  assert.match(app, /option value=\"list\"/);
-  assert.match(app, /option value=\"hide\"/);
-  assert.match(app, /option value=\"none\" disabled/);
+  assert.doesNotMatch(globalSettings, /data-model-catalog-list/);
+  assert.match(configPanel, /data-model-catalog-info/);
+  assert.match(configPanel, /data-action="save-model-settings"[^>]*disabled/);
+  assert.match(configPanel, /data-action="undo-model-settings"[^>]*disabled/);
+  assert.match(configPanel, /data-model-catalog-restart/);
+  assert.match(configPanel, /data-action="restart-codex"[^>]*data-catalog-restart/);
+  assert.match(app, /data-model-visibility-toggle/);
+  assert.match(app, /data-model-drag-handle/);
+  assert.match(app, /class="b-model-row" draggable="false"/);
+  assert.doesNotMatch(app, /data-model-visibility[^-]/);
   assert.match(app, /document\.addEventListener\("drop"/);
   assert.match(app, /priority: priority \+ 1/);
   assert.match(css, /\.b-model-catalog__actions button\s*\{[\s\S]*?border:\s*1px solid var\(--b-line\);[\s\S]*?background:\s*var\(--b-surface-2\);/);
   assert.match(css, /\.b-model-catalog__actions button:hover:not\(:disabled\)\s*\{[\s\S]*?color:\s*var\(--b-accent\);[\s\S]*?background:\s*var\(--b-accent-soft\);/);
   assert.match(css, /\.b-model-catalog__actions button:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--b-accent\);/);
   assert.match(css, /\.b-model-catalog__actions button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;[\s\S]*?opacity:\s*0\.45;/);
-  assert.match(css, /\.b-model-catalog__meta\s*\{[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?justify-content:\s*flex-start;/);
-  assert.match(css, /\.b-model-catalog__meta code\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?flex:\s*1 1 180px;/);
-  assert.match(css, /\.b-model-catalog__meta > \.state-indicator\s*\{[\s\S]*?flex:\s*0 0 auto;/);
+  assert.match(css, /\.b-model-catalog__info\s*\{/);
+  assert.match(css, /\.b-model-row__visibility\s*\{/);
+  assert.match(css, /\.b-model-catalog__list\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+  assert.match(css, /\.b-model-row\s*\{[\s\S]*?grid-template-areas:[\s\S]*?"drag copy visibility"/);
   assert.match(css, /#panel-config \.b-stage\s*\{[\s\S]*?justify-content:\s*flex-start;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overscroll-behavior:\s*contain;/);
   assert.match(css, /\.b-model-catalog--wide\s*\{[\s\S]*?width:\s*auto;/);
   assert.match(css, /\.b-model-row__drag:hover[\s\S]*?color:\s*var\(--b-accent\);/);
   assert.match(css, /\.b-model-row select:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--b-accent\);/);
   assert.match(rust, /get_model_catalog/);
   assert.match(rust, /update_model_catalog/);
-  assert.match(rust, /restore_model_catalog/);
-  assert.match(rust, /reclaim_model_catalog/);
 });
 
 test("Windows 重启 Codex 不闪出 PowerShell 并返回新进程", async () => {

@@ -7,6 +7,7 @@
     hybridWs: "Hybrid WS",
     hybridColdStartHttp: "首轮 HTTP",
     hybridRecoveryHttp: "回退 HTTP",
+    hybridPolicyHttp: "压缩 HTTP",
     directHttp: "压缩 HTTP",
   };
   const ROLLING_WINDOWS = [1, 10, 60, 1440];
@@ -64,6 +65,7 @@
     hybridWs: 0,
     hybridColdStartHttp: 0,
     hybridRecoveryHttp: 0,
+    hybridPolicyHttp: 0,
     directHttp: 0,
     autostartEnabled: true,
     dockVisible: true,
@@ -151,6 +153,31 @@
     sentBytes: 1_060_000,
     compressionRatio: 42.4,
     updateMessage: "Preview：尚未检查更新",
+    modelPolicy: { defaultTransport: "auto", models: { "ox-alpha": "http" }, reason: null },
+    transportCapabilities: {
+      "gpt-5.3-codex": { transport: "websocket", reasonCode: "ok" },
+      "gpt-5.4": { transport: "websocket", reasonCode: "ok" },
+      "ox-alpha": { transport: "http", reasonCode: "no_responses_websocket_channel" },
+      "grok-4.6": { transport: "websocket", reasonCode: "ok" },
+      "codex-auto-review": { transport: "websocket", reasonCode: "ok" },
+    },
+    catalog: {
+      path: "~/.codex/model-catalogs/ai_cove_turbo.json",
+      state: "owned",
+      sourcePath: "~/.codex/model-catalogs/gpt-5.6-1m.json",
+      models: [
+        { slug: "gpt-5.3-codex", displayName: "GPT-5.3 Codex", description: "默认的 Codex 主力候选", visibility: "list", priority: 1 },
+        { slug: "gpt-5.4", displayName: "GPT-5.4", description: "适合复杂分析与长上下文", visibility: "list", priority: 2 },
+        { slug: "ox-alpha", displayName: "ox-alpha", description: "上游不提供 WebSocket", visibility: "list", priority: 3 },
+        { slug: "grok-4.6", displayName: "grok-4.6", description: "备用创意与检索候选", visibility: "hide", priority: 4 },
+        { slug: "codex-auto-review", displayName: "codex-auto-review", description: "用于代码审查的低频候选", visibility: "hide", priority: 5 },
+      ],
+      changes: [],
+      restartRequired: false,
+      loaded: true,
+      requestVerified: false,
+      revision: "preview-revision",
+    },
   };
   const previewConnectionSnapshot = {
     currentConnections: 6,
@@ -164,7 +191,7 @@
       { id: "C001", threadId: "thread-7c2a91df", connectionId: "S003", reason: "上游连接关闭", agoSeconds: 12, normal: false },
     ],
   };
-  let state = { ...(invoke ? desktopStatus : previewStatus), tab: "live", nonAiCoveConfirmed: false };
+  let state = { ...(invoke ? desktopStatus : previewStatus), tab: "live", configView: "settings", nonAiCoveConfirmed: false };
   let pendingAction = "";
   let refreshing = false;
   let streamPaused = false;
@@ -209,7 +236,9 @@
   };
   let catalogDraft = null;
   let modelPolicyDraft = null;
+  let renderedModelCatalogMarkup = "";
   let draggedCatalogSlug = "";
+  let catalogDragChanged = false;
 
   function readTab() {
     const requestedTab = new URL(window.location.href).searchParams.get("tab");
@@ -219,10 +248,16 @@
     return "live";
   }
 
+  function readConfigView() {
+    const requestedView = new URL(window.location.href).searchParams.get("view");
+    return requestedView === "catalog" ? "catalog" : "settings";
+  }
+
   function updateUrl() {
     const url = new URL(window.location.href);
     url.searchParams.delete("variant");
     url.searchParams.set("tab", state.tab);
+    url.searchParams.set("view", state.configView);
     window.history.replaceState({}, "", url);
   }
 
@@ -371,7 +406,8 @@
       "hybrid-ws": numberFormatter.format(Number(state.hybridWs) || 0),
       "hybrid-cold-start-http": numberFormatter.format(Number(state.hybridColdStartHttp) || 0),
       "hybrid-recovery-http": numberFormatter.format(Number(state.hybridRecoveryHttp) || 0),
-      "direct-http": numberFormatter.format(Number(state.directHttp) || 0),
+      "hybrid-policy-http": numberFormatter.format(Number(state.hybridPolicyHttp) || 0),
+      "direct-http": numberFormatter.format((Number(state.directHttp) || 0) + (Number(state.hybridPolicyHttp) || 0)),
       autostart: state.autostartEnabled ? "开" : "关",
       dock: state.dockVisible ? "开" : "关",
       restart: pendingAction === "restart-codex" || state.codexState === "restarting"
@@ -565,6 +601,13 @@
     all("[data-action]").forEach((control) => {
       const action = control.dataset.action;
       const managed = Object.hasOwn(actions, action);
+      if (action === "save-model-settings" || action === "undo-model-settings") {
+        const dirty = modelSettingsDirty();
+        const actionPending = pendingAction === action;
+        control.disabled = Boolean(pendingAction) || !dirty;
+        control.dataset.status = actionPending ? "pending" : dirty ? "ready" : "idle";
+        control.setAttribute("aria-busy", String(actionPending));
+      }
       if (managed) {
         const actionPending = pendingAction === action || (action === "install-update" && updateBusy);
         control.disabled = Boolean(pendingAction) || actionPending;
@@ -578,7 +621,9 @@
       }
       if (action === "restart-codex") {
         const codex = String(state.codexState).toLowerCase();
-        control.dataset.required = String(["restart_required", "waiting_start", "restart_failed"].includes(codex));
+        const codexRestartRequired = ["restart_required", "waiting_start", "restart_failed"].includes(codex);
+        const catalogRestartRequired = Object.hasOwn(control.dataset, "catalogRestart") && Boolean(state.catalog?.restartRequired);
+        control.dataset.required = String(codexRestartRequired || catalogRestartRequired);
         if (Object.hasOwn(control.dataset, "restartHint")) {
           const title = codex === "waiting_start"
             ? "Codex 尚未运行，启动后会加载 Turbo 配置。"
@@ -596,27 +641,45 @@
     });
   }
 
-  function catalogStatusLabel(catalog) {
-    if (catalog.state === "conflict") return ["接管已丢失", "blocked"];
-    if (catalog.state === "error") return ["目录不可用", "blocked"];
-    if (catalog.requestVerified) return ["真实请求已验证", "verified"];
-    if (catalog.restartRequired) return ["需要重启 Codex", "required"];
-    if (catalog.loaded) return ["Codex 已加载", "verified"];
-    if (catalog.state === "owned") return ["目录已写入", "verified"];
-    if (catalog.state === "restored") return ["已恢复原指针", "verified"];
-    return ["检查中", "waiting"];
+  function catalogDraftSignature(models) {
+    return JSON.stringify((models || []).map(({ slug, visibility, priority }) => ({ slug, visibility, priority })));
+  }
+
+  function policySignature(policy) {
+    const models = Object.entries(policy?.models || {}).sort(([left], [right]) => left.localeCompare(right));
+    return JSON.stringify({ defaultTransport: policy?.defaultTransport || "auto", models });
+  }
+
+  function catalogDraftDirty() {
+    return Boolean(catalogDraft) && catalogDraftSignature(catalogDraft) !== catalogDraftSignature(state.catalog?.models);
+  }
+
+  function policyDraftDirty() {
+    return Boolean(modelPolicyDraft) && policySignature({ defaultTransport: state.modelPolicy?.defaultTransport, models: modelPolicyDraft }) !== policySignature(state.modelPolicy);
+  }
+
+  function modelSettingsDirty() {
+    return catalogDraftDirty() || policyDraftDirty();
+  }
+
+  function visibilityIcon(visible) {
+    return visible
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-5 9.5-5 9.5 5 9.5 5-3.5 5-9.5 5-9.5-5-9.5-5Z"/><circle cx="12" cy="12" r="2.5"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 18M10.6 6.2A10.7 10.7 0 0 1 12 6c6 0 9.5 6 9.5 6a17.4 17.4 0 0 1-3.1 3.3M6.1 6.8C3.7 8.3 2.5 12 2.5 12s3.5 5 9.5 5c1 0 1.9-.2 2.7-.4"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
+  }
+
+  function syncVisibilityButton(button, model) {
+    const visible = model.visibility === "list";
+    const label = visible ? `隐藏 ${model.displayName || model.slug}` : `显示 ${model.displayName || model.slug}`;
+    button.innerHTML = visibilityIcon(visible);
+    button.setAttribute("aria-label", label);
+    button.setAttribute("aria-pressed", String(visible));
+    button.title = label;
   }
 
   function catalogModels() {
     if (!catalogDraft) catalogDraft = (state.catalog?.models ?? []).map((model) => ({ ...model }));
     return catalogDraft;
-  }
-
-  function catalogVisibilityOptions(visibility) {
-    const preserved = ["list", "hide", "none"].includes(visibility)
-      ? ""
-      : `<option value="${escapeHtml(visibility)}" disabled selected>保留 ${escapeHtml(visibility)}</option>`;
-    return `<option value="list"${visibility === "list" ? " selected" : ""}>显示</option><option value="hide"${visibility === "hide" ? " selected" : ""}>隐藏</option><option value="none" disabled${visibility === "none" ? " selected" : ""}>保留 none</option>${preserved}`;
   }
 
   function policyModels() {
@@ -631,31 +694,84 @@
   function capabilityBadge(slug) {
     const capability = state.transportCapabilities?.[slug];
     if (!capability) return '<span class="state-indicator" data-status="waiting">能力未知</span>';
-    const label = capability.transport === "websocket" ? "WS 可用" : capability.transport === "http" ? "仅 HTTP" : "不可用";
+    const label = capability.transport === "websocket" ? "WS 可用" : capability.transport === "http" ? "压缩 HTTP" : "不可用";
     return `<span class="state-indicator" data-status="${capability.transport === "unknown" ? "blocked" : "verified"}" title="${escapeHtml(capability.reasonCode || "")}">${label} · ${escapeHtml(capability.reasonCode || "ok")}</span>`;
   }
 
-  function renderModelCatalog() {
+  function modelCatalogMarkup() {
+    const policies = policyModels();
+    return catalogModels().map((model) => `<article class="b-model-row" draggable="false" data-model-slug="${escapeHtml(model.slug)}"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ${escapeHtml(model.displayName || model.slug)} 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><strong>${escapeHtml(model.displayName || model.slug)}</strong><code>${escapeHtml(model.slug)}</code><small>${escapeHtml(model.description || "")}</small>${capabilityBadge(model.slug)}</span><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="${String(model.visibility === "list")}" aria-label="${escapeHtml(model.visibility === "list" ? `隐藏 ${model.displayName || model.slug}` : `显示 ${model.displayName || model.slug}`)}" title="${escapeHtml(model.visibility === "list" ? `隐藏 ${model.displayName || model.slug}` : `显示 ${model.displayName || model.slug}`)}">${visibilityIcon(model.visibility === "list")}</button><label><span>传输</span><select data-model-transport>${transportOptions(policies[model.slug] || "auto")}</select></label><span class="b-model-row__priority">#${Number(model.priority) || 0}</span></article>`).join("");
+  }
+
+  function syncCatalogDraftOrderFromDom(list) {
+    const rows = Array.from(list?.children || []);
+    const modelsBySlug = new Map(catalogModels().map((model) => [model.slug, model]));
+    const ordered = rows.map((row) => modelsBySlug.get(row.dataset?.modelSlug)).filter(Boolean);
+    if (!ordered.length) return;
+    ordered.forEach((model, index) => {
+      model.priority = index + 1;
+      const row = rows.find((candidate) => candidate.dataset?.modelSlug === model.slug);
+      const priority = row?.querySelector?.(".b-model-row__priority");
+      if (priority) priority.textContent = `#${index + 1}`;
+    });
+    catalogDraft = ordered;
+    renderedModelCatalogMarkup = modelCatalogMarkup();
+  }
+
+  function moveCatalogRow(source, target, clientX, clientY) {
+    if (!source || !target || source === target || !target.parentNode) return false;
+    const rect = target.getBoundingClientRect?.();
+    const sourceRect = source.getBoundingClientRect?.();
+    const sameRow = rect && sourceRect && Number.isFinite(rect.top) && Number.isFinite(sourceRect.top)
+      && Math.abs(rect.top - sourceRect.top) < rect.height / 2;
+    const after = rect && (sameRow && Number.isFinite(clientX) && Number.isFinite(rect.left) && Number.isFinite(rect.width)
+      ? clientX > rect.left + rect.width / 2
+      : Number.isFinite(clientY) && clientY > rect.top + rect.height / 2);
+    const reference = after ? target.nextElementSibling : target;
+    if (reference === source) return false;
+    target.parentNode.insertBefore(source, reference || null);
+    syncCatalogDraftOrderFromDom(target.parentNode);
+    catalogDragChanged = true;
+    renderControls();
+    return true;
+  }
+
+  function renderModelCatalog(force = false) {
     const catalog = state.catalog ?? desktopStatus.catalog;
-    const path = $("[data-model-catalog-path]");
-    const indicator = $("[data-model-catalog-state]");
+    const info = $("[data-model-catalog-info]");
     const list = $("[data-model-catalog-list]");
     const message = $("[data-model-catalog-message]");
-    if (path) path.textContent = catalog.path || desktopStatus.catalog.path;
-    const [label, status] = catalogStatusLabel(catalog);
-    if (indicator) {
-      indicator.textContent = label;
-      indicator.dataset.status = status;
+    const restart = $("[data-model-catalog-restart]");
+    const models = catalogModels();
+    const visibleCount = models.filter((model) => model.visibility === "list").length;
+    const totalCount = models.length;
+    const count = $("[data-model-catalog-count]");
+    const visible = $("[data-model-catalog-visible-count]");
+    const total = $("[data-model-catalog-total-count]");
+    if (count) count.textContent = String(totalCount);
+    if (visible) visible.textContent = String(visibleCount);
+    if (total) total.textContent = String(totalCount);
+    if (info) {
+      const source = catalog.sourcePath || "当前 Codex 内部模型状态";
+      info.title = `模型候选源文件：${source}`;
+      info.setAttribute("aria-label", `查看模型候选源文件：${source}`);
     }
     if (message) {
-      const changes = Array.isArray(catalog.changes) ? catalog.changes : [];
-      message.textContent = changes.length
-        ? changes.map((change) => `${change.slug} · ${change.field}: ${change.before ?? "—"} → ${change.after ?? "—"}`).join("；")
-        : catalog.state === "conflict" ? "Codex 配置中的目录指针已被外部修改。" : "";
+      message.textContent = catalog.state === "conflict"
+        ? "Codex 配置中的目录指针已被外部修改，模型候选仍保持当前接管状态。"
+        : catalog.state === "error" ? "模型候选目录未能保存，请重试并查看技术详情。"
+          : state.modelPolicy?.reason ? `传输策略读取失败，已保留上次有效策略：${state.modelPolicy.reason}。`
+            : "";
+    }
+    if (restart) {
+      restart.hidden = !catalog.restartRequired;
     }
     if (!list) return;
-    const policies = policyModels();
-    list.innerHTML = catalogModels().map((model) => `<article class="b-model-row" draggable="true" data-model-slug="${escapeHtml(model.slug)}"><button class="b-model-row__drag" type="button" aria-label="拖动 ${escapeHtml(model.displayName || model.slug)} 调整优先级">↕</button><span class="b-model-row__copy"><strong>${escapeHtml(model.displayName || model.slug)}</strong><code>${escapeHtml(model.slug)}</code><small>${escapeHtml(model.description || "")}</small>${capabilityBadge(model.slug)}</span><label><span>显示</span><select data-model-visibility>${catalogVisibilityOptions(model.visibility)}</select></label><label><span>传输</span><select data-model-transport>${transportOptions(policies[model.slug] || "auto")}</select></label><span class="b-model-row__priority">#${Number(model.priority) || 0}</span></article>`).join("");
+    const markup = modelCatalogMarkup();
+    if (!force && (draggedCatalogSlug || list.contains?.(document.activeElement))) return;
+    if (markup === renderedModelCatalogMarkup) return;
+    list.innerHTML = markup;
+    renderedModelCatalogMarkup = markup;
   }
 
   function renderState(options = {}) {
@@ -682,6 +798,7 @@
     renderVisibility();
     renderLiveRecovery();
     renderControls();
+    renderConfigView();
     renderModelCatalog();
     if (state.tab === "live" && statusHydrated) renderLiveStream(options);
     if (state.tab === "statistics") renderStatistics();
@@ -714,6 +831,25 @@
         ], motion.pageMs);
       }
     });
+  }
+
+  function renderConfigView(options = {}) {
+    all("[data-config-view]").forEach((tab) => {
+      const active = tab.dataset.configView === state.configView;
+      tab.setAttribute("aria-selected", String(active));
+      tab.tabIndex = active ? 0 : -1;
+      if (active && options.focus) tab.focus();
+    });
+    all("[data-config-view-panel]").forEach((panel) => {
+      panel.hidden = panel.dataset.configViewPanel !== state.configView;
+    });
+  }
+
+  function selectConfigView(view, options = {}) {
+    if (!(view === "settings" || view === "catalog")) return;
+    state.configView = view;
+    renderConfigView(options);
+    if (options.updateUrl !== false) updateUrl();
   }
 
   function selectTab(tab, options = {}) {
@@ -1586,38 +1722,14 @@
 
   function applyStatus(status, options = {}) {
     if (status && typeof status === "object") {
-      const previousModels = state.catalog?.models;
-      const previousPolicy = JSON.stringify(state.modelPolicy?.models || {});
+      const previousModels = JSON.stringify(state.catalog?.models || []);
+      const previousPolicy = policySignature(state.modelPolicy);
       state = { ...state, ...status, technicalDetail: "" };
-      if (status.catalog && status.catalog.models !== previousModels) catalogDraft = null;
-      if (status.modelPolicy && JSON.stringify(status.modelPolicy.models || {}) !== previousPolicy) modelPolicyDraft = null;
-      renderModelPolicy();
+      if (status.catalog && JSON.stringify(status.catalog.models || []) !== previousModels) catalogDraft = null;
+      if (status.modelPolicy && policySignature(status.modelPolicy) !== previousPolicy) modelPolicyDraft = null;
     }
     syncLiveRequests();
     renderState(options);
-  }
-
-  function renderModelPolicy() {
-    const policy = state.modelPolicy || { defaultTransport: "auto", models: {}, reason: null };
-    const indicator = $("[data-model-policy-state]");
-    const message = $("[data-model-policy-message]");
-    const reasonLabels = {
-      invalid_json: "文件格式无效",
-      unsupported_version: "文件版本不兼容",
-      invalid_default_transport: "默认传输方式无效",
-      invalid_model_transport: "模型传输方式无效",
-      write_failed: "文件写入失败",
-    };
-    if (indicator) {
-      indicator.textContent = policy.reason ? "保留上次有效" : `默认 ${policy.defaultTransport || "auto"}`;
-      indicator.dataset.status = policy.reason ? "blocked" : "verified";
-    }
-    if (message) {
-      const reason = reasonLabels[policy.reason] || policy.reason;
-      message.textContent = policy.reason
-        ? `策略文件读取失败，已回退到上次有效策略：${reason}。保存策略可恢复。`
-        : "新建 WebSocket 会话读取最新策略；活动会话保持原快照。";
-    }
   }
 
   function applyPreviewAction(command, args) {
@@ -1712,68 +1824,32 @@
       renderLiveStream();
       return;
     }
-    if (action === "cancel-model-catalog") {
+    if (action === "undo-model-settings") {
       catalogDraft = null;
-      renderModelCatalog();
+      modelPolicyDraft = null;
+      renderedModelCatalogMarkup = "";
+      renderState();
       return;
     }
-    if (action === "save-model-policy") {
+    if (action === "save-model-settings") {
       if (pendingAction) return;
       pendingAction = action;
       renderControls();
       try {
-        const current = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...policyModels() } };
-        const update = invoke ? await invoke("update_model_policy", { update: current }) : current;
-        state.modelPolicy = update;
-      } catch (error) {
-        state.technicalDetail = error instanceof Error ? error.message : String(error);
-      } finally {
-        pendingAction = "";
-        renderState();
-      }
-      return;
-    }
-    if (action === "save-model-catalog") {
-      if (pendingAction) return;
-      pendingAction = action;
-      renderControls();
-      try {
-        const updates = catalogModels().map((model, priority) => ({ slug: model.slug, visibility: model.visibility, priority: priority + 1 }));
-        const catalog = invoke ? await invoke("update_model_catalog", { updates, expectedRevision: state.catalog.revision }) : { ...state.catalog, models: updates.map((update) => ({ ...catalogModels().find((model) => model.slug === update.slug), ...update })), restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
-        state.catalog = catalog;
-        catalogDraft = null;
-      } catch (error) {
-        state.catalog = { ...state.catalog, state: "error" };
-        state.technicalDetail = error instanceof Error ? error.message : String(error);
-      } finally {
-        pendingAction = "";
-        renderState();
-      }
-      return;
-    }
-    if (action === "restore-model-catalog") {
-      if (pendingAction) return;
-      pendingAction = action;
-      renderControls();
-      try {
-        state.catalog = invoke ? await invoke("restore_model_catalog") : { ...state.catalog, state: "restored", restartRequired: false };
-        catalogDraft = null;
-      } catch (error) {
-        state.catalog = { ...state.catalog, state: "error" };
-        state.technicalDetail = error instanceof Error ? error.message : String(error);
-      } finally {
-        pendingAction = "";
-        renderState();
-      }
-      return;
-    }
-    if (action === "reclaim-model-catalog") {
-      if (pendingAction) return;
-      pendingAction = action;
-      renderControls();
-      try {
-        state.catalog = invoke ? await invoke("reclaim_model_catalog") : { ...state.catalog, state: "owned", restartRequired: true };
-        catalogDraft = null;
+        const saveCatalog = catalogDraftDirty();
+        const savePolicy = policyDraftDirty();
+        if (saveCatalog) {
+          const updates = catalogModels().map((model, priority) => ({ slug: model.slug, visibility: model.visibility, priority: priority + 1 }));
+          state.catalog = invoke
+            ? await invoke("update_model_catalog", { updates, expectedRevision: state.catalog.revision })
+            : { ...state.catalog, models: updates.map((update) => ({ ...catalogModels().find((model) => model.slug === update.slug), ...update })), restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
+          catalogDraft = null;
+        }
+        if (savePolicy) {
+          const update = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...policyModels() } };
+          state.modelPolicy = invoke ? await invoke("update_model_policy", { update }) : update;
+          modelPolicyDraft = null;
+        }
       } catch (error) {
         state.catalog = { ...state.catalog, state: "error" };
         state.technicalDetail = error instanceof Error ? error.message : String(error);
@@ -1843,6 +1919,15 @@
     if (!Object.hasOwn(keys, event.key)) return;
     event.preventDefault();
     selectTab(TABS[(currentIndex + keys[event.key] + TABS.length) % TABS.length], { focus: true });
+  }
+
+  function handleConfigViewKeydown(event, currentTab) {
+    const views = ["settings", "catalog"];
+    const currentIndex = views.indexOf(currentTab.dataset.configView);
+    const keys = { ArrowRight: 1, ArrowLeft: -1, Home: -currentIndex, End: views.length - 1 - currentIndex };
+    if (!Object.hasOwn(keys, event.key)) return;
+    event.preventDefault();
+    selectConfigView(views[(currentIndex + keys[event.key] + views.length) % views.length], { focus: true });
   }
 
   function bindDotField() {
@@ -1956,6 +2041,7 @@
 
   function init() {
     state.tab = readTab();
+    state.configView = readConfigView();
     syncLiveRequests();
     const terminal = $(".c-terminal__window");
     terminal?.addEventListener("scroll", () => {
@@ -1964,6 +2050,23 @@
       renderLiveFollow();
     }, { passive: true });
     document.addEventListener("click", (event) => {
+      const configView = event.target.closest?.("[data-config-view]");
+      if (configView) {
+        selectConfigView(configView.dataset.configView, { focus: true });
+        return;
+      }
+      const visibilityButton = event.target.closest?.("[data-model-visibility-toggle]");
+      if (visibilityButton) {
+        const row = visibilityButton.closest?.("[data-model-slug]");
+        const model = catalogModels().find((candidate) => candidate.slug === row?.dataset.modelSlug);
+        if (model) {
+          model.visibility = model.visibility === "list" ? "hide" : "list";
+          syncVisibilityButton(visibilityButton, model);
+          renderedModelCatalogMarkup = modelCatalogMarkup();
+          renderControls();
+        }
+        return;
+      }
       const action = event.target.closest?.("[data-action]");
       if (action) void handleAction(action.dataset.action, action);
       if (aiCoveBubbleOpen && !event.target.closest?.("[data-ai-cove-popover]")) setAiCoveBubbleOpen(false);
@@ -1987,6 +2090,8 @@
       if (chartSlot && handleChartKeydown(event, chartSlot)) return;
       const tab = event.target.closest?.("[data-tab]");
       if (tab) handleTabKeydown(event, tab);
+      const configView = event.target.closest?.("[data-config-view]");
+      if (configView) handleConfigViewKeydown(event, configView);
     });
     document.addEventListener("focusin", (event) => {
       const networkTrigger = event.target.closest?.(".c-transport__network");
@@ -2000,30 +2105,43 @@
     document.addEventListener("change", (event) => {
       if (event.target.matches?.("[data-filter]")) renderStatistics();
       const row = event.target.closest?.("[data-model-slug]");
-      if (row && event.target.matches?.("[data-model-visibility]")) {
-        const model = catalogModels().find((candidate) => candidate.slug === row.dataset.modelSlug);
-        if (model) model.visibility = event.target.value;
-      }
       if (row && event.target.matches?.("[data-model-transport]")) {
         const policies = policyModels();
         if (event.target.value === "http") policies[row.dataset.modelSlug] = "http";
         else delete policies[row.dataset.modelSlug];
+        renderedModelCatalogMarkup = modelCatalogMarkup();
+        renderControls();
       }
     });
     document.addEventListener("dragstart", (event) => {
-      const row = event.target.closest?.("[data-model-slug]");
+      const handle = event.target.closest?.("[data-model-drag-handle]");
+      const row = handle?.closest?.("[data-model-slug]");
       if (!row) return;
       draggedCatalogSlug = row.dataset.modelSlug;
+      catalogDragChanged = false;
       event.dataTransfer?.setData("text/plain", draggedCatalogSlug);
       if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
     });
     document.addEventListener("dragover", (event) => {
-      if (draggedCatalogSlug && event.target.closest?.("[data-model-slug]")) event.preventDefault();
+      if (!draggedCatalogSlug) return;
+      const target = event.target.closest?.("[data-model-slug]");
+      const source = Array.from(target?.parentNode?.children || [])
+        .find((row) => row.dataset?.modelSlug === draggedCatalogSlug);
+      if (!source || !target || source === target) return;
+      event.preventDefault();
+      moveCatalogRow(source, target, event.clientX, event.clientY);
     });
     document.addEventListener("drop", (event) => {
       const target = event.target.closest?.("[data-model-slug]");
       if (!target || !draggedCatalogSlug || target.dataset.modelSlug === draggedCatalogSlug) return;
       event.preventDefault();
+      if (catalogDragChanged) {
+        syncCatalogDraftOrderFromDom(target.parentNode);
+        draggedCatalogSlug = "";
+        catalogDragChanged = false;
+        renderModelCatalog(true);
+        return;
+      }
       const models = catalogModels();
       const from = models.findIndex((model) => model.slug === draggedCatalogSlug);
       const to = models.findIndex((model) => model.slug === target.dataset.modelSlug);
@@ -2031,10 +2149,20 @@
       const [moved] = models.splice(from, 1);
       models.splice(to, 0, moved);
       models.forEach((model, index) => { model.priority = index + 1; });
-      renderModelCatalog();
+      draggedCatalogSlug = "";
+      catalogDragChanged = false;
+      renderModelCatalog(true);
+      renderControls();
     });
-    document.addEventListener("dragend", () => { draggedCatalogSlug = ""; });
-    window.addEventListener("popstate", () => selectTab(readTab(), { updateUrl: false }));
+    document.addEventListener("dragend", () => {
+      draggedCatalogSlug = "";
+      catalogDragChanged = false;
+    });
+    window.addEventListener("popstate", () => {
+      state.configView = readConfigView();
+      selectTab(readTab(), { updateUrl: false });
+      renderConfigView();
+    });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && invoke) void refreshStatus();
     });

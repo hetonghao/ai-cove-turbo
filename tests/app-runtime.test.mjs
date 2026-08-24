@@ -11,6 +11,7 @@ function element(dataset = {}) {
     hidden: false,
     style: { setProperty() {} },
     setAttribute(name, value) { attributes.set(name, String(value)); },
+    getAttribute(name) { return attributes.get(name) ?? null; },
     focus() {},
   };
 }
@@ -42,7 +43,7 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
-async function catalogHarness({ failSave = false, policyReason = null } = {}) {
+async function catalogHarness({ failSave = false, policyReason = null, freshStatus = false } = {}) {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const catalog = {
     path: "/home/test/.codex/model-catalogs/ai_cove_turbo.json",
@@ -68,31 +69,65 @@ async function catalogHarness({ failSave = false, policyReason = null } = {}) {
       beta: { transport: "http", reasonCode: "no_responses_websocket_channel" },
     },
   };
-  const path = element({ modelCatalogPath: "" });
-  const indicator = element({ modelCatalogState: "" });
-  const policyIndicator = element({ modelPolicyState: "" });
-  const policyMessage = element({ modelPolicyMessage: "" });
+  const info = element({ modelCatalogInfo: "" });
   const list = element({ modelCatalogList: "" });
+  let domOrder = [];
+  const domRows = new Map();
+  const domRow = (slug) => {
+    if (!domRows.has(slug)) {
+      domRows.set(slug, {
+        dataset: { modelSlug: slug },
+        parentNode: list,
+        getBoundingClientRect: () => ({ top: domOrder.indexOf(slug) * 100, height: 100 }),
+        querySelector: () => ({ textContent: "" }),
+      });
+    }
+    return domRows.get(slug);
+  };
+  Object.defineProperty(list, "children", { get() { return domOrder.map(domRow); } });
+  list.insertBefore = (source, reference) => {
+    domOrder = domOrder.filter((slug) => slug !== source.dataset.modelSlug);
+    const index = reference ? domOrder.indexOf(reference.dataset.modelSlug) : domOrder.length;
+    domOrder.splice(index < 0 ? domOrder.length : index, 0, source.dataset.modelSlug);
+  };
+  let catalogRenders = 0;
+  let catalogMarkup = "";
+  Object.defineProperty(list, "innerHTML", {
+    get() { return catalogMarkup; },
+    set(value) {
+      catalogMarkup = value;
+      domOrder = [...value.matchAll(/data-model-slug="([^"]+)"/g)].map(([, slug]) => slug);
+      catalogRenders += 1;
+    },
+  });
   const message = element({ modelCatalogMessage: "" });
-  const actions = ["save-model-catalog", "save-model-policy", "cancel-model-catalog", "restore-model-catalog", "reclaim-model-catalog"].map((action) => {
+  const restart = element({ modelCatalogRestart: "" });
+  const restartControl = element({ action: "restart-codex", catalogRestart: "", restartHint: "" });
+  const configViewButtons = ["settings", "catalog"].map((configView) => {
+    const target = element({ configView });
+    target.closest = (selector) => selector === "[data-config-view]" ? target : null;
+    return target;
+  });
+  const configViewPanels = ["settings", "catalog"].map((configView) => element({ configViewPanel: configView }));
+  const actions = ["save-model-settings", "undo-model-settings"].map((action) => {
     const target = element({ action });
     target.closest = (selector) => selector === "[data-action]" ? target : null;
     return target;
   });
+  restartControl.closest = (selector) => selector === "[data-action]" ? restartControl : null;
+  actions.push(restartControl);
   const selectors = new Map([
-    ["[data-model-catalog-path]", path],
-    ["[data-model-catalog-state]", indicator],
-    ["[data-model-policy-state]", policyIndicator],
-    ["[data-model-policy-message]", policyMessage],
+    ["[data-model-catalog-info]", info],
     ["[data-model-catalog-list]", list],
     ["[data-model-catalog-message]", message],
+    ["[data-model-catalog-restart]", restart],
   ]);
   const listeners = new Map();
   const calls = [];
   let tick;
   const invoke = async (command, args) => {
     calls.push({ command, args });
-    if (command === "get_app_status") return status;
+    if (command === "get_app_status") return freshStatus ? structuredClone(status) : status;
     if (command === "update_model_catalog") {
       if (failSave) throw new Error("save failed");
       return { ...catalog, models: args.updates, restartRequired: true, loaded: false, revision: "revision-2" };
@@ -109,12 +144,17 @@ async function catalogHarness({ failSave = false, policyReason = null } = {}) {
     body: element(),
     addEventListener(type, handler) { listeners.set(type, handler); },
     querySelector(selector) { return selectors.get(selector) ?? null; },
-    querySelectorAll(selector) { return selector === "[data-action]" ? actions : []; },
+    querySelectorAll(selector) {
+      if (selector === "[data-action]") return actions;
+      if (selector === "[data-config-view]") return configViewButtons;
+      if (selector === "[data-config-view-panel]") return configViewPanels;
+      return [];
+    },
   };
   const window = {
     __TAURI__: { core: { invoke } },
     location: { href: "tauri://localhost/?tab=config" },
-    history: { replaceState() {} },
+    history: { replaceState(_state, _title, url) { window.location.href = String(url); } },
     addEventListener() {},
     setInterval(handler) { tick = handler; },
     matchMedia: () => ({ matches: false }),
@@ -125,15 +165,25 @@ async function catalogHarness({ failSave = false, policyReason = null } = {}) {
   const row = (slug) => ({ dataset: { modelSlug: slug } });
   return {
     calls,
-    indicator,
-    policyIndicator,
-    policyMessage,
+    info,
     list,
+    message,
+    catalogRenders() { return catalogRenders; },
     async click(action) {
       listeners.get("click")?.({ target: actions.find((target) => target.dataset.action === action) });
       await new Promise((resolve) => setImmediate(resolve));
     },
-    change(slug, value, selector = "[data-model-visibility]") {
+    selectConfigView(view) {
+      listeners.get("click")?.({ target: configViewButtons.find((target) => target.dataset.configView === view) });
+    },
+    keydownConfig(key) {
+      const current = configViewButtons.find((target) => target.getAttribute("aria-selected") === "true") || configViewButtons[0];
+      listeners.get("keydown")?.({ key, target: current, preventDefault() {} });
+    },
+    configView() { return configViewButtons.find((target) => target.getAttribute("aria-selected") === "true")?.dataset.configView; },
+    configPanelHidden(view) { return configViewPanels.find((target) => target.dataset.configViewPanel === view)?.hidden; },
+    url() { return window.location.href; },
+    change(slug, value, selector = "[data-model-transport]") {
       listeners.get("change")?.({
         target: {
           value,
@@ -143,10 +193,32 @@ async function catalogHarness({ failSave = false, policyReason = null } = {}) {
       });
     },
     drag(from, to) {
-      listeners.get("dragstart")?.({ target: { closest: () => row(from) }, dataTransfer: { setData() {}, effectAllowed: "" } });
+      const handle = { closest: (selector) => selector === "[data-model-slug]" ? row(from) : null };
+      listeners.get("dragstart")?.({ target: { closest: (selector) => selector === "[data-model-drag-handle]" ? handle : null }, dataTransfer: { setData() {}, effectAllowed: "" } });
       listeners.get("drop")?.({ target: { closest: () => row(to) }, preventDefault() {} });
       listeners.get("dragend")?.({});
     },
+    dragRow(from, to) {
+      listeners.get("dragstart")?.({ target: { closest: (selector) => selector === "[data-model-slug]" ? row(from) : null }, dataTransfer: { setData() {}, effectAllowed: "" } });
+      listeners.get("drop")?.({ target: { closest: () => row(to) }, preventDefault() {} });
+    },
+    liveDrag(from, to) {
+      const handle = { closest: (selector) => selector === "[data-model-slug]" ? domRow(from) : null };
+      listeners.get("dragstart")?.({ target: { closest: (selector) => selector === "[data-model-drag-handle]" ? handle : null }, dataTransfer: { setData() {}, effectAllowed: "" } });
+      listeners.get("dragover")?.({ target: { closest: () => domRow(to) }, clientY: domRow(to).getBoundingClientRect().top + 75, preventDefault() {} });
+      const during = [...domOrder];
+      listeners.get("drop")?.({ target: { closest: () => domRow(to) }, preventDefault() {} });
+      listeners.get("dragend")?.({});
+      return during;
+    },
+    toggleVisibility(slug) {
+      const button = { closest: (selector) => selector === "[data-model-slug]" ? row(slug) : null, setAttribute() {}, title: "", innerHTML: "" };
+      listeners.get("click")?.({ target: { closest: (selector) => selector === "[data-model-visibility-toggle]" ? button : null } });
+    },
+    disabled(action) { return actions.find((target) => target.dataset.action === action)?.disabled; },
+    restartRequired() { return restartControl.dataset.required === "true"; },
+    restartVisible() { return restart.hidden === false; },
+    order() { return [...domOrder]; },
     async tick() {
       await tick?.();
       await new Promise((resolve) => setImmediate(resolve));
@@ -154,53 +226,111 @@ async function catalogHarness({ failSave = false, policyReason = null } = {}) {
   };
 }
 
-test("模型目录保存、取消、拖拽和失败恢复走真实命令边界", async () => {
+test("配置工作区通过顶部 Tab 切换并同步 URL 与键盘状态", async () => {
+  const harness = await catalogHarness();
+  assert.equal(harness.configView(), "settings");
+  assert.equal(harness.configPanelHidden("settings"), false);
+  assert.equal(harness.configPanelHidden("catalog"), true);
+
+  harness.selectConfigView("catalog");
+  assert.equal(harness.configView(), "catalog");
+  assert.equal(harness.configPanelHidden("settings"), true);
+  assert.equal(harness.configPanelHidden("catalog"), false);
+  assert.match(harness.url(), /view=catalog/);
+
+  harness.keydownConfig("ArrowLeft");
+  assert.equal(harness.configView(), "settings");
+  harness.keydownConfig("End");
+  assert.equal(harness.configView(), "catalog");
+});
+
+test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界", async () => {
   const saved = await catalogHarness();
-  saved.change("alpha", "hide");
+  assert.equal(saved.disabled("save-model-settings"), true);
+  assert.equal(saved.disabled("undo-model-settings"), true);
+  assert.match(saved.info.title, /模型候选源文件：\/home\/test\/models\.json/);
+  saved.dragRow("alpha", "beta");
+  assert.equal(saved.disabled("save-model-settings"), true);
+  saved.toggleVisibility("alpha");
   saved.drag("alpha", "beta");
-  await saved.click("save-model-catalog");
+  assert.equal(saved.disabled("save-model-settings"), false);
+  await saved.click("save-model-settings");
   const save = saved.calls.find((call) => call.command === "update_model_catalog");
   assert.deepEqual(save.args.updates.map(({ slug, visibility, priority }) => ({ slug, visibility, priority })), [
     { slug: "beta", visibility: "hide", priority: 1 },
     { slug: "alpha", visibility: "hide", priority: 2 },
   ]);
   assert.equal(save.args.expectedRevision, "revision-1");
+  assert.equal(saved.restartVisible(), true);
+  assert.equal(saved.restartRequired(), true);
 
   const cancelled = await catalogHarness();
-  cancelled.change("alpha", "hide");
-  await cancelled.click("cancel-model-catalog");
-  await cancelled.click("save-model-catalog");
+  cancelled.toggleVisibility("alpha");
+  await cancelled.click("undo-model-settings");
+  assert.equal(cancelled.disabled("save-model-settings"), true);
+  await cancelled.click("save-model-settings");
   const cancelledSave = cancelled.calls.find((call) => call.command === "update_model_catalog");
-  assert.equal(cancelledSave.args.updates[0].visibility, "list");
+  assert.equal(cancelledSave, undefined);
 
   const failed = await catalogHarness({ failSave: true });
-  await failed.click("save-model-catalog");
-  assert.equal(failed.indicator.textContent, "目录不可用");
+  failed.toggleVisibility("alpha");
+  await failed.click("save-model-settings");
+  assert.match(failed.list.innerHTML, /data-model-visibility-toggle/);
   await failed.tick();
-  assert.equal(failed.indicator.textContent, "Codex 已加载");
+  assert.equal(failed.disabled("save-model-settings"), false);
+});
+
+test("状态轮询不重建模型目录控件或覆盖未保存编辑", async () => {
+  const harness = await catalogHarness({ freshStatus: true });
+  harness.toggleVisibility("alpha");
+  harness.change("alpha", "http", "[data-model-transport]");
+  harness.drag("alpha", "beta");
+  const renders = harness.catalogRenders();
+
+  await harness.tick();
+  assert.equal(harness.catalogRenders(), renders);
+
+  await harness.click("save-model-settings");
+  const save = harness.calls.find((call) => call.command === "update_model_catalog");
+  assert.deepEqual(save.args.updates.map(({ slug, visibility }) => ({ slug, visibility })), [
+    { slug: "beta", visibility: "hide" },
+    { slug: "alpha", visibility: "hide" },
+  ]);
+
+  const policySave = harness.calls.find((call) => call.command === "update_model_policy");
+  assert.equal(policySave.args.update.models.alpha, "http");
+});
+
+test("拖拽经过目标行时立即替换模型目录位置", async () => {
+  const harness = await catalogHarness();
+  const during = harness.liveDrag("alpha", "beta");
+  assert.deepEqual(during, ["beta", "alpha"]);
+  assert.deepEqual(harness.order(), ["beta", "alpha"]);
 });
 
 test("模型传输策略编辑保存并显示能力摘要", async () => {
   const harness = await catalogHarness();
-  assert.equal(harness.policyIndicator.textContent, "默认 auto");
   assert.match(harness.list.innerHTML, /WS 可用 · ok/);
-  assert.match(harness.list.innerHTML, /仅 HTTP · no_responses_websocket_channel/);
+  assert.match(harness.list.innerHTML, /压缩 HTTP · no_responses_websocket_channel/);
   harness.change("alpha", "http", "[data-model-transport]");
   harness.change("beta", "auto", "[data-model-transport]");
-  await harness.click("save-model-policy");
+  await harness.click("save-model-settings");
   const save = harness.calls.find((call) => call.command === "update_model_policy");
   assert.equal(JSON.stringify(save.args.update), JSON.stringify({ defaultTransport: "auto", models: { alpha: "http" } }));
+  assert.equal(harness.restartVisible(), false);
+  assert.equal(harness.restartRequired(), false);
 
   const failed = await catalogHarness({ failSave: true });
-  await failed.click("save-model-policy");
+  failed.change("alpha", "http", "[data-model-transport]");
+  await failed.click("save-model-settings");
   assert.match(failed.list.innerHTML, /WS 可用/);
 });
 
-test("策略文件读取失败时说明回退策略和恢复动作", async () => {
+test("策略文件读取失败时在模型候选区保留可执行提示", async () => {
   const harness = await catalogHarness({ policyReason: "invalid_json" });
-  assert.equal(harness.policyIndicator.textContent, "保留上次有效");
-  assert.match(harness.policyMessage.textContent, /策略文件读取失败/);
-  assert.match(harness.policyMessage.textContent, /保存策略可恢复/);
+  assert.match(harness.list.innerHTML, /WS 可用/);
+  assert.match(harness.message.textContent, /传输策略读取失败/);
+  assert.match(harness.message.textContent, /invalid_json/);
 });
 
 test("产品图标气泡支持轻触关闭并打开 AI Cove", async () => {
