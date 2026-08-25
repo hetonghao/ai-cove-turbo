@@ -5,9 +5,20 @@ import vm from "node:vm";
 
 function element(dataset = {}) {
   const attributes = new Map();
+  const classes = new Set();
   return {
     attributes,
     dataset,
+    classList: {
+      add(...names) { names.forEach((name) => classes.add(name)); },
+      remove(...names) { names.forEach((name) => classes.delete(name)); },
+      toggle(name, force) {
+        const next = force === undefined ? !classes.has(name) : Boolean(force);
+        if (next) classes.add(name); else classes.delete(name);
+        return next;
+      },
+      contains(name) { return classes.has(name); },
+    },
     hidden: false,
     style: { setProperty() {} },
     setAttribute(name, value) { attributes.set(name, String(value)); },
@@ -75,12 +86,11 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
   const domRows = new Map();
   const domRow = (slug) => {
     if (!domRows.has(slug)) {
-      domRows.set(slug, {
-        dataset: { modelSlug: slug },
-        parentNode: list,
-        getBoundingClientRect: () => ({ top: domOrder.indexOf(slug) * 100, height: 100 }),
-        querySelector: () => ({ textContent: "" }),
-      });
+      const target = element({ modelSlug: slug });
+      target.parentNode = list;
+      target.getBoundingClientRect = () => ({ top: domOrder.indexOf(slug) * 100, height: 100 });
+      target.querySelector = () => ({ textContent: "" });
+      domRows.set(slug, target);
     }
     return domRows.get(slug);
   };
@@ -148,6 +158,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
       if (selector === "[data-action]") return actions;
       if (selector === "[data-config-view]") return configViewButtons;
       if (selector === "[data-config-view-panel]") return configViewPanels;
+      if (selector === "[data-model-slug]") return domOrder.map(domRow);
       return [];
     },
   };
@@ -162,7 +173,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
   await runApp(source, { document, window, URL, Intl, Error });
   await new Promise((resolve) => setImmediate(resolve));
   calls.length = 0;
-  const row = (slug) => ({ dataset: { modelSlug: slug } });
+  const row = (slug) => element({ modelSlug: slug });
   return {
     calls,
     info,
@@ -207,9 +218,22 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
       listeners.get("dragstart")?.({ target: { closest: (selector) => selector === "[data-model-drag-handle]" ? handle : null }, dataTransfer: { setData() {}, effectAllowed: "" } });
       listeners.get("dragover")?.({ target: { closest: () => domRow(to) }, clientY: domRow(to).getBoundingClientRect().top + 75, preventDefault() {} });
       const during = [...domOrder];
+      const targetHighlighted = domRow(to).classList.contains("is-drop-target");
       listeners.get("drop")?.({ target: { closest: () => domRow(to) }, preventDefault() {} });
+      const after = [...domOrder];
       listeners.get("dragend")?.({});
-      return during;
+      return { during, targetHighlighted, after };
+    },
+    pointerDrag(from, to) {
+      const source = domRow(from);
+      const target = domRow(to);
+      const handle = { closest: (selector) => selector === "[data-model-slug]" ? source : null };
+      listeners.get("pointerdown")?.({ button: 0, pointerId: 1, clientX: 10, clientY: 10, target: { closest: (selector) => selector === "[data-model-drag-handle]" ? handle : null }, preventDefault() {} });
+      listeners.get("pointermove")?.({ pointerId: 1, clientX: 20, clientY: 20, target: { closest: (selector) => selector === "[data-model-slug]" ? target : null }, preventDefault() {} });
+      const during = [...domOrder];
+      const targetHighlighted = target.classList.contains("is-drop-target");
+      listeners.get("pointerup")?.({ pointerId: 1, clientX: 20, clientY: 20 });
+      return { during, targetHighlighted, after: [...domOrder] };
     },
     toggleVisibility(slug) {
       const button = { closest: (selector) => selector === "[data-model-slug]" ? row(slug) : null, setAttribute() {}, title: "", innerHTML: "" };
@@ -249,6 +273,7 @@ test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界",
   assert.equal(saved.disabled("save-model-settings"), true);
   assert.equal(saved.disabled("undo-model-settings"), true);
   assert.match(saved.info.title, /模型候选源文件：\/home\/test\/models\.json/);
+  assert.match(saved.info.dataset.tooltip, /模型候选源文件：\/home\/test\/models\.json/);
   saved.dragRow("alpha", "beta");
   assert.equal(saved.disabled("save-model-settings"), true);
   saved.toggleVisibility("alpha");
@@ -301,17 +326,26 @@ test("状态轮询不重建模型目录控件或覆盖未保存编辑", async ()
   assert.equal(policySave.args.update.models.alpha, "http");
 });
 
-test("拖拽经过目标行时立即替换模型目录位置", async () => {
+test("拖拽源卡片内凹、目标高亮并在松手后替换模型目录位置", async () => {
   const harness = await catalogHarness();
-  const during = harness.liveDrag("alpha", "beta");
-  assert.deepEqual(during, ["beta", "alpha"]);
+  const result = harness.liveDrag("alpha", "beta");
+  assert.deepEqual(result.during, ["alpha", "beta"]);
+  assert.equal(result.targetHighlighted, true);
+  assert.deepEqual(result.after, ["beta", "alpha"]);
   assert.deepEqual(harness.order(), ["beta", "alpha"]);
+
+  const pointerHarness = await catalogHarness();
+  const pointerResult = pointerHarness.pointerDrag("alpha", "beta");
+  assert.deepEqual(pointerResult.during, ["alpha", "beta"]);
+  assert.equal(pointerResult.targetHighlighted, true);
+  assert.deepEqual(pointerResult.after, ["beta", "alpha"]);
 });
 
 test("模型传输策略编辑保存并显示能力摘要", async () => {
   const harness = await catalogHarness();
-  assert.match(harness.list.innerHTML, /WS 可用 · ok/);
-  assert.match(harness.list.innerHTML, /压缩 HTTP · no_responses_websocket_channel/);
+  assert.match(harness.list.innerHTML, /WS 可用/);
+  assert.match(harness.list.innerHTML, /压缩 HTTP/);
+  assert.match(harness.list.innerHTML, /title="no_responses_websocket_channel"/);
   harness.change("alpha", "http", "[data-model-transport]");
   harness.change("beta", "auto", "[data-model-transport]");
   await harness.click("save-model-settings");

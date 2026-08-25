@@ -238,7 +238,8 @@
   let modelPolicyDraft = null;
   let renderedModelCatalogMarkup = "";
   let draggedCatalogSlug = "";
-  let catalogDragChanged = false;
+  let draggedCatalogTargetSlug = "";
+  let catalogPointerDrag = null;
 
   function readTab() {
     const requestedTab = new URL(window.location.href).searchParams.get("tab");
@@ -695,7 +696,7 @@
     const capability = state.transportCapabilities?.[slug];
     if (!capability) return '<span class="state-indicator" data-status="waiting">能力未知</span>';
     const label = capability.transport === "websocket" ? "WS 可用" : capability.transport === "http" ? "压缩 HTTP" : "不可用";
-    return `<span class="state-indicator" data-status="${capability.transport === "unknown" ? "blocked" : "verified"}" title="${escapeHtml(capability.reasonCode || "")}">${label} · ${escapeHtml(capability.reasonCode || "ok")}</span>`;
+    return `<span class="state-indicator" data-status="${capability.transport === "unknown" ? "blocked" : "verified"}" title="${escapeHtml(capability.reasonCode || "")}">${label}</span>`;
   }
 
   function modelCatalogMarkup() {
@@ -703,36 +704,26 @@
     return catalogModels().map((model) => `<article class="b-model-row" draggable="false" data-model-slug="${escapeHtml(model.slug)}"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ${escapeHtml(model.displayName || model.slug)} 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><strong>${escapeHtml(model.displayName || model.slug)}</strong><code>${escapeHtml(model.slug)}</code><small>${escapeHtml(model.description || "")}</small>${capabilityBadge(model.slug)}</span><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="${String(model.visibility === "list")}" aria-label="${escapeHtml(model.visibility === "list" ? `隐藏 ${model.displayName || model.slug}` : `显示 ${model.displayName || model.slug}`)}" title="${escapeHtml(model.visibility === "list" ? `隐藏 ${model.displayName || model.slug}` : `显示 ${model.displayName || model.slug}`)}">${visibilityIcon(model.visibility === "list")}</button><label><span>传输</span><select data-model-transport>${transportOptions(policies[model.slug] || "auto")}</select></label><span class="b-model-row__priority">#${Number(model.priority) || 0}</span></article>`).join("");
   }
 
-  function syncCatalogDraftOrderFromDom(list) {
-    const rows = Array.from(list?.children || []);
-    const modelsBySlug = new Map(catalogModels().map((model) => [model.slug, model]));
-    const ordered = rows.map((row) => modelsBySlug.get(row.dataset?.modelSlug)).filter(Boolean);
-    if (!ordered.length) return;
-    ordered.forEach((model, index) => {
-      model.priority = index + 1;
-      const row = rows.find((candidate) => candidate.dataset?.modelSlug === model.slug);
-      const priority = row?.querySelector?.(".b-model-row__priority");
-      if (priority) priority.textContent = `#${index + 1}`;
-    });
-    catalogDraft = ordered;
-    renderedModelCatalogMarkup = modelCatalogMarkup();
+  function catalogRows() {
+    return Array.from(document.querySelectorAll?.("[data-model-slug]") || []);
   }
 
-  function moveCatalogRow(source, target, clientX, clientY) {
-    if (!source || !target || source === target || !target.parentNode) return false;
-    const rect = target.getBoundingClientRect?.();
-    const sourceRect = source.getBoundingClientRect?.();
-    const sameRow = rect && sourceRect && Number.isFinite(rect.top) && Number.isFinite(sourceRect.top)
-      && Math.abs(rect.top - sourceRect.top) < rect.height / 2;
-    const after = rect && (sameRow && Number.isFinite(clientX) && Number.isFinite(rect.left) && Number.isFinite(rect.width)
-      ? clientX > rect.left + rect.width / 2
-      : Number.isFinite(clientY) && clientY > rect.top + rect.height / 2);
-    const reference = after ? target.nextElementSibling : target;
-    if (reference === source) return false;
-    target.parentNode.insertBefore(source, reference || null);
-    syncCatalogDraftOrderFromDom(target.parentNode);
-    catalogDragChanged = true;
-    renderControls();
+  function clearCatalogDragState() {
+    catalogRows().forEach((row) => row.classList?.remove?.("is-dragging", "is-drop-target"));
+    draggedCatalogSlug = "";
+    draggedCatalogTargetSlug = "";
+    catalogPointerDrag = null;
+  }
+
+  function commitCatalogReorder(sourceSlug, targetSlug) {
+    if (!sourceSlug || !targetSlug || sourceSlug === targetSlug) return false;
+    const models = catalogModels();
+    const from = models.findIndex((model) => model.slug === sourceSlug);
+    const to = models.findIndex((model) => model.slug === targetSlug);
+    if (from < 0 || to < 0) return false;
+    const [moved] = models.splice(from, 1);
+    models.splice(to, 0, moved);
+    models.forEach((model, index) => { model.priority = index + 1; });
     return true;
   }
 
@@ -753,7 +744,9 @@
     if (total) total.textContent = String(totalCount);
     if (info) {
       const source = catalog.sourcePath || "当前 Codex 内部模型状态";
-      info.title = `模型候选源文件：${source}`;
+      const tooltip = `模型候选源文件：${source}`;
+      info.title = tooltip;
+      info.dataset.tooltip = tooltip;
       info.setAttribute("aria-label", `查看模型候选源文件：${source}`);
     }
     if (message) {
@@ -768,7 +761,7 @@
     }
     if (!list) return;
     const markup = modelCatalogMarkup();
-    if (!force && (draggedCatalogSlug || list.contains?.(document.activeElement))) return;
+    if (!force && (draggedCatalogSlug || draggedCatalogTargetSlug || list.contains?.(document.activeElement))) return;
     if (markup === renderedModelCatalogMarkup) return;
     list.innerHTML = markup;
     renderedModelCatalogMarkup = markup;
@@ -2113,50 +2106,95 @@
         renderControls();
       }
     });
+    document.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const handle = event.target.closest?.("[data-model-drag-handle]");
+      const row = handle?.closest?.("[data-model-slug]");
+      if (!row) return;
+      catalogPointerDrag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        handle,
+        slug: row.dataset.modelSlug,
+        active: false,
+        targetSlug: "",
+      };
+      handle.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+    });
+    document.addEventListener("pointermove", (event) => {
+      const drag = catalogPointerDrag;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4) {
+        drag.active = true;
+        draggedCatalogSlug = drag.slug;
+        catalogRows().find((row) => row.dataset.modelSlug === drag.slug)?.classList?.add?.("is-dragging");
+      }
+      if (!drag.active) return;
+      event.preventDefault();
+      const pointed = document.elementFromPoint?.(event.clientX, event.clientY);
+      const target = pointed?.closest?.("[data-model-slug]") || event.target.closest?.("[data-model-slug]");
+      const rows = catalogRows();
+      drag.targetSlug = target?.dataset.modelSlug === drag.slug ? "" : target?.dataset.modelSlug || "";
+      rows.forEach((row) => row.classList?.toggle?.("is-drop-target", row.dataset.modelSlug === drag.targetSlug));
+    });
+    document.addEventListener("pointerup", (event) => {
+      const drag = catalogPointerDrag;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (!drag.active) {
+        catalogPointerDrag = null;
+        return;
+      }
+      const changed = commitCatalogReorder(drag.slug, drag.targetSlug);
+      drag.handle?.releasePointerCapture?.(event.pointerId);
+      clearCatalogDragState();
+      if (changed) {
+        renderModelCatalog(true);
+        renderControls();
+      }
+    });
+    document.addEventListener("pointercancel", (event) => {
+      if (catalogPointerDrag?.pointerId === event.pointerId) {
+        catalogPointerDrag.handle?.releasePointerCapture?.(event.pointerId);
+        clearCatalogDragState();
+      }
+    });
     document.addEventListener("dragstart", (event) => {
       const handle = event.target.closest?.("[data-model-drag-handle]");
       const row = handle?.closest?.("[data-model-slug]");
       if (!row) return;
       draggedCatalogSlug = row.dataset.modelSlug;
-      catalogDragChanged = false;
+      draggedCatalogTargetSlug = "";
+      row.classList?.add?.("is-dragging");
       event.dataTransfer?.setData("text/plain", draggedCatalogSlug);
       if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
     });
     document.addEventListener("dragover", (event) => {
       if (!draggedCatalogSlug) return;
       const target = event.target.closest?.("[data-model-slug]");
-      const source = Array.from(target?.parentNode?.children || [])
-        .find((row) => row.dataset?.modelSlug === draggedCatalogSlug);
-      if (!source || !target || source === target) return;
+      if (!target) return;
       event.preventDefault();
-      moveCatalogRow(source, target, event.clientX, event.clientY);
+      const rows = Array.from(target.parentNode?.children || []);
+      const source = rows.find((row) => row.dataset?.modelSlug === draggedCatalogSlug);
+      if (!source) return;
+      draggedCatalogTargetSlug = target === source ? "" : target.dataset.modelSlug;
+      rows.forEach((row) => row.classList?.toggle?.("is-drop-target", row === target && row !== source));
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
     });
     document.addEventListener("drop", (event) => {
       const target = event.target.closest?.("[data-model-slug]");
-      if (!target || !draggedCatalogSlug || target.dataset.modelSlug === draggedCatalogSlug) return;
+      if (!draggedCatalogSlug) return;
       event.preventDefault();
-      if (catalogDragChanged) {
-        syncCatalogDraftOrderFromDom(target.parentNode);
-        draggedCatalogSlug = "";
-        catalogDragChanged = false;
+      if (!target || target.dataset.modelSlug === draggedCatalogSlug) return;
+      if (commitCatalogReorder(draggedCatalogSlug, target.dataset.modelSlug)) {
+        clearCatalogDragState();
         renderModelCatalog(true);
-        return;
+        renderControls();
       }
-      const models = catalogModels();
-      const from = models.findIndex((model) => model.slug === draggedCatalogSlug);
-      const to = models.findIndex((model) => model.slug === target.dataset.modelSlug);
-      if (from < 0 || to < 0) return;
-      const [moved] = models.splice(from, 1);
-      models.splice(to, 0, moved);
-      models.forEach((model, index) => { model.priority = index + 1; });
-      draggedCatalogSlug = "";
-      catalogDragChanged = false;
-      renderModelCatalog(true);
-      renderControls();
     });
     document.addEventListener("dragend", () => {
-      draggedCatalogSlug = "";
-      catalogDragChanged = false;
+      clearCatalogDragState();
     });
     window.addEventListener("popstate", () => {
       state.configView = readConfigView();
