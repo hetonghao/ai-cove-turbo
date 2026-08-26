@@ -67,6 +67,8 @@ pub(super) struct HttpTiming {
     pending: Vec<u8>,
     data: Vec<u8>,
     first_token_at: Option<Instant>,
+    saw_sse_event: bool,
+    terminal_seen: bool,
     recorded: bool,
 }
 
@@ -77,12 +79,14 @@ impl HttpTiming {
             pending: Vec::new(),
             data: Vec::new(),
             first_token_at: None,
+            saw_sse_event: false,
+            terminal_seen: false,
             recorded: false,
         }
     }
 
     pub(super) fn observe(&mut self, chunk: &[u8]) {
-        if self.first_token_at.is_some() || !super::is_responses_path(&self.input.path) {
+        if !super::is_responses_path(&self.input.path) {
             return;
         }
         self.pending.extend_from_slice(chunk);
@@ -93,9 +97,6 @@ impl HttpTiming {
                 let _ = line.pop();
             }
             self.observe_line(&line);
-            if self.first_token_at.is_some() {
-                return;
-            }
         }
     }
 
@@ -107,6 +108,7 @@ impl HttpTiming {
         let Some(data) = line.strip_prefix(b"data:") else {
             return;
         };
+        self.saw_sse_event = true;
         let data = data.strip_prefix(b" ").unwrap_or(data);
         if !self.data.is_empty() {
             self.data.push(b'\n');
@@ -119,12 +121,28 @@ impl HttpTiming {
         if data.is_empty() {
             return;
         }
+        if data == b"[DONE]" {
+            self.terminal_seen = true;
+            return;
+        }
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data) else {
             return;
         };
         let Some(event_type) = value.get("type").and_then(serde_json::Value::as_str) else {
             return;
         };
+        if matches!(
+            event_type,
+            "response.completed"
+                | "response.done"
+                | "response.failed"
+                | "response.incomplete"
+                | "response.cancelled"
+                | "response.canceled"
+                | "error"
+        ) {
+            self.terminal_seen = true;
+        }
         if is_first_output_event_type(event_type) {
             self.first_token_at = Some(Instant::now());
         }
@@ -169,6 +187,9 @@ impl HttpTiming {
 
     pub(super) fn finish_stream_end(&mut self) {
         if self.input.control.is_some() {
+            return;
+        }
+        if super::is_responses_path(&self.input.path) && self.saw_sse_event && !self.terminal_seen {
             self.finish_with(
                 502,
                 Some("HTTP stream ended before terminal response event"),

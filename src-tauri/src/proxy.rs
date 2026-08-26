@@ -1434,9 +1434,10 @@ mod tests {
             compressed: false,
             traffic: HttpTraffic::DIRECT,
             failure_reason: None,
-            control: Some(control),
+            control: Some(Arc::clone(&control)),
         });
-        timing.finish_stream_end();
+        control.fail_stream();
+        timing.finish();
 
         let event = serde_json::to_value(
             metrics
@@ -1454,6 +1455,116 @@ mod tests {
                 "HTTP stream ended before terminal response event"
             ))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn direct_http_timing_records_incomplete_sse_as_error() -> Result<(), Box<dyn Error>> {
+        let metrics = Arc::new(Metrics::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+            control: None,
+        });
+        timing.observe(
+            br#"data: {"type":"response.output_text.delta","delta":"hi"}
+
+"#,
+        );
+        timing.finish_stream_end();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("direct incomplete stream event missing")?,
+        )?;
+        assert_eq!(event.get("status"), Some(&serde_json::json!(502)));
+        assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
+        assert!(event.get("durationMs").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn direct_http_timing_accepts_a_terminal_sse_event() -> Result<(), Box<dyn Error>> {
+        let metrics = Arc::new(Metrics::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+            control: None,
+        });
+        timing.observe(
+            br#"data: {"type":"response.completed"}
+
+"#,
+        );
+        timing.finish_stream_end();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("direct terminal stream event missing")?,
+        )?;
+        assert_eq!(event.get("status"), Some(&serde_json::json!(200)));
+        assert_eq!(event.get("result"), Some(&serde_json::json!("success")));
+        Ok(())
+    }
+
+    #[test]
+    fn direct_http_timing_accepts_output_followed_by_terminal_sse_event()
+    -> Result<(), Box<dyn Error>> {
+        let metrics = Arc::new(Metrics::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+            control: None,
+        });
+        timing.observe(
+            br#"data: {"type":"response.output_text.delta","delta":"hi"}
+
+data: {"type":"response.completed"}
+
+"#,
+        );
+        timing.finish_stream_end();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("direct terminal stream event missing")?,
+        )?;
+        assert_eq!(event.get("status"), Some(&serde_json::json!(200)));
+        assert_eq!(event.get("result"), Some(&serde_json::json!("success")));
+        assert!(event.get("firstTokenMs").is_some());
         Ok(())
     }
 
