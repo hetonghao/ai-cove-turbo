@@ -1459,6 +1459,42 @@ mod tests {
     }
 
     #[test]
+    fn controlled_http_timing_records_read_error_as_error() -> Result<(), Box<dyn Error>> {
+        let metrics = Arc::new(Metrics::default());
+        let control = Arc::new(HttpTimingControl::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+            control: Some(Arc::clone(&control)),
+        });
+        control.fail_stream_error();
+        timing.finish();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("controlled read error event missing")?,
+        )?;
+        assert_eq!(event.get("status"), Some(&serde_json::json!(502)));
+        assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
+        assert_eq!(
+            event.get("failureReason"),
+            Some(&serde_json::json!("HTTP response stream failed"))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn direct_http_timing_records_incomplete_sse_as_error() -> Result<(), Box<dyn Error>> {
         let metrics = Arc::new(Metrics::default());
         let mut timing = HttpTiming::new(HttpTimingInput {
@@ -1491,6 +1527,36 @@ mod tests {
         assert_eq!(event.get("status"), Some(&serde_json::json!(502)));
         assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
         assert!(event.get("durationMs").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn direct_http_timing_records_empty_sse_as_error() -> Result<(), Box<dyn Error>> {
+        let metrics = Arc::new(Metrics::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 0,
+            sent_bytes: 0,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+            control: None,
+        });
+        timing.finish_stream_end();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("empty stream event missing")?,
+        )?;
+        assert_eq!(event.get("status"), Some(&serde_json::json!(502)));
+        assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
         Ok(())
     }
 

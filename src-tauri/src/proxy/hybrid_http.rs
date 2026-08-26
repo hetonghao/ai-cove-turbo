@@ -69,6 +69,7 @@ async fn run_http_worker(
         return;
     };
     if !response.status().is_success() {
+        control.complete();
         let status = response.status().as_u16();
         let message = format!("HTTP upstream returned status {status}");
         let error = if super::super::is_context_length_exceeded(status) {
@@ -106,6 +107,7 @@ async fn run_http_worker(
                     return;
                 };
                 let Ok(chunk) = chunk else {
+                    control.fail_stream_error();
                     let _ = events.send(WorkerEvent::Error {
                         code: 1011,
                         message: "HTTP response stream failed".to_owned(),
@@ -114,7 +116,10 @@ async fn run_http_worker(
                 };
                 parser.push(&chunk);
                 match send_sse_events(&mut parser, &events).await {
-                    Ok(true) => return,
+                    Ok(true) => {
+                        control.complete();
+                        return;
+                    }
                     Err(()) => {
                         control.fail_stream();
                         return;

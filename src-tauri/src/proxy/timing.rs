@@ -18,6 +18,7 @@ const REQUEST_CANCELLED_STATUS: u16 = 499;
 pub(super) struct HttpTimingControl {
     cancelled: AtomicBool,
     stream_failure: AtomicU8,
+    completed: AtomicBool,
     recorded: AtomicBool,
 }
 
@@ -34,12 +35,20 @@ impl HttpTimingControl {
         self.stream_failure.store(2, Ordering::Release);
     }
 
+    pub(super) fn complete(&self) {
+        self.completed.store(true, Ordering::Release);
+    }
+
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 
     fn stream_failure(&self) -> u8 {
         self.stream_failure.load(Ordering::Acquire)
+    }
+
+    fn is_completed(&self) -> bool {
+        self.completed.load(Ordering::Acquire)
     }
 
     pub(super) fn claim_recording(&self) -> bool {
@@ -171,6 +180,9 @@ impl HttpTiming {
                 }
                 _ => {}
             }
+            if !control.is_completed() {
+                return;
+            }
         }
         let failure_reason = self.input.failure_reason.clone();
         self.finish_with(self.input.status, failure_reason.as_deref());
@@ -187,9 +199,10 @@ impl HttpTiming {
 
     pub(super) fn finish_stream_end(&mut self) {
         if self.input.control.is_some() {
+            self.finish();
             return;
         }
-        if super::is_responses_path(&self.input.path) && self.saw_sse_event && !self.terminal_seen {
+        if super::is_responses_path(&self.input.path) && !self.terminal_seen {
             self.finish_with(
                 502,
                 Some("HTTP stream ended before terminal response event"),
