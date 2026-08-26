@@ -4373,6 +4373,7 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
   flex: 1 1 auto;
   min-block-size: 0;
   max-height: none;
+  align-content: start;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;

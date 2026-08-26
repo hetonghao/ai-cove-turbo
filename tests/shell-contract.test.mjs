@@ -253,7 +253,7 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-stage\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?min-block-size:\s*0;[\s\S]*?overflow:\s*hidden;/);
   assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-config-page\s*\{[\s\S]*?display:\s*flex;[\s\S]*?min-block-size:\s*0;/);
   assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-model-catalog\s*\{[\s\S]*?display:\s*flex;[\s\S]*?flex:\s*1 1 auto;[\s\S]*?flex-direction:\s*column;[\s\S]*?gap:\s*0;[\s\S]*?min-block-size:\s*0;/);
-  assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-model-catalog__list\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?min-block-size:\s*0;[\s\S]*?overflow-x:\s*hidden;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overscroll-behavior:\s*contain;[\s\S]*?scrollbar-gutter:\s*stable;/);
+  assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-model-catalog__list\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?min-block-size:\s*0;[\s\S]*?max-height:\s*none;[\s\S]*?align-content:\s*start;[\s\S]*?overflow-x:\s*hidden;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overscroll-behavior:\s*contain;[\s\S]*?scrollbar-gutter:\s*stable;/);
   assert.match(css, /@media \(min-width: 721px\) and \(max-width: 900px\)\s*\{[\s\S]*?body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-model-row\s*\{[\s\S]*?min-block-size:\s*92px;/);
   assert.match(css, /\.b-model-catalog--wide\s*\{[\s\S]*?width:\s*auto;/);
   assert.match(css, /\.b-model-row__drag:hover[\s\S]*?color:\s*var\(--b-accent\);/);
