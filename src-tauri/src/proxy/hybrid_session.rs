@@ -28,6 +28,7 @@ pub(super) struct Session {
     pub(super) handle: SessionHandle,
     pub(super) ready: Option<Lease>,
     pub(super) websocket_receipt: Option<WebSocketSendReceipt>,
+    pub(super) websocket_first_token_at: Option<std::time::Instant>,
     pub(super) max_websocket_request_bytes: usize,
     observed_activity: Option<ConnectionActivity>,
     pub(super) thread_id: Option<String>,
@@ -61,6 +62,7 @@ impl Session {
             handle,
             ready: None,
             websocket_receipt: None,
+            websocket_first_token_at: None,
             max_websocket_request_bytes: super::MAX_HYBRID_WEBSOCKET_REQUEST_BYTES,
             observed_activity: None,
             thread_id: None,
@@ -114,6 +116,7 @@ impl Session {
             self.handle.discard_unleased(retirement).await;
         }
         self.last_terminal_response_id = None;
+        self.websocket_first_token_at = None;
         self.observed_activity = None;
     }
 

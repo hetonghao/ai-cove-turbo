@@ -36,6 +36,19 @@ fn recognizes_done_and_terminal_response_events() {
 }
 
 #[test]
+fn recognizes_model_output_delta_for_first_token_timing() {
+    assert!(super::super::is_first_output_event_type(
+        "response.output_text.delta"
+    ));
+    assert!(super::super::is_first_output_event_type(
+        "response.reasoning_summary_text.delta"
+    ));
+    assert!(!super::super::is_first_output_event_type(
+        "response.completed"
+    ));
+}
+
+#[test]
 fn idle_error_diagnostic_keeps_safe_error_code_without_message() {
     let diagnostic = idle_event_diagnostic(
         br#"{"type":"error","error":{"code":"invalid_request","message":"must-not-persist"}}"#,

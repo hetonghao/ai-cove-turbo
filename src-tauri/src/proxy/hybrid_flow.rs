@@ -206,7 +206,7 @@ async fn start_response(
         return true;
     }
     if previous_response_id.is_none() && policy_requires_http(session, &payload).await {
-        start_http_only_response(session, active, fallback).await;
+        start_http_only_response(session, active, fallback);
         return true;
     }
     if !large_http_request {
@@ -262,7 +262,7 @@ async fn start_response(
     true
 }
 
-async fn start_http_only_response(
+fn start_http_only_response(
     session: &Session,
     active: &mut Option<Active>,
     fallback: HttpFallback,
@@ -270,12 +270,11 @@ async fn start_http_only_response(
     let HttpFallback::Request(http_payload) = fallback else {
         return;
     };
-    let traffic = if session.handle.has_initialized().await {
-        HttpTraffic::HYBRID_RECOVERY
-    } else {
-        HttpTraffic::HYBRID_COLD_START
-    };
-    *active = Some(http::start_http_worker(session, http_payload, traffic));
+    *active = Some(http::start_http_worker(
+        session,
+        http_payload,
+        HttpTraffic::HYBRID_POLICY,
+    ));
 }
 
 async fn policy_requires_http(session: &Session, payload: &[u8]) -> bool {

@@ -27,6 +27,13 @@
     return `${Math.max(0, (1 - sent / raw) * 100).toFixed(1)}%`;
   }
 
+  function formatDuration(value) {
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) return "—";
+    if (milliseconds < 1_000) return `${Math.round(milliseconds)} ms`;
+    return `${(milliseconds / 1_000).toFixed(1)} s`;
+  }
+
   function formatClock(timestampMs) {
     return new Intl.DateTimeFormat("zh-CN", {
       month: "2-digit",
@@ -119,6 +126,7 @@
     formatBytes,
     formatChartTime,
     formatClock,
+    formatDuration,
     formatRate,
     formatSpeedGain,
     granularityLabel,

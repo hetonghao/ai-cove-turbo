@@ -7,7 +7,8 @@
     hybridWs: "Hybrid WS",
     hybridColdStartHttp: "首轮 HTTP",
     hybridRecoveryHttp: "回退 HTTP",
-    hybridPolicyHttp: "压缩 HTTP",
+    hybridPolicyHttp: "策略 HTTP",
+    hybridLargeRequestHttp: "大请求 HTTP",
     directHttp: "压缩 HTTP",
   };
   const ROLLING_WINDOWS = [1, 10, 60, 1440];
@@ -21,15 +22,15 @@
   const HTTP_DEGRADATION_MIN_REQUESTS = 5;
   const NETWORK_ERROR_MESSAGE = "请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。\n请尝试切换手机热点排查，如果无法定位请联管理员。";
   const REQUEST_FAILURE_LABELS = Object.freeze({
-    401: "认证失败，请检查 API 密钥",
-    403: "认证失败，请检查 API 密钥",
-    404: "请求地址不存在，请检查配置",
-    408: "请求超时，请稍后重试",
-    413: "请求内容过大，请重试",
-    429: "请求过于频繁，请稍后重试",
-    500: "服务暂时不可用，请稍后重试",
-    503: "服务暂时不可用，请稍后重试",
-    504: "请求超时，请稍后重试",
+    401: "认证失败",
+    403: "认证失败",
+    404: "地址不存在",
+    408: "请求超时",
+    413: "内容过大",
+    429: "请求过于频繁",
+    500: "服务不可用",
+    503: "服务不可用",
+    504: "请求超时",
   });
   const invoke = window.__TAURI__?.core?.invoke;
   const telemetry = window.TurboTelemetry;
@@ -88,10 +89,10 @@
   function buildPreviewTelemetry() {
     const now = Date.now();
     const samples = [
-      { id: 1, ageSeconds: 3, status: 200, path: "/v1/responses", rawBytes: 186_420, sentBytes: 82_110, transport: "WS", result: "success", route: "hybridWs" },
-      { id: 2, ageSeconds: 11, status: 200, path: "/v1/responses", rawBytes: 94_280, sentBytes: 51_360, transport: "HTTP", result: "success", route: "hybridColdStartHttp" },
-      { id: 3, ageSeconds: 48, status: 201, path: "/v1/files", rawBytes: 128_610, sentBytes: 67_240, transport: "HTTP", result: "success", route: "directHttp" },
-      { id: 4, ageSeconds: 210, status: 200, path: "/v1/responses", rawBytes: 121_000, sentBytes: 116_000, transport: "HTTP", result: "fallback", route: "hybridRecoveryHttp" },
+      { id: 1, ageSeconds: 3, status: 200, path: "/v1/responses", rawBytes: 186_420, sentBytes: 82_110, transport: "WS", result: "success", route: "hybridWs", model: "gpt-5.3-codex", sessionId: "会话 01", connectionId: "连接 02", sessionName: "代码审查", firstTokenMs: 420, durationMs: 1_800 },
+      { id: 2, ageSeconds: 11, status: 200, path: "/v1/responses", rawBytes: 94_280, sentBytes: 51_360, transport: "HTTP", result: "success", route: "hybridColdStartHttp", model: "gpt-5.4", sessionId: "会话 02", sessionName: "—", durationMs: 2_400 },
+      { id: 3, ageSeconds: 48, status: 201, path: "/v1/files", rawBytes: 128_610, sentBytes: 67_240, transport: "HTTP", result: "success", route: "directHttp", model: "—", sessionId: "—", connectionId: "—", sessionName: "—", durationMs: 310 },
+      { id: 4, ageSeconds: 210, status: 200, path: "/v1/responses", rawBytes: 121_000, sentBytes: 116_000, transport: "HTTP", result: "fallback", route: "hybridRecoveryHttp", model: "gpt-5.3-codex", sessionId: "会话 01", connectionId: "—", sessionName: "代码审查", durationMs: 3_100 },
       { id: 5, ageSeconds: 1_080, status: 200, path: "/v1/responses", rawBytes: 212_000, sentBytes: 104_000, transport: "WS", result: "success", route: "hybridWs" },
       { id: 6, ageSeconds: 10_800, status: 200, path: "/v1/responses", rawBytes: 246_000, sentBytes: 119_000, transport: "HTTP", result: "success" },
       { id: 7, ageSeconds: 43_200, status: 200, path: "/v1/responses", rawBytes: 152_000, sentBytes: 143_000, transport: "HTTP", result: "fallback" },
@@ -361,6 +362,46 @@
   function requestFailureLabel(request) {
     if (isNetworkIssue(request)) return "网络异常";
     return REQUEST_FAILURE_LABELS[Number(request?.status)] ?? "请求失败";
+  }
+
+  function requestFailureDetail(request, { releaseRebuild = false, recovering = false } = {}) {
+    if (isNetworkIssue(request)) return NETWORK_ERROR_MESSAGE;
+    const reason = String(request?.failureReason ?? "").trim();
+    if (recovering) {
+      const prefix = releaseRebuild ? "连接正在随版本发布重建。" : "连接正在恢复。";
+      return reason ? `${prefix}\n详细原因：${reason}` : prefix;
+    }
+    if (request?.result !== "error") return "";
+    const status = Number(request?.status);
+    const statusText = Number.isFinite(status) && status > 0
+      ? `上游返回状态码 ${status}。`
+      : "请求未成功完成。";
+    return reason ? `${statusText}\n上游原因：${reason}` : `${statusText}\n上游未提供更具体原因。`;
+  }
+
+  function compactRequestId(value, prefix) {
+    const text = String(value ?? "").trim();
+    if (!text) return "—";
+    const alternate = prefix === "会话" ? "session" : "connection";
+    return text.replace(new RegExp(`^(?:${prefix}|${alternate})\\s*`, "i"), "") || text;
+  }
+
+  function requestDetailRows(request, exception) {
+    const rows = [
+      ["模型", request?.model || request?.modelSlug || "—"],
+      ["会话/连接 ID", `${compactRequestId(request?.sessionId || request?.session_id, "会话")} · ${compactRequestId(request?.connectionId || request?.connection_id, "连接")}`],
+      ["会话名称", request?.sessionName || request?.session_name || "—"],
+      ["首字/耗时", `${telemetry.formatDuration(request?.firstTokenMs ?? request?.first_token_ms)} / ${telemetry.formatDuration(request?.durationMs ?? request?.duration_ms)}`],
+    ];
+    if (exception) rows.push(["异常", exception]);
+    return rows;
+  }
+
+  function requestDetailMarkup(request, exception, tooltipId, label = requestFailureLabel(request)) {
+    const rows = requestDetailRows(request, exception)
+      .map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value).replaceAll("\n", "<br>")}</dd></div>`)
+      .join("");
+    return `<span class="c-transport__detail">${escapeHtml(label)}</span><span class="c-transport__tooltip" id="${tooltipId}" role="tooltip"><strong>请求详情</strong><dl>${rows}</dl></span>`;
   }
 
   function formatCodexState() {
@@ -678,6 +719,12 @@
     button.title = label;
   }
 
+  function syncTransportButtons(row, transport) {
+    row?.querySelectorAll?.("[data-model-transport]")?.forEach((button) => {
+      button.setAttribute("aria-pressed", String(button.dataset.modelTransport === transport));
+    });
+  }
+
   function catalogModels() {
     if (!catalogDraft) catalogDraft = (state.catalog?.models ?? []).map((model) => ({ ...model }));
     return catalogDraft;
@@ -686,10 +733,6 @@
   function policyModels() {
     if (!modelPolicyDraft) modelPolicyDraft = { ...(state.modelPolicy?.models || {}) };
     return modelPolicyDraft;
-  }
-
-  function transportOptions(transport) {
-    return `<option value="auto"${transport === "auto" ? " selected" : ""}>自动</option><option value="http"${transport === "http" ? " selected" : ""}>HTTP</option>`;
   }
 
   function capabilityBadge(slug) {
@@ -701,7 +744,11 @@
 
   function modelCatalogMarkup() {
     const policies = policyModels();
-    return catalogModels().map((model) => `<article class="b-model-row" draggable="false" data-model-slug="${escapeHtml(model.slug)}"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ${escapeHtml(model.displayName || model.slug)} 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><strong>${escapeHtml(model.displayName || model.slug)}</strong><code>${escapeHtml(model.slug)}</code><small>${escapeHtml(model.description || "")}</small>${capabilityBadge(model.slug)}</span><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="${String(model.visibility === "list")}" aria-label="${escapeHtml(model.visibility === "list" ? `隐藏 ${model.displayName || model.slug}` : `显示 ${model.displayName || model.slug}`)}" title="${escapeHtml(model.visibility === "list" ? `隐藏 ${model.displayName || model.slug}` : `显示 ${model.displayName || model.slug}`)}">${visibilityIcon(model.visibility === "list")}</button><label><span>传输</span><select data-model-transport>${transportOptions(policies[model.slug] || "auto")}</select></label><span class="b-model-row__priority">#${Number(model.priority) || 0}</span></article>`).join("");
+    return catalogModels().map((model) => {
+      const transport = policies[model.slug] || "auto";
+      const modelLabel = model.displayName || model.slug;
+      return `<article class="b-model-row" draggable="false" data-model-slug="${escapeHtml(model.slug)}"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ${escapeHtml(modelLabel)} 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><strong>${escapeHtml(modelLabel)}</strong><code>${escapeHtml(model.slug)}</code><small>${escapeHtml(model.description || "")}</small>${capabilityBadge(model.slug)}</span><span class="b-model-row__actions"><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="${String(model.visibility === "list")}" aria-label="${escapeHtml(model.visibility === "list" ? `隐藏 ${modelLabel}` : `显示 ${modelLabel}`)}" title="${escapeHtml(model.visibility === "list" ? `隐藏 ${modelLabel}` : `显示 ${modelLabel}`)}">${visibilityIcon(model.visibility === "list")}</button><div class="b-transport-toggle" role="group" aria-label="${escapeHtml(`传输方式：${modelLabel}`)}"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="${String(transport === "auto")}">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="${String(transport === "http")}">HTTP</button></div><span class="b-model-row__priority">#${Number(model.priority) || 0}</span></span></article>`;
+    }).join("");
   }
 
   function catalogRows() {
@@ -743,11 +790,11 @@
     if (visible) visible.textContent = String(visibleCount);
     if (total) total.textContent = String(totalCount);
     if (info) {
-      const source = catalog.sourcePath || "当前 Codex 内部模型状态";
-      const tooltip = `模型候选源文件：${source}`;
+      const managedPath = catalog.path || "~/.codex/model-catalogs/ai_cove_turbo.json";
+      const tooltip = `模型候选源文件：${managedPath}`;
       info.title = tooltip;
       info.dataset.tooltip = tooltip;
-      info.setAttribute("aria-label", `查看模型候选源文件：${source}`);
+      info.setAttribute("aria-label", `查看模型候选源文件：${managedPath}`);
     }
     if (message) {
       message.textContent = catalog.state === "conflict"
@@ -827,6 +874,7 @@
   }
 
   function renderConfigView(options = {}) {
+    document.body.dataset.configView = state.configView;
     all("[data-config-view]").forEach((tab) => {
       const active = tab.dataset.configView === state.configView;
       tab.setAttribute("aria-selected", String(active));
@@ -1550,13 +1598,19 @@
     const route = REQUEST_ROUTE_LABELS[request.route];
     const protocol = route ?? request.transport;
     const networkIssue = isNetworkIssue(request);
-    const transport = networkIssue ? `${protocol} · 网络异常` : releaseRebuild ? "Hybrid WS · 发布重建" : recovering ? `${protocol} · 连接恢复` : failed ? `${protocol} · ${requestFailureLabel(request)}` : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
-    const detail = recovering && request.failureReason ? ` title="${escapeHtml(request.failureReason)}"` : "";
-    const tooltipId = `network-error-${String(request.id).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-    const networkMarkup = networkIssue
-      ? `<span class="c-transport__protocol">${escapeHtml(protocol)}</span><span aria-hidden="true"> · </span><span class="c-transport__network" tabindex="0" aria-describedby="${tooltipId}">网络异常</span><span class="c-transport__tooltip" id="${tooltipId}" role="tooltip">${escapeHtml(NETWORK_ERROR_MESSAGE).replaceAll("\n", "<br>")}</span>`
-      : escapeHtml(transport);
-    return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}"${detail}>${networkMarkup}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
+    const detail = requestFailureDetail(request, { releaseRebuild, recovering });
+    const tooltipId = `request-detail-${String(request.id).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+    const transportLabel = networkIssue
+      ? `${protocol} · 网络异常`
+      : releaseRebuild
+        ? "Hybrid WS · 发布重建"
+        : recovering
+          ? `${protocol} · 连接恢复`
+          : failed
+            ? `${protocol} · ${requestFailureLabel(request)}`
+            : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
+    const networkMarkup = requestDetailMarkup(request, detail, tooltipId, transportLabel);
+    return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}" tabindex="0" aria-describedby="${tooltipId}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}">${networkMarkup}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
   }
 
   function renderLiveFollow() {
@@ -2060,6 +2114,18 @@
         }
         return;
       }
+      const transportButton = event.target.closest?.("[data-model-transport]");
+      if (transportButton) {
+        const row = transportButton.closest?.("[data-model-slug]");
+        const policies = policyModels();
+        const transport = transportButton.dataset.modelTransport === "http" ? "http" : "auto";
+        if (row?.dataset.modelSlug && transport === "http") policies[row.dataset.modelSlug] = "http";
+        else if (row?.dataset.modelSlug) delete policies[row.dataset.modelSlug];
+        syncTransportButtons(row, transport);
+        renderModelCatalog();
+        renderControls();
+        return;
+      }
       const action = event.target.closest?.("[data-action]");
       if (action) void handleAction(action.dataset.action, action);
       if (aiCoveBubbleOpen && !event.target.closest?.("[data-ai-cove-popover]")) setAiCoveBubbleOpen(false);
@@ -2067,9 +2133,13 @@
       if (tab) selectTab(tab.dataset.tab);
     });
     document.addEventListener("pointerover", (event) => {
-      const trigger = event.target.closest?.(".c-transport__network");
+      const trigger = event.target.closest?.(".c-request-row") || event.target.closest?.(".c-transport__detail");
       if (trigger) positionNetworkTooltip(trigger);
     });
+    window.addEventListener("resize", () => {
+      const row = document.activeElement?.closest?.(".c-request-row");
+      if (row) positionNetworkTooltip(row);
+    }, { passive: true });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && aiCoveBubbleOpen) {
         setAiCoveBubbleOpen(false, { restoreFocus: true });
@@ -2087,7 +2157,7 @@
       if (configView) handleConfigViewKeydown(event, configView);
     });
     document.addEventListener("focusin", (event) => {
-      const networkTrigger = event.target.closest?.(".c-transport__network");
+      const networkTrigger = event.target.closest?.(".c-request-row") || event.target.closest?.(".c-transport__detail");
       if (networkTrigger) positionNetworkTooltip(networkTrigger);
       const chartSlot = event.target.closest?.(".c-bar-slot");
       if (!chartSlot) return;
@@ -2097,14 +2167,6 @@
     });
     document.addEventListener("change", (event) => {
       if (event.target.matches?.("[data-filter]")) renderStatistics();
-      const row = event.target.closest?.("[data-model-slug]");
-      if (row && event.target.matches?.("[data-model-transport]")) {
-        const policies = policyModels();
-        if (event.target.value === "http") policies[row.dataset.modelSlug] = "http";
-        else delete policies[row.dataset.modelSlug];
-        renderedModelCatalogMarkup = modelCatalogMarkup();
-        renderControls();
-      }
     });
     document.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;

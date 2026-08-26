@@ -15,6 +15,16 @@ function element(extra = {}) {
   };
 }
 
+test("首字和耗时按毫秒或秒格式化，缺失值保留占位符", async () => {
+  const telemetrySource = await readFile(new URL("../src/telemetry.js", import.meta.url), "utf8");
+  const window = {};
+  vm.runInNewContext(telemetrySource, { Intl, Math, Number, Object, window });
+
+  assert.equal(window.TurboTelemetry.formatDuration(420), "420 ms");
+  assert.equal(window.TurboTelemetry.formatDuration(1_800), "1.8 s");
+  assert.equal(window.TurboTelemetry.formatDuration(undefined), "—");
+});
+
 test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆盖 101 状态", async () => {
   // Given: get_app_status 返回成功和失败的 101 请求，以及固定六桶的一分钟窗口。
   const telemetrySource = await readFile(new URL("../src/telemetry.js", import.meta.url), "utf8");
@@ -63,6 +73,8 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
       { id: 3, timestampMs: 72_000, status: 101, path: "/v1/ws-error", rawBytes: 100, sentBytes: 50, transport: "WS", result: "error", route: "hybridWs" },
       { id: 4, timestampMs: 73_000, status: 200, path: "/v1/cold-start", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "success", route: "hybridColdStartHttp" },
       { id: 5, timestampMs: 74_000, status: 200, path: "/v1/recovery", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "fallback", route: "hybridRecoveryHttp" },
+      { id: 8, timestampMs: 74_500, status: 200, path: "/v1/policy", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "success", route: "hybridPolicyHttp" },
+      { id: 9, timestampMs: 74_750, status: 200, path: "/v1/large", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "success", route: "hybridLargeRequestHttp" },
       { id: 6, timestampMs: 75_000, status: 1002, path: "/v1/ws-idle", rawBytes: 0, sentBytes: 0, transport: "WS", result: "error", route: "hybridWs", failurePhase: "hybridIdle", failureReason: "unexpected idle upstream binary message" },
       { id: 7, timestampMs: 76_000, status: 1012, path: "/v1/ws-restart", rawBytes: 0, sentBytes: 0, transport: "WS", result: "error", route: "hybridWs", failurePhase: "hybridIdle", failureReason: "service restarting" },
     ],
@@ -132,19 +144,26 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   const failedRow = requestRows.find((row) => row.includes("/v1/ws-error")) ?? "";
   const recoveredRow = requestRows.find((row) => row.includes("/v1/ws-idle")) ?? "";
   const restartRow = requestRows.find((row) => row.includes("/v1/ws-restart")) ?? "";
-  assert.equal(requestRows.length, 7);
+  assert.equal(requestRows.length, 9);
   assert.match(requestRows.find((row) => row.includes("/v1/direct")) ?? "", />压缩 HTTP<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/hybrid-ws")) ?? "", />Hybrid WS<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/cold-start")) ?? "", />首轮 HTTP<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/recovery")) ?? "", />回退 HTTP<\/span>/);
+  assert.match(requestRows.find((row) => row.includes("/v1/policy")) ?? "", />策略 HTTP<\/span>/);
+  assert.match(requestRows.find((row) => row.includes("/v1/large")) ?? "", />大请求 HTTP<\/span>/);
   assert.match(failedRow, /c-request-status c-request-status--error">101<\/span>/);
-  assert.match(failedRow, /c-transport c-transport--error">Hybrid WS · 请求失败<\/span>/);
+  assert.match(failedRow, /c-transport c-transport--error">.*Hybrid WS.*请求失败/);
   assert.doesNotMatch(failedRow, /c-request-status--success|<span class="c-transport">Hybrid WS<\/span>|Hybrid WS · 失败/);
-  assert.match(recoveredRow, /title="unexpected idle upstream binary message"/);
-  assert.match(recoveredRow, />Hybrid WS · 连接恢复<\/span>/);
+  assert.match(recoveredRow, /id="request-detail-6" role="tooltip"><strong>请求详情<\/strong>[\s\S]*<dt>异常<\/dt><dd>连接正在恢复。<br>详细原因：unexpected idle upstream binary message<\/dd>/);
+  assert.match(recoveredRow, /Hybrid WS.*连接恢复/);
   assert.doesNotMatch(recoveredRow, /Hybrid WS · 失败/);
-  assert.match(restartRow, />Hybrid WS · 发布重建<\/span>/);
-  assert.equal(liveCount.textContent, "7");
+  assert.match(restartRow, /Hybrid WS.*发布重建/);
+  requestRows.forEach((row) => {
+    assert.match(row, /class="c-request-row"[^>]*tabindex="0" aria-describedby="request-detail-/);
+    assert.equal((row.match(/<td>/g) ?? []).length, 6);
+    assert.doesNotMatch(row, /c-request-color|颜色/);
+  });
+  assert.equal(liveCount.textContent, "9");
   assert.equal(statElements[0].textContent, "5");
   assert.equal(statElements[1].textContent, "300 B");
   assert.equal(statElements[2].textContent, "150 B");

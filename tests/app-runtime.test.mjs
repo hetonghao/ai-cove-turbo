@@ -191,17 +191,14 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
       const current = configViewButtons.find((target) => target.getAttribute("aria-selected") === "true") || configViewButtons[0];
       listeners.get("keydown")?.({ key, target: current, preventDefault() {} });
     },
-    configView() { return configViewButtons.find((target) => target.getAttribute("aria-selected") === "true")?.dataset.configView; },
+  configView() { return configViewButtons.find((target) => target.getAttribute("aria-selected") === "true")?.dataset.configView; },
+    bodyConfigView() { return document.body.dataset.configView; },
     configPanelHidden(view) { return configViewPanels.find((target) => target.dataset.configViewPanel === view)?.hidden; },
     url() { return window.location.href; },
-    change(slug, value, selector = "[data-model-transport]") {
-      listeners.get("change")?.({
-        target: {
-          value,
-          matches: (candidate) => candidate === selector,
-          closest: (selector) => selector === "[data-model-slug]" ? row(slug) : null,
-        },
-      });
+    change(slug, value) {
+      const button = element({ modelTransport: value });
+      button.closest = (selector) => selector === "[data-model-transport]" ? button : selector === "[data-model-slug]" ? row(slug) : null;
+      listeners.get("click")?.({ target: button });
     },
     drag(from, to) {
       const handle = { closest: (selector) => selector === "[data-model-slug]" ? row(from) : null };
@@ -253,11 +250,13 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
 test("配置工作区通过顶部 Tab 切换并同步 URL 与键盘状态", async () => {
   const harness = await catalogHarness();
   assert.equal(harness.configView(), "settings");
+  assert.equal(harness.bodyConfigView(), "settings");
   assert.equal(harness.configPanelHidden("settings"), false);
   assert.equal(harness.configPanelHidden("catalog"), true);
 
   harness.selectConfigView("catalog");
   assert.equal(harness.configView(), "catalog");
+  assert.equal(harness.bodyConfigView(), "catalog");
   assert.equal(harness.configPanelHidden("settings"), true);
   assert.equal(harness.configPanelHidden("catalog"), false);
   assert.match(harness.url(), /view=catalog/);
@@ -272,8 +271,8 @@ test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界",
   const saved = await catalogHarness();
   assert.equal(saved.disabled("save-model-settings"), true);
   assert.equal(saved.disabled("undo-model-settings"), true);
-  assert.match(saved.info.title, /模型候选源文件：\/home\/test\/models\.json/);
-  assert.match(saved.info.dataset.tooltip, /模型候选源文件：\/home\/test\/models\.json/);
+  assert.match(saved.info.title, /模型候选源文件：\/home\/test\/\.codex\/model-catalogs\/ai_cove_turbo\.json/);
+  assert.match(saved.info.dataset.tooltip, /模型候选源文件：\/home\/test\/\.codex\/model-catalogs\/ai_cove_turbo\.json/);
   saved.dragRow("alpha", "beta");
   assert.equal(saved.disabled("save-model-settings"), true);
   saved.toggleVisibility("alpha");
@@ -308,7 +307,7 @@ test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界",
 test("状态轮询不重建模型目录控件或覆盖未保存编辑", async () => {
   const harness = await catalogHarness({ freshStatus: true });
   harness.toggleVisibility("alpha");
-  harness.change("alpha", "http", "[data-model-transport]");
+  harness.change("alpha", "http");
   harness.drag("alpha", "beta");
   const renders = harness.catalogRenders();
 
@@ -346,8 +345,12 @@ test("模型传输策略编辑保存并显示能力摘要", async () => {
   assert.match(harness.list.innerHTML, /WS 可用/);
   assert.match(harness.list.innerHTML, /压缩 HTTP/);
   assert.match(harness.list.innerHTML, /title="no_responses_websocket_channel"/);
-  harness.change("alpha", "http", "[data-model-transport]");
-  harness.change("beta", "auto", "[data-model-transport]");
+  assert.match(harness.list.innerHTML, /b-transport-toggle/);
+  assert.match(harness.list.innerHTML, /data-model-transport="auto" aria-pressed="true"/);
+  assert.match(harness.list.innerHTML, /data-model-transport="http" aria-pressed="false"/);
+  harness.change("alpha", "http");
+  harness.change("beta", "auto");
+  assert.match(harness.list.innerHTML, /data-model-transport="http" aria-pressed="true"/);
   await harness.click("save-model-settings");
   const save = harness.calls.find((call) => call.command === "update_model_policy");
   assert.equal(JSON.stringify(save.args.update), JSON.stringify({ defaultTransport: "auto", models: { alpha: "http" } }));
@@ -355,7 +358,7 @@ test("模型传输策略编辑保存并显示能力摘要", async () => {
   assert.equal(harness.restartRequired(), false);
 
   const failed = await catalogHarness({ failSave: true });
-  failed.change("alpha", "http", "[data-model-transport]");
+  failed.change("alpha", "http");
   await failed.click("save-model-settings");
   assert.match(failed.list.innerHTML, /WS 可用/);
 });
@@ -584,13 +587,13 @@ async function liveTailHarness(overrides = {}) {
     positionNetworkTooltip({ eventType = "pointerover", tooltipBounds, triggerBounds, viewportWidth }) {
       window.innerWidth = viewportWidth;
       const properties = new Map();
-      const tooltipId = "network-error-test";
+      const tooltipId = "request-detail-test";
       elementsById.set(tooltipId, {
         getBoundingClientRect: () => tooltipBounds,
         style: { setProperty(name, value) { properties.set(name, value); } },
       });
       const trigger = {
-        closest: (selector) => selector === ".c-transport__network" ? trigger : null,
+        closest: (selector) => selector === ".c-transport__detail" ? trigger : null,
         getAttribute: (name) => name === "aria-describedby" ? tooltipId : null,
         getBoundingClientRect: () => triggerBounds,
       };
@@ -948,22 +951,24 @@ test("HTTP 502 记录显示协议、网络异常和可访问排查提示", async
   const { requestStream } = await liveTailHarness({ recentRequests: [networkErrors.at(-1)] });
   assert.match(requestStream.innerHTML, /压缩 HTTP/);
   assert.match(requestStream.innerHTML, /网络异常/);
-  assert.match(requestStream.innerHTML, /aria-describedby="network-error-6"/);
-  assert.match(requestStream.innerHTML, /请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。<br>请尝试切换手机热点排查，如果无法定位请联管理员。/);
+  assert.match(requestStream.innerHTML, /aria-describedby="request-detail-6"/);
+  assert.match(requestStream.innerHTML, /id="request-detail-6" role="tooltip"><strong>请求详情<\/strong>/);
+  assert.match(requestStream.innerHTML, /<dt>模型<\/dt><dd>—<\/dd>/);
+  assert.match(requestStream.innerHTML, /<dt>异常<\/dt><dd>请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。<br>请尝试切换手机热点排查，如果无法定位请联管理员。<\/dd>/);
   assert.doesNotMatch(requestStream.innerHTML, /压缩 HTTP · 失败/);
 });
 
 test("首批 HTTP 状态在请求列表中显示可执行的通用提示", async () => {
   const statuses = [
-    [401, "认证失败，请检查 API 密钥", "hybridColdStartHttp", "首轮 HTTP"],
-    [403, "认证失败，请检查 API 密钥", "directHttp", "压缩 HTTP"],
-    [404, "请求地址不存在，请检查配置", "directHttp", "压缩 HTTP"],
-    [408, "请求超时，请稍后重试", "directHttp", "压缩 HTTP"],
-    [413, "请求内容过大，请重试", "directHttp", "压缩 HTTP"],
-    [429, "请求过于频繁，请稍后重试", "directHttp", "压缩 HTTP"],
-    [500, "服务暂时不可用，请稍后重试", "directHttp", "压缩 HTTP"],
-    [503, "服务暂时不可用，请稍后重试", "directHttp", "压缩 HTTP"],
-    [504, "请求超时，请稍后重试", "directHttp", "压缩 HTTP"],
+    [401, "认证失败", "hybridColdStartHttp", "首轮 HTTP"],
+    [403, "认证失败", "directHttp", "压缩 HTTP"],
+    [404, "地址不存在", "directHttp", "压缩 HTTP"],
+    [408, "请求超时", "directHttp", "压缩 HTTP"],
+    [413, "内容过大", "directHttp", "压缩 HTTP"],
+    [429, "请求过于频繁", "directHttp", "压缩 HTTP"],
+    [500, "服务不可用", "directHttp", "压缩 HTTP"],
+    [503, "服务不可用", "directHttp", "压缩 HTTP"],
+    [504, "请求超时", "directHttp", "压缩 HTTP"],
   ];
   const { requestStream } = await liveTailHarness({
     recentRequests: statuses.map(([status, , route], index) => ({
@@ -981,8 +986,68 @@ test("首批 HTTP 状态在请求列表中显示可执行的通用提示", async
 
   const rows = requestStream.innerHTML.match(/<tr\b.*?<\/tr>/g) ?? [];
   statuses.forEach(([, label, , transport], index) => {
-    assert.match(rows[index] ?? "", new RegExp(`${transport} · ${label}`));
+    assert.match(rows[index] ?? "", new RegExp(`${transport}.*${label}`));
+    assert.match(rows[index] ?? "", /<dt>异常<\/dt><dd>上游返回状态码/);
   });
+});
+
+test("认证失败列表只显示短标签，hover 保留上游原因且不归因本地密钥", async () => {
+  const { requestStream } = await liveTailHarness({
+    recentRequests: [{
+      id: 401,
+      timestampMs: 1_000,
+      status: 401,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "WS",
+      route: "hybridWs",
+      result: "error",
+      model: "gpt-5.3-codex",
+      sessionId: "会话 01",
+      connectionId: "连接 02",
+      sessionName: "代码审查",
+      failureReason: "token_invalidated: Your authentication token has been invalidated. Please try signing in again.",
+    }],
+  });
+  assert.match(requestStream.innerHTML, /Hybrid WS.*认证失败/);
+  assert.match(requestStream.innerHTML, /<dt>模型<\/dt><dd>gpt-5\.3-codex<\/dd>/);
+  assert.match(requestStream.innerHTML, /<dt>会话\/连接 ID<\/dt><dd>01 · 02<\/dd>/);
+  assert.match(requestStream.innerHTML, /<dt>会话名称<\/dt><dd>代码审查<\/dd>/);
+  assert.match(requestStream.innerHTML, /<dt>异常<\/dt><dd>上游返回状态码 401。<br>上游原因：token_invalidated: Your authentication token has been invalidated\. Please try signing in again\.<\/dd>/);
+  assert.doesNotMatch(requestStream.innerHTML, /检查 API 密钥/);
+});
+
+test("请求详情显示真实首字/耗时并诚实保留缺失占位符", async () => {
+  const { requestStream } = await liveTailHarness({
+    recentRequests: [{
+      id: 1,
+      timestampMs: 1_000,
+      status: 200,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "WS",
+      route: "hybridWs",
+      result: "success",
+      firstTokenMs: 420,
+      durationMs: 1_800,
+    }, {
+      id: 2,
+      timestampMs: 2_000,
+      status: 200,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "HTTP",
+      route: "directHttp",
+      result: "success",
+      durationMs: 1_800,
+    }] ,
+  });
+  const rows = requestStream.innerHTML.match(/<tr\b.*?<\/tr>/g) ?? [];
+  assert.match(rows[0] ?? "", /<dt>首字\/耗时<\/dt><dd>420 ms \/ 1\.8 s<\/dd>/);
+  assert.match(rows[1] ?? "", /<dt>首字\/耗时<\/dt><dd>— \/ 1\.8 s<\/dd>/);
 });
 
 test("网络异常 Hover 和键盘聚焦会把提示定位在视口内", async () => {
@@ -1006,6 +1071,24 @@ test("网络异常 Hover 和键盘聚焦会把提示定位在视口内", async (
     "--c-network-tooltip-left": "16px",
     "--c-network-tooltip-top": "635px",
   });
+});
+
+test("请求行本身是统一 hover/focus 详情入口", async () => {
+  const { requestStream } = await liveTailHarness({
+    recentRequests: [{
+      id: 1,
+      timestampMs: 1_000,
+      status: 200,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "WS",
+      route: "hybridWs",
+      result: "success",
+    }],
+  });
+  assert.match(requestStream.innerHTML, /<tr class="c-request-row"[^>]*tabindex="0" aria-describedby="request-detail-1"/);
+  assert.match(requestStream.innerHTML, /id="request-detail-1" role="tooltip"><strong>请求详情<\/strong>/);
 });
 
 test("状态读取失败时提供就地恢复和折叠技术详情", async () => {
@@ -2076,8 +2159,10 @@ test("仅真实发布排空的空闲 1012 显示发布重建", async () => {
 
   await live.tick();
 
-  assert.equal(live.requestStream.innerHTML.match(/Hybrid WS · 发布重建/gu)?.length, 1);
-  assert.equal(live.requestStream.innerHTML.match(/Hybrid WS · 连接恢复/gu)?.length, 1);
+  assert.equal(live.requestStream.innerHTML.match(/Hybrid WS.*发布重建/gu)?.length, 1);
+  assert.equal(live.requestStream.innerHTML.match(/Hybrid WS.*连接恢复/gu)?.length, 1);
+  assert.match(live.requestStream.innerHTML, /id="request-detail-2" role="tooltip"><strong>请求详情<\/strong>[\s\S]*<dt>异常<\/dt><dd>连接正在随版本发布重建。<br>详细原因：service restarting<\/dd>/);
+  assert.match(live.requestStream.innerHTML, /id="request-detail-3" role="tooltip"><strong>请求详情<\/strong>[\s\S]*<dt>异常<\/dt><dd>连接正在恢复。<br>详细原因：upstream requires HTTP replay<\/dd>/);
 });
 
 test("手动滚到底部或清空终端会恢复跟随", async () => {

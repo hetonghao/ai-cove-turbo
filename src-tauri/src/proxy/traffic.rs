@@ -37,6 +37,7 @@ pub(crate) enum TrafficRoute {
     HybridWs,
     HybridColdStartHttp,
     HybridRecoveryHttp,
+    HybridPolicyHttp,
     HybridLargeRequestHttp,
     DirectHttp,
 }
@@ -47,6 +48,7 @@ pub(crate) struct TrafficRouteCounts {
     pub(crate) hybrid_ws: u64,
     pub(crate) hybrid_cold_start_http: u64,
     pub(crate) hybrid_recovery_http: u64,
+    pub(crate) hybrid_policy_http: u64,
     pub(crate) hybrid_large_request_http: u64,
     pub(crate) direct_http: u64,
 }
@@ -57,6 +59,7 @@ impl TrafficRouteCounts {
             TrafficRoute::HybridWs => &mut self.hybrid_ws,
             TrafficRoute::HybridColdStartHttp => &mut self.hybrid_cold_start_http,
             TrafficRoute::HybridRecoveryHttp => &mut self.hybrid_recovery_http,
+            TrafficRoute::HybridPolicyHttp => &mut self.hybrid_policy_http,
             TrafficRoute::HybridLargeRequestHttp => &mut self.hybrid_large_request_http,
             TrafficRoute::DirectHttp => &mut self.direct_http,
         };
@@ -88,6 +91,10 @@ pub(crate) struct RequestEvent {
     failure_phase: Option<FailurePhase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_token_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -282,6 +289,15 @@ impl TrafficStore {
     }
 
     pub(crate) fn record(&self, record: TrafficRecord<'_>) {
+        self.record_with_timing(record, None, None);
+    }
+
+    pub(crate) fn record_with_timing(
+        &self,
+        record: TrafficRecord<'_>,
+        first_token_ms: Option<u64>,
+        duration_ms: Option<u64>,
+    ) {
         if record.failure_phase == Some(FailurePhase::HybridIdle) && record.status != 1012 {
             return;
         }
@@ -297,6 +313,8 @@ impl TrafficStore {
             route: record.route,
             failure_phase: record.failure_phase,
             failure_reason: record.failure_reason.map(str::to_owned),
+            first_token_ms,
+            duration_ms,
         };
         let mut state = lock(&self.state);
         state.next_id = state.next_id.saturating_add(1);

@@ -169,6 +169,7 @@ fn persisted_route_counts_round_trip() -> Result<(), Box<dyn Error>> {
         TrafficRoute::HybridWs,
         TrafficRoute::HybridColdStartHttp,
         TrafficRoute::HybridRecoveryHttp,
+        TrafficRoute::HybridPolicyHttp,
         TrafficRoute::HybridLargeRequestHttp,
         TrafficRoute::DirectHttp,
     ] {
@@ -186,6 +187,7 @@ fn persisted_route_counts_round_trip() -> Result<(), Box<dyn Error>> {
             hybrid_ws: 1,
             hybrid_cold_start_http: 1,
             hybrid_recovery_http: 1,
+            hybrid_policy_http: 1,
             hybrid_large_request_http: 1,
             direct_http: 1,
         }
@@ -246,6 +248,59 @@ fn persisted_traffic_keeps_websocket_failure_context() -> Result<(), Box<dyn Err
         event.get("failureReason"),
         Some(&serde_json::json!("restart"))
     );
+    Ok(())
+}
+
+#[test]
+fn persisted_traffic_keeps_optional_timing_measurements() -> Result<(), Box<dyn Error>> {
+    let store = TrafficStore::default();
+    store.record_with_timing(record(21_000, 100), Some(420), Some(1_800));
+
+    let event = serde_json::to_value(
+        store
+            .snapshot_at(21_000)
+            .recent_requests
+            .into_iter()
+            .next()
+            .ok_or("timed request missing")?,
+    )?;
+
+    assert_eq!(event.get("firstTokenMs"), Some(&serde_json::json!(420)));
+    assert_eq!(event.get("durationMs"), Some(&serde_json::json!(1_800)));
+    Ok(())
+}
+
+#[test]
+fn persisted_legacy_events_without_timing_remain_readable() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let path = root.path().join("traffic.jsonl");
+    let delta = serde_json::json!({
+        "latestTimestampMs": 21_000,
+        "nextId": 1,
+        "recentRequests": [{
+            "id": 1,
+            "timestampMs": 21_000,
+            "status": 200,
+            "path": "/v1/responses",
+            "rawBytes": 100,
+            "sentBytes": 50,
+            "transport": "HTTP",
+            "result": "success"
+        }],
+        "buckets": []
+    });
+    fs::write(&path, format!("{delta}\n"))?;
+
+    let event = serde_json::to_value(
+        TrafficStore::load_at(&path, 21_000)
+            .snapshot_at(21_000)
+            .recent_requests
+            .into_iter()
+            .next()
+            .ok_or("legacy event missing")?,
+    )?;
+    assert!(event.get("firstTokenMs").is_none());
+    assert!(event.get("durationMs").is_none());
     Ok(())
 }
 

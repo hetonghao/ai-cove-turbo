@@ -105,6 +105,9 @@ pub(super) async fn handle_worker_event(
                 .as_ref()
                 .is_some_and(|item| item.kind == ActiveKind::WebSocket);
             if from_websocket {
+                if session.websocket_first_token_at.is_none() && is_first_output_message(&message) {
+                    session.websocket_first_token_at = Some(std::time::Instant::now());
+                }
                 if let Some(active) = active.as_mut() {
                     active.output_forwarded = true;
                 }
@@ -116,6 +119,7 @@ pub(super) async fn handle_worker_event(
         }
         WorkerEvent::WebSocketSent(receipt) => {
             session.websocket_receipt = Some(receipt);
+            session.websocket_first_token_at = None;
             true
         }
         WorkerEvent::Terminal { lease, response_id } => {
@@ -213,11 +217,21 @@ pub(super) async fn retire_failed_websocket(
 
 fn record_websocket_outcome(session: &mut Session, status: u16, failure_reason: Option<&str>) {
     let receipt = session.websocket_receipt.take().unwrap_or_default();
+    let first_token_ms = session
+        .websocket_first_token_at
+        .take()
+        .zip(receipt.started_at)
+        .map(|(first_token_at, started_at)| {
+            super::super::timing::elapsed_ms(started_at, first_token_at)
+        });
+    let duration_ms = receipt
+        .started_at
+        .map(|started_at| super::super::timing::elapsed_ms(started_at, std::time::Instant::now()));
     let (result, failure_phase) = match failure_reason {
         Some(_) => (TrafficResult::Error, Some(FailurePhase::HybridActive)),
         None => (TrafficResult::Success, None),
     };
-    session.state.metrics.record_websocket_outcome(
+    session.state.metrics.record_websocket_outcome_with_timing(
         TrafficRecord {
             timestamp_ms: traffic::now_ms(),
             status,
@@ -231,5 +245,25 @@ fn record_websocket_outcome(session: &mut Session, status: u16, failure_reason: 
             failure_reason,
         },
         receipt.compressed,
+        first_token_ms,
+        duration_ms,
     );
+}
+
+fn is_first_output_message(message: &tokio_tungstenite::tungstenite::Message) -> bool {
+    let payload = match message {
+        tokio_tungstenite::tungstenite::Message::Text(text) => text.as_bytes(),
+        tokio_tungstenite::tungstenite::Message::Binary(payload) => payload.as_ref(),
+        tokio_tungstenite::tungstenite::Message::Ping(_)
+        | tokio_tungstenite::tungstenite::Message::Pong(_)
+        | tokio_tungstenite::tungstenite::Message::Close(_)
+        | tokio_tungstenite::tungstenite::Message::Frame(_) => return false,
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        return false;
+    };
+    value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(super::super::is_first_output_event_type)
 }

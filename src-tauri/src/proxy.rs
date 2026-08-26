@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -18,7 +18,6 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use futures_util::TryStreamExt;
 use http_body_util::Empty;
 use hyper_rustls::{ConfigBuilderExt, HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
@@ -42,6 +41,7 @@ mod private_websocket;
 #[cfg(test)]
 #[path = "proxy/private_websocket_benchmark.rs"]
 pub(crate) mod private_websocket_benchmark;
+mod timing;
 pub(crate) mod traffic;
 #[path = "transport_capability.rs"]
 mod transport_capability;
@@ -49,6 +49,7 @@ mod transport_capability;
 use compression::CompressionScheduler;
 pub(crate) use hybrid_pool::ConnectionSnapshot;
 use private_websocket::{PrivateTlsConfig, client_upgrade_response};
+use timing::{HttpTiming, HttpTimingInput, instrument_http_stream};
 
 #[cfg(test)]
 use private_websocket::encode_private_message_async;
@@ -80,6 +81,12 @@ const HOP_BY_HOP_HEADERS: [&str; 8] = [
     "trailer",
     "transfer-encoding",
     "upgrade",
+];
+const FIRST_OUTPUT_EVENT_TYPES: [&str; 4] = [
+    "response.output_text.delta",
+    "response.reasoning_summary_text.delta",
+    "response.function_call_arguments.delta",
+    "response.audio.delta",
 ];
 
 #[derive(Debug)]
@@ -153,6 +160,7 @@ pub(crate) struct MetricsSnapshot {
     pub(crate) hybrid_ws: u64,
     pub(crate) hybrid_cold_start_http: u64,
     pub(crate) hybrid_recovery_http: u64,
+    pub(crate) hybrid_policy_http: u64,
     pub(crate) hybrid_large_request_http: u64,
     pub(crate) direct_http: u64,
     pub(crate) compression_encode_count: u64,
@@ -181,6 +189,10 @@ struct HttpTraffic {
     route: traffic::TrafficRoute,
 }
 
+fn is_first_output_event_type(event_type: &str) -> bool {
+    FIRST_OUTPUT_EVENT_TYPES.contains(&event_type)
+}
+
 impl HttpTraffic {
     const DIRECT: Self = Self {
         result: traffic::TrafficResult::Success,
@@ -193,6 +205,10 @@ impl HttpTraffic {
     const HYBRID_RECOVERY: Self = Self {
         result: traffic::TrafficResult::Fallback,
         route: traffic::TrafficRoute::HybridRecoveryHttp,
+    };
+    const HYBRID_POLICY: Self = Self {
+        result: traffic::TrafficResult::Success,
+        route: traffic::TrafficRoute::HybridPolicyHttp,
     };
     const HYBRID_LARGE_REQUEST: Self = Self {
         result: traffic::TrafficResult::Success,
@@ -251,6 +267,7 @@ impl Metrics {
             hybrid_ws: route_counts.hybrid_ws,
             hybrid_cold_start_http: route_counts.hybrid_cold_start_http,
             hybrid_recovery_http: route_counts.hybrid_recovery_http,
+            hybrid_policy_http: route_counts.hybrid_policy_http,
             hybrid_large_request_http: route_counts.hybrid_large_request_http,
             direct_http: route_counts.direct_http,
             compression_encode_count: compression.encode_count,
@@ -262,7 +279,17 @@ impl Metrics {
         }
     }
 
+    #[cfg(test)]
     fn record_http(&self, record: HttpRequestMetric<'_>) {
+        self.record_http_with_timing(record, None, None);
+    }
+
+    fn record_http_with_timing(
+        &self,
+        record: HttpRequestMetric<'_>,
+        first_token_ms: Option<u64>,
+        duration_ms: Option<u64>,
+    ) {
         let result = if record.status >= 400 {
             traffic::TrafficResult::Error
         } else {
@@ -287,18 +314,23 @@ impl Metrics {
         if result == traffic::TrafficResult::Fallback {
             self.http_fallbacks.fetch_add(1, Ordering::Relaxed);
         }
-        self.traffic.record(traffic::TrafficRecord {
-            timestamp_ms: traffic::now_ms(),
-            status: record.status,
-            path: record.path,
-            raw_bytes: record.raw_bytes as u64,
-            sent_bytes: record.sent_bytes as u64,
-            transport: traffic::TrafficTransport::Http,
-            result,
-            route: Some(record.route),
-            failure_phase: hybrid_capacity_failure.then_some(traffic::FailurePhase::HybridActive),
-            failure_reason: record.failure_reason,
-        });
+        self.traffic.record_with_timing(
+            traffic::TrafficRecord {
+                timestamp_ms: traffic::now_ms(),
+                status: record.status,
+                path: record.path,
+                raw_bytes: record.raw_bytes as u64,
+                sent_bytes: record.sent_bytes as u64,
+                transport: traffic::TrafficTransport::Http,
+                result,
+                route: Some(record.route),
+                failure_phase: hybrid_capacity_failure
+                    .then_some(traffic::FailurePhase::HybridActive),
+                failure_reason: record.failure_reason,
+            },
+            first_token_ms,
+            duration_ms,
+        );
     }
 
     pub(crate) fn reset_compression_verification(&self) {
@@ -449,13 +481,33 @@ impl Metrics {
     }
 
     fn record_websocket_outcome(&self, record: traffic::TrafficRecord<'_>, compressed: bool) {
+        self.record_websocket_outcome_with_timing(record, compressed, None, None);
+    }
+
+    fn record_websocket_outcome_with_timing(
+        &self,
+        record: traffic::TrafficRecord<'_>,
+        compressed: bool,
+        first_token_ms: Option<u64>,
+        duration_ms: Option<u64>,
+    ) {
         if is_responses_path(record.path) && record.result == traffic::TrafficResult::Success {
             self.successful_responses.fetch_add(1, Ordering::Relaxed);
         }
-        self.record_websocket_message(record, compressed);
+        self.record_websocket_message_with_timing(record, compressed, first_token_ms, duration_ms);
     }
 
     fn record_websocket_message(&self, record: traffic::TrafficRecord<'_>, compressed: bool) {
+        self.record_websocket_message_with_timing(record, compressed, None, None);
+    }
+
+    fn record_websocket_message_with_timing(
+        &self,
+        record: traffic::TrafficRecord<'_>,
+        compressed: bool,
+        first_token_ms: Option<u64>,
+        duration_ms: Option<u64>,
+    ) {
         self.websocket_messages.fetch_add(1, Ordering::Relaxed);
         self.websocket_raw_bytes
             .fetch_add(record.raw_bytes, Ordering::Relaxed);
@@ -467,11 +519,27 @@ impl Metrics {
         if record.result == traffic::TrafficResult::Error {
             self.record_websocket_failure();
         }
-        self.record_websocket_traffic(record);
+        if first_token_ms.is_none() && duration_ms.is_none() {
+            self.record_websocket_traffic(record);
+        } else {
+            self.record_websocket_traffic_with_timing(record, first_token_ms, duration_ms);
+        }
     }
 
     fn record_websocket_traffic(&self, record: traffic::TrafficRecord<'_>) {
         self.traffic.record(record);
+        #[cfg(test)]
+        self.traffic_recorded.notify_one();
+    }
+
+    fn record_websocket_traffic_with_timing(
+        &self,
+        record: traffic::TrafficRecord<'_>,
+        first_token_ms: Option<u64>,
+        duration_ms: Option<u64>,
+    ) {
+        self.traffic
+            .record_with_timing(record, first_token_ms, duration_ms);
         #[cfg(test)]
         self.traffic_recorded.notify_one();
     }
@@ -818,25 +886,64 @@ async fn proxy_request(
     proxy_http(state, request, HttpTraffic::DIRECT).await
 }
 
+fn record_http_without_stream(
+    metrics: &Metrics,
+    started_at: Instant,
+    record: HttpRequestMetric<'_>,
+) {
+    metrics.record_http_with_timing(
+        record,
+        None,
+        Some(timing::elapsed_ms(started_at, Instant::now())),
+    );
+}
+
+fn copy_http_response_headers(response: &mut Response<Body>, headers: &HeaderMap) {
+    let hop_by_hop = hop_by_hop_headers(headers);
+    for (name, value) in headers {
+        if !hop_by_hop.contains(name) {
+            response.headers_mut().append(name, value.clone());
+        }
+    }
+}
+
+fn streaming_http_response(
+    upstream_response: reqwest::Response,
+    timing: HttpTiming,
+) -> Response<Body> {
+    let status = upstream_response.status();
+    let response_headers = upstream_response.headers().clone();
+    let stream = instrument_http_stream(upstream_response.bytes_stream(), timing);
+    let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = status;
+    copy_http_response_headers(&mut response, &response_headers);
+    response
+}
+
 async fn proxy_http(
     state: ProxyState,
     request: AxumRequest,
     traffic: HttpTraffic,
 ) -> Response<Body> {
+    let started_at = Instant::now();
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().to_owned();
     let raw_body = to_bytes(body, state.max_request_body_bytes).await;
     let Ok(raw_body) = raw_body else {
-        state.metrics.record_http(HttpRequestMetric {
-            path: &path,
-            status: StatusCode::PAYLOAD_TOO_LARGE.as_u16(),
-            raw_bytes: 0,
-            sent_bytes: 0,
-            compressed: false,
-            result: traffic.result,
-            route: traffic.route,
-            failure_reason: Some("local request body limit exceeded"),
-        });
+        record_http_without_stream(
+            &state.metrics,
+            started_at,
+            HttpRequestMetric {
+                path: &path,
+                status: StatusCode::PAYLOAD_TOO_LARGE.as_u16(),
+                raw_bytes: 0,
+                sent_bytes: 0,
+                compressed: false,
+                result: traffic.result,
+                route: traffic.route,
+                failure_reason: Some("local request body limit exceeded"),
+            },
+        );
         return json_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
     };
     let raw_len = raw_body.len();
@@ -850,16 +957,20 @@ async fn proxy_http(
             Ok(Some(compressed)) => (compressed, true),
             Ok(None) => (raw_body, false),
             Err(()) => {
-                state.metrics.record_http(HttpRequestMetric {
-                    path: &path,
-                    status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-                    raw_bytes: raw_len,
-                    sent_bytes: 0,
-                    compressed: false,
-                    result: traffic.result,
-                    route: traffic.route,
-                    failure_reason: None,
-                });
+                record_http_without_stream(
+                    &state.metrics,
+                    started_at,
+                    HttpRequestMetric {
+                        path: &path,
+                        status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                        raw_bytes: raw_len,
+                        sent_bytes: 0,
+                        compressed: false,
+                        result: traffic.result,
+                        route: traffic.route,
+                        failure_reason: None,
+                    },
+                );
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, "compression failed");
             }
         }
@@ -879,43 +990,36 @@ async fn proxy_http(
     }
     let sent_len = outbound_body.len();
     let Ok(upstream_response) = upstream_request.body(outbound_body).send().await else {
-        state.metrics.record_http(HttpRequestMetric {
-            path: &path,
-            status: StatusCode::BAD_GATEWAY.as_u16(),
-            raw_bytes: raw_len,
-            sent_bytes: sent_len,
-            compressed: false,
-            result: traffic.result,
-            route: traffic.route,
-            failure_reason: None,
-        });
+        record_http_without_stream(
+            &state.metrics,
+            started_at,
+            HttpRequestMetric {
+                path: &path,
+                status: StatusCode::BAD_GATEWAY.as_u16(),
+                raw_bytes: raw_len,
+                sent_bytes: sent_len,
+                compressed: false,
+                result: traffic.result,
+                route: traffic.route,
+                failure_reason: None,
+            },
+        );
         return json_error(StatusCode::BAD_GATEWAY, "upstream request failed");
     };
     let status = upstream_response.status();
-    state.metrics.record_http(HttpRequestMetric {
-        path: &path,
+    let timing = HttpTiming::new(HttpTimingInput {
+        metrics: Arc::clone(&state.metrics),
+        started_at,
+        path,
         status: status.as_u16(),
-        raw_bytes: raw_len,
-        sent_bytes: sent_len,
+        raw_bytes: u64::try_from(raw_len).unwrap_or(u64::MAX),
+        sent_bytes: u64::try_from(sent_len).unwrap_or(u64::MAX),
         compressed,
-        result: traffic.result,
-        route: traffic.route,
+        traffic,
         failure_reason: is_context_length_exceeded(status.as_u16())
-            .then_some("HTTP upstream returned status 413"),
+            .then_some("HTTP upstream returned status 413".to_owned()),
     });
-    let response_headers = upstream_response.headers().clone();
-    let response_hop_by_hop = hop_by_hop_headers(&response_headers);
-    let stream = upstream_response
-        .bytes_stream()
-        .map_err(std::io::Error::other);
-    let mut response = Response::new(Body::from_stream(stream));
-    *response.status_mut() = status;
-    for (name, value) in &response_headers {
-        if !response_hop_by_hop.contains(name) {
-            response.headers_mut().append(name, value.clone());
-        }
-    }
-    response
+    streaming_http_response(upstream_response, timing)
 }
 
 async fn proxy_websocket(state: ProxyState, request: &mut AxumRequest) -> Response<Body> {
@@ -1171,6 +1275,108 @@ mod tests {
     type CapturedPrivateMessages = (CapturedPrivateMessage, CapturedPrivateMessage);
 
     #[test]
+    fn http_timing_records_first_output_and_total_duration() -> Result<(), Box<dyn Error>> {
+        let metrics = Arc::new(Metrics::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 100,
+            sent_bytes: 50,
+            compressed: true,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+        });
+
+        timing.observe(
+            br#"data: {"type":"response.output_text.delta","delta":"hi"}
+
+"#,
+        );
+        timing.finish();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("timed HTTP event missing")?,
+        )?;
+        assert!(
+            event
+                .get("firstTokenMs")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
+        assert!(
+            event
+                .get("durationMs")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn http_timing_does_not_treat_non_responses_payloads_as_first_tokens() {
+        let metrics = Arc::new(Metrics::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/files".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+        });
+        timing.observe(br#"{"type":"response.output_text.delta"}"#);
+        timing.finish();
+
+        let event = metrics
+            .traffic_snapshot()
+            .recent_requests
+            .into_iter()
+            .next()
+            .expect("non-responses event missing");
+        let event = serde_json::to_value(event).expect("event must serialize");
+        assert!(event.get("firstTokenMs").is_none());
+        assert!(event.get("durationMs").is_some());
+    }
+
+    #[test]
+    fn http_timing_requires_a_complete_json_sse_event() {
+        let metrics = Arc::new(Metrics::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+        });
+        timing.observe(br#"data: {"type":"response.output_text.delta"}"#);
+        timing.finish();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .expect("response event missing"),
+        )
+        .expect("event must serialize");
+        assert!(event.get("firstTokenMs").is_none());
+    }
+
+    #[test]
     fn one_http_outcome_updates_atomic_event_and_persisted_route_once() -> Result<(), Box<dyn Error>>
     {
         // Given: one direct HTTP outcome and no route side-channel write.
@@ -1323,6 +1529,7 @@ mod tests {
         for (traffic, cold_start, recovery, fallbacks) in [
             (HttpTraffic::HYBRID_COLD_START, 1, 0, 0),
             (HttpTraffic::HYBRID_RECOVERY, 0, 1, 1),
+            (HttpTraffic::HYBRID_POLICY, 0, 0, 0),
         ] {
             // Given: one successful Hybrid HTTP outcome.
             let metrics = Metrics::default();
@@ -1639,7 +1846,11 @@ mod tests {
         let stream = futures_util::stream::unfold(0_u8, |state| async move {
             match state {
                 0 => Some((
-                    Ok::<Bytes, Infallible>(Bytes::from_static(b"data: first\n\n")),
+                    Ok::<Bytes, Infallible>(Bytes::from_static(
+                        br#"data: {"type":"response.output_text.delta","delta":"first"}
+
+"#,
+                    )),
                     1,
                 )),
                 1 => {
@@ -2121,12 +2332,13 @@ mod tests {
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
+        let metrics = Arc::new(Metrics::default());
         let proxy = start_proxy(ProxyOptions {
             upstream: Url::parse(&format!("http://{address}/v1"))?,
             compression_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             websocket_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             ai_cove_private_websocket_zstd: false,
-            metrics: Arc::new(Metrics::default()),
+            metrics: Arc::clone(&metrics),
             preferred_ports: vec![0],
             max_request_body_bytes: 1024,
         })
@@ -2140,7 +2352,35 @@ mod tests {
         let first = tokio::time::timeout(Duration::from_millis(100), stream.next())
             .await?
             .ok_or("missing first SSE chunk")??;
-        assert_eq!(first, "data: first\n\n");
+        assert_eq!(
+            first,
+            Bytes::from_static(
+                br#"data: {"type":"response.output_text.delta","delta":"first"}
+
+"#,
+            )
+        );
+        while stream.next().await.transpose()?.is_some() {}
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("timed streaming event missing")?,
+        )?;
+        assert!(
+            event
+                .get("firstTokenMs")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
+        assert!(
+            event
+                .get("durationMs")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|duration| duration >= 180)
+        );
 
         proxy.stop().await;
         task.abort();

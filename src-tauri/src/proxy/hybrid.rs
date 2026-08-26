@@ -123,6 +123,7 @@ struct WebSocketSendReceipt {
     raw_bytes: u64,
     sent_bytes: u64,
     compressed: bool,
+    started_at: Option<std::time::Instant>,
 }
 
 struct TransportFallback {

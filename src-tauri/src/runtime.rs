@@ -129,6 +129,7 @@ pub(crate) struct AppStatus {
     pub(crate) hybrid_ws: u64,
     pub(crate) hybrid_cold_start_http: u64,
     pub(crate) hybrid_recovery_http: u64,
+    pub(crate) hybrid_policy_http: u64,
     pub(crate) hybrid_large_request_http: u64,
     pub(crate) direct_http: u64,
     pub(crate) recent_requests: Vec<RequestEvent>,
@@ -185,6 +186,7 @@ impl AppStatus {
             hybrid_ws: 0,
             hybrid_cold_start_http: 0,
             hybrid_recovery_http: 0,
+            hybrid_policy_http: 0,
             hybrid_large_request_http: 0,
             direct_http: 0,
             recent_requests: Vec::new(),
@@ -464,6 +466,7 @@ impl AppRuntime {
         status.hybrid_ws = metrics.hybrid_ws;
         status.hybrid_cold_start_http = metrics.hybrid_cold_start_http;
         status.hybrid_recovery_http = metrics.hybrid_recovery_http;
+        status.hybrid_policy_http = metrics.hybrid_policy_http;
         status.hybrid_large_request_http = metrics.hybrid_large_request_http;
         status.direct_http = metrics.direct_http;
         let traffic = self.metrics.traffic_snapshot();

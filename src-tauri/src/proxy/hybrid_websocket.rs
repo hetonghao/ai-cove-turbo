@@ -1,4 +1,8 @@
-use std::{pin::Pin, sync::Arc, time::Duration};
+use std::{
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, Instant as StdInstant},
+};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
@@ -467,6 +471,7 @@ async fn send_private_application(
     payload: Vec<u8>,
     original_binary: bool,
 ) -> Result<WebSocketSendReceipt, SendFailure> {
+    let started_at = StdInstant::now();
     let raw_bytes = u64::try_from(payload.len()).map_err(|_| SendFailure::PayloadSize)?;
     let encoded = private_websocket::encode_private_message_async(payload, original_binary)
         .await
@@ -481,6 +486,7 @@ async fn send_private_application(
         raw_bytes,
         sent_bytes,
         compressed,
+        started_at: Some(started_at),
     })
 }
 
