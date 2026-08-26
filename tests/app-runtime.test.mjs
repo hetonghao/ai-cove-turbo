@@ -107,6 +107,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     get() { return catalogMarkup; },
     set(value) {
       catalogMarkup = value;
+      list.scrollTop = 0;
       domOrder = [...value.matchAll(/data-model-slug="([^"]+)"/g)].map(([, slug]) => slug);
       catalogRenders += 1;
     },
