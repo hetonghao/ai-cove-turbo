@@ -4363,16 +4363,18 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config [data-c
 
 body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-catalog {
   display: flex;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   flex-direction: column;
   gap: 0;
+  max-block-size: 100%;
   min-block-size: 0;
 }
 
 body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-catalog__list {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
+  block-size: fit-content;
   min-block-size: 0;
-  max-height: none;
+  max-block-size: calc(70px * 4 + 7px * 3 + 22px);
   align-content: start;
   overflow-x: hidden;
   overflow-y: auto;
@@ -4388,5 +4390,15 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
 @media (min-width: 721px) and (max-width: 900px) {
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row {
     min-block-size: 92px;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-catalog__list {
+    max-block-size: calc(92px * 4 + 7px * 3 + 22px);
+  }
+}
+
+@media (max-width: 720px) {
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-catalog__list {
+    max-block-size: calc(97px * 8 + 7px * 7 + 22px);
   }
 }
