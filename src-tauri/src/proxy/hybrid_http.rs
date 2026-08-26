@@ -97,6 +97,7 @@ async fn run_http_worker(
             chunk = body.next() => {
                 let Some(chunk) = chunk else {
                     if send_finished_sse_events(&mut parser, &events).await.is_ok_and(|terminal| terminal) {
+                        control.complete();
                         return;
                     }
                     control.fail_stream();

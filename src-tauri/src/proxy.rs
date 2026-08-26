@@ -1495,6 +1495,39 @@ mod tests {
     }
 
     #[test]
+    fn controlled_http_timing_records_terminal_at_stream_end() -> Result<(), Box<dyn Error>> {
+        let metrics = Arc::new(Metrics::default());
+        let control = Arc::new(HttpTimingControl::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+            control: Some(Arc::clone(&control)),
+        });
+        control.complete();
+        timing.finish_stream_end();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("controlled terminal event missing")?,
+        )?;
+        assert_eq!(event.get("status"), Some(&serde_json::json!(200)));
+        assert_eq!(event.get("result"), Some(&serde_json::json!("success")));
+        assert!(event.get("durationMs").is_some());
+        Ok(())
+    }
+
+    #[test]
     fn direct_http_timing_records_incomplete_sse_as_error() -> Result<(), Box<dyn Error>> {
         let metrics = Arc::new(Metrics::default());
         let mut timing = HttpTiming::new(HttpTimingInput {
