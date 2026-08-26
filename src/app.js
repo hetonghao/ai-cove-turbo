@@ -810,7 +810,9 @@
     const markup = modelCatalogMarkup();
     if (!force && (draggedCatalogSlug || draggedCatalogTargetSlug || list.contains?.(document.activeElement))) return;
     if (markup === renderedModelCatalogMarkup) return;
+    const scrollTop = Number(list.scrollTop) || 0;
     list.innerHTML = markup;
+    list.scrollTop = scrollTop;
     renderedModelCatalogMarkup = markup;
   }
 

@@ -82,6 +82,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
   };
   const info = element({ modelCatalogInfo: "" });
   const list = element({ modelCatalogList: "" });
+  list.scrollTop = 0;
   let domOrder = [];
   const domRows = new Map();
   const domRow = (slug) => {
@@ -244,6 +245,11 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
       await tick?.();
       await new Promise((resolve) => setImmediate(resolve));
     },
+    setCatalogModels(models) {
+      status.catalog = { ...status.catalog, models };
+    },
+    setScrollTop(value) { list.scrollTop = value; },
+    scrollTop() { return list.scrollTop; },
   };
 }
 
@@ -323,6 +329,21 @@ test("状态轮询不重建模型目录控件或覆盖未保存编辑", async ()
 
   const policySave = harness.calls.find((call) => call.command === "update_model_policy");
   assert.equal(policySave.args.update.models.alpha, "http");
+});
+
+test("目录状态变化重建列表后保留用户滚动位置", async () => {
+  const harness = await catalogHarness({ freshStatus: true });
+  harness.setScrollTop(120);
+  harness.setCatalogModels([
+    { slug: "alpha", displayName: "Alpha", description: "a", visibility: "list", priority: 1 },
+    { slug: "beta", displayName: "Beta", description: "updated", visibility: "hide", priority: 2 },
+    { slug: "gamma", displayName: "Gamma", description: "new", visibility: "list", priority: 3 },
+  ]);
+
+  await harness.tick();
+
+  assert.equal(harness.scrollTop(), 120);
+  assert.match(harness.list.innerHTML, /data-model-slug="gamma"/);
 });
 
 test("拖拽源卡片内凹、目标高亮并在松手后替换模型目录位置", async () => {
