@@ -71,6 +71,7 @@ enum BinaryOutcome {
     Failure(Box<WorkerEvent>),
     Stop,
     Terminal(Option<String>),
+    Cancelled,
 }
 
 enum SendFailure {
@@ -143,6 +144,14 @@ async fn run_websocket_loop(
                         BinaryOutcome::Stop => return,
                         BinaryOutcome::Terminal(response_id) => {
                             let _ = events.send(WorkerEvent::Terminal { lease: Some(Box::new(lease)), response_id }).await;
+                            return;
+                        }
+                        BinaryOutcome::Cancelled => {
+                            let _ = events
+                                .send(WorkerEvent::Cancelled {
+                                    lease: Some(Box::new(lease)),
+                                })
+                                .await;
                             return;
                         }
                     },
@@ -325,6 +334,12 @@ async fn handle_binary_response(
         return BinaryOutcome::Stop;
     };
     let terminal = is_terminal_event(&decoded.payload);
+    let cancelled_terminal = event_type(&decoded.payload).is_ok_and(|event_type| {
+        matches!(
+            event_type.as_str(),
+            "response.cancelled" | "response.canceled"
+        )
+    });
     let failed_terminal =
         event_type(&decoded.payload).is_ok_and(|event_type| event_type == "error");
     let transport_fallback = failed_terminal && is_http_transport_fallback(&decoded.payload);
@@ -365,6 +380,9 @@ async fn handle_binary_response(
             code,
             reason,
         }));
+    }
+    if cancelled_terminal {
+        return BinaryOutcome::Cancelled;
     }
     if events.send(WorkerEvent::Message(message)).await.is_err() {
         context.metrics.record_websocket_closed();

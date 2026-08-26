@@ -1,7 +1,7 @@
 use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
-use super::super::hybrid_pool::LeaseRetirement;
+use super::super::hybrid_pool::{Lease, LeaseRetirement};
 use super::common::{close_client, event_type, reject_thread_switch, send_error};
 use super::sse::http_request_payload;
 use super::{Active, ActiveKind, ClientWebSocket, Session, WorkerCommand, WorkerEvent};
@@ -175,16 +175,8 @@ pub(super) async fn handle_worker_event(
                 super::transport_fallback::Action::Stop => false,
             }
         }
-        WorkerEvent::Cancelled => {
-            active.take();
-            let message = serde_json::json!({
-                "type": "response.cancelled",
-                "response": {"status": "cancelled"},
-            });
-            client
-                .send(Message::Text(message.to_string().into()))
-                .await
-                .is_ok()
+        WorkerEvent::Cancelled { lease } => {
+            handle_cancelled_event(client, session, active, lease).await
         }
         WorkerEvent::Error { code, message } => {
             retire_failed_websocket(session, active, code, &message).await;
@@ -193,6 +185,32 @@ pub(super) async fn handle_worker_event(
             false
         }
     }
+}
+
+async fn handle_cancelled_event(
+    client: &mut ClientWebSocket,
+    session: &mut Session,
+    active: &mut Option<Active>,
+    lease: Option<Box<Lease>>,
+) -> bool {
+    let was_websocket = active
+        .take()
+        .is_some_and(|item| item.kind == ActiveKind::WebSocket);
+    if was_websocket {
+        record_websocket_outcome(session, 499, Some("request cancelled by client"));
+    }
+    session.ready = lease.map(|lease| *lease);
+    if session.ready.is_some() {
+        session.observe_idle().await;
+    }
+    let message = serde_json::json!({
+        "type": "response.cancelled",
+        "response": {"status": "cancelled"},
+    });
+    client
+        .send(Message::Text(message.to_string().into()))
+        .await
+        .is_ok()
 }
 
 pub(super) async fn retire_failed_websocket(

@@ -49,7 +49,7 @@ mod transport_capability;
 use compression::CompressionScheduler;
 pub(crate) use hybrid_pool::ConnectionSnapshot;
 use private_websocket::{PrivateTlsConfig, client_upgrade_response};
-use timing::{HttpTiming, HttpTimingInput, instrument_http_stream};
+use timing::{HttpTiming, HttpTimingControl, HttpTimingInput, instrument_http_stream};
 
 #[cfg(test)]
 use private_websocket::encode_private_message_async;
@@ -925,6 +925,15 @@ async fn proxy_http(
     request: AxumRequest,
     traffic: HttpTraffic,
 ) -> Response<Body> {
+    proxy_http_with_control(state, request, traffic, None).await
+}
+
+async fn proxy_http_with_control(
+    state: ProxyState,
+    request: AxumRequest,
+    traffic: HttpTraffic,
+    control: Option<Arc<HttpTimingControl>>,
+) -> Response<Body> {
     let started_at = Instant::now();
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().to_owned();
@@ -1018,6 +1027,7 @@ async fn proxy_http(
         traffic,
         failure_reason: is_context_length_exceeded(status.as_u16())
             .then_some("HTTP upstream returned status 413".to_owned()),
+        control,
     });
     streaming_http_response(upstream_response, timing)
 }
@@ -1287,6 +1297,7 @@ mod tests {
             compressed: true,
             traffic: HttpTraffic::DIRECT,
             failure_reason: None,
+            control: None,
         });
 
         timing.observe(
@@ -1332,6 +1343,7 @@ mod tests {
             compressed: false,
             traffic: HttpTraffic::DIRECT,
             failure_reason: None,
+            control: None,
         });
         timing.observe(br#"{"type":"response.output_text.delta"}"#);
         timing.finish();
@@ -1360,6 +1372,7 @@ mod tests {
             compressed: false,
             traffic: HttpTraffic::DIRECT,
             failure_reason: None,
+            control: None,
         });
         timing.observe(br#"data: {"type":"response.output_text.delta"}"#);
         timing.finish();
@@ -1374,6 +1387,113 @@ mod tests {
         )
         .expect("event must serialize");
         assert!(event.get("firstTokenMs").is_none());
+    }
+
+    #[test]
+    fn http_timing_records_stream_failure_with_error_status() -> Result<(), Box<dyn Error>> {
+        let metrics = Arc::new(Metrics::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+            control: None,
+        });
+        timing.finish_stream_error();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("stream failure event missing")?,
+        )?;
+        assert_eq!(event.get("status"), Some(&serde_json::json!(502)));
+        assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
+        assert!(event.get("durationMs").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_http_timing_records_incomplete_stream_as_error() -> Result<(), Box<dyn Error>> {
+        let metrics = Arc::new(Metrics::default());
+        let control = Arc::new(HttpTimingControl::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+            control: Some(control),
+        });
+        timing.finish_stream_end();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("incomplete stream event missing")?,
+        )?;
+        assert_eq!(event.get("status"), Some(&serde_json::json!(502)));
+        assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
+        assert_eq!(
+            event.get("failureReason"),
+            Some(&serde_json::json!(
+                "HTTP stream ended before terminal response event"
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_http_timing_records_cancellation_once() -> Result<(), Box<dyn Error>> {
+        let metrics = Arc::new(Metrics::default());
+        let control = Arc::new(HttpTimingControl::default());
+        let mut timing = HttpTiming::new(HttpTimingInput {
+            metrics: Arc::clone(&metrics),
+            started_at: Instant::now(),
+            path: "/v1/responses".to_owned(),
+            status: StatusCode::OK.as_u16(),
+            raw_bytes: 10,
+            sent_bytes: 10,
+            compressed: false,
+            traffic: HttpTraffic::DIRECT,
+            failure_reason: None,
+            control: Some(Arc::clone(&control)),
+        });
+        control.cancel();
+        timing.finish();
+        timing.finish();
+
+        let event = serde_json::to_value(
+            metrics
+                .traffic_snapshot()
+                .recent_requests
+                .into_iter()
+                .next()
+                .ok_or("cancellation event missing")?,
+        )?;
+        assert_eq!(event.get("status"), Some(&serde_json::json!(499)));
+        assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
+        assert_eq!(
+            event.get("failureReason"),
+            Some(&serde_json::json!("request cancelled by client"))
+        );
+        assert!(event.get("durationMs").is_some());
+        assert_eq!(metrics.traffic_snapshot().recent_requests.len(), 1);
+        Ok(())
     }
 
     #[test]

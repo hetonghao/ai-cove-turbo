@@ -1107,7 +1107,7 @@ async fn cancelled_terminal_reuses_the_same_healthy_websocket() -> io::Result<()
         delay_http: false,
     })
     .await?;
-    let (proxy, _) = start_test_proxy(&server).await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
     send_create(&mut client).await?;
@@ -1121,6 +1121,14 @@ async fn cancelled_terminal_reuses_the_same_healthy_websocket() -> io::Result<()
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     server.fixture.wait_messages(2).await?;
     assert_counts_with_min_private(server.fixture.counts().await, 1, 2, 1);
+    let cancelled = metrics
+        .traffic_snapshot()
+        .recent_requests
+        .into_iter()
+        .filter_map(|request| serde_json::to_value(request).ok())
+        .find(|request| request.get("status") == Some(&serde_json::json!(499)))
+        .ok_or_else(|| io::Error::other("cancelled WebSocket request was not persisted"))?;
+    assert!(cancelled.get("durationMs").is_some());
 
     drop(client);
     proxy.stop().await;

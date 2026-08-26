@@ -22,6 +22,7 @@
   const HTTP_DEGRADATION_MIN_REQUESTS = 5;
   const NETWORK_ERROR_MESSAGE = "请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。\n请尝试切换手机热点排查，如果无法定位请联管理员。";
   const REQUEST_FAILURE_LABELS = Object.freeze({
+    499: "请求已取消",
     401: "认证失败",
     403: "认证失败",
     404: "地址不存在",

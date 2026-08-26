@@ -175,7 +175,7 @@ async fn cancelled_response_allows_next_serial_create() -> io::Result<()> {
         delay_http: true,
     })
     .await?;
-    let (proxy, _) = start_test_proxy(&server).await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
     send_create(&mut client).await?;
@@ -194,6 +194,14 @@ async fn cancelled_response_allows_next_serial_create() -> io::Result<()> {
     // Then: the next serial request completes once without replaying either request.
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     assert_counts(server.fixture.counts().await, 6, 0, 2);
+    let cancelled = metrics
+        .traffic_snapshot()
+        .recent_requests
+        .into_iter()
+        .filter_map(|request| serde_json::to_value(request).ok())
+        .find(|request| request.get("status") == Some(&serde_json::json!(499)))
+        .ok_or_else(|| io::Error::other("cancelled HTTP request was not persisted"))?;
+    assert!(cancelled.get("durationMs").is_some());
 
     drop(client);
     for _ in 0..6 {

@@ -1,3 +1,5 @@
+use std::{sync::Arc, time::Instant};
+
 use axum::{
     body::Body,
     extract::Request as AxumRequest,
@@ -6,22 +8,28 @@ use axum::{
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
+use super::super::timing::HttpTimingControl;
 use super::{
     Active, WorkerCommand, WorkerEvent,
     common::{context_length_exceeded_message, text_message},
     sse::{SseParser, is_terminal_event},
 };
-use crate::proxy::{HttpTraffic, ProxyState};
+use crate::proxy::{HttpRequestMetric, HttpTraffic, ProxyState};
 
 pub(super) fn start_http_worker(
     session: &super::Session,
     payload: Vec<u8>,
     traffic: HttpTraffic,
 ) -> Active {
+    let raw_bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
     let (command_tx, command_rx) = mpsc::channel(8);
     let (event_tx, event_rx) = mpsc::channel(8);
     let context = WorkerContext {
         state: session.state.clone(),
+        control: Arc::new(HttpTimingControl::default()),
+        path: session.path.clone(),
+        started_at: Instant::now(),
+        raw_bytes,
         request: build_http_request(
             session.client_headers.clone(),
             session.request_uri.clone(),
@@ -43,6 +51,10 @@ pub(super) fn start_http_worker(
 
 struct WorkerContext {
     state: ProxyState,
+    control: Arc<HttpTimingControl>,
+    path: String,
+    started_at: Instant,
+    raw_bytes: u64,
     request: AxumRequest,
     traffic: HttpTraffic,
 }
@@ -52,23 +64,9 @@ async fn run_http_worker(
     mut commands: mpsc::Receiver<WorkerCommand>,
     events: mpsc::Sender<WorkerEvent>,
 ) {
-    let request_future = super::super::proxy_http(context.state, context.request, context.traffic);
-    tokio::pin!(request_future);
-    let response = loop {
-        tokio::select! {
-            biased;
-            response = &mut request_future => break response,
-            command = commands.recv() => {
-                match command {
-                    Some(WorkerCommand::Cancel(_)) => {
-                        let _ = events.send(WorkerEvent::Cancelled).await;
-                        return;
-                    }
-                    None => return,
-                    Some(WorkerCommand::Forward(_, _)) => {}
-                }
-            }
-        }
+    let control = Arc::clone(&context.control);
+    let Some(response) = wait_for_http_response(context, &mut commands, &events).await else {
+        return;
     };
     if !response.status().is_success() {
         let status = response.status().as_u16();
@@ -100,6 +98,7 @@ async fn run_http_worker(
                     if send_finished_sse_events(&mut parser, &events).await.is_ok_and(|terminal| terminal) {
                         return;
                     }
+                    control.fail_stream();
                     let _ = events.send(WorkerEvent::Error {
                         code: 1011,
                         message: "HTTP stream ended before terminal response event".to_owned(),
@@ -115,14 +114,19 @@ async fn run_http_worker(
                 };
                 parser.push(&chunk);
                 match send_sse_events(&mut parser, &events).await {
-                    Ok(true) | Err(()) => return,
+                    Ok(true) => return,
+                    Err(()) => {
+                        control.fail_stream();
+                        return;
+                    }
                     Ok(false) => {}
                 }
             }
             command = commands.recv() => {
                 match command {
                     Some(WorkerCommand::Cancel(_)) => {
-                        let _ = events.send(WorkerEvent::Cancelled).await;
+                        control.cancel();
+                        let _ = events.send(WorkerEvent::Cancelled { lease: None }).await;
                         return;
                     }
                     None => return,
@@ -131,6 +135,80 @@ async fn run_http_worker(
             }
         }
     }
+}
+
+async fn wait_for_http_response(
+    context: WorkerContext,
+    commands: &mut mpsc::Receiver<WorkerCommand>,
+    events: &mpsc::Sender<WorkerEvent>,
+) -> Option<axum::http::Response<Body>> {
+    let state = context.state.clone();
+    let control = Arc::clone(&context.control);
+    let path = context.path.clone();
+    let started_at = context.started_at;
+    let raw_bytes = context.raw_bytes;
+    let traffic = context.traffic;
+    let request = context.request;
+    let request_future = super::super::proxy_http_with_control(
+        state.clone(),
+        request,
+        traffic,
+        Some(Arc::clone(&control)),
+    );
+    tokio::pin!(request_future);
+    let response = loop {
+        tokio::select! {
+            biased;
+            response = &mut request_future => break response,
+            command = commands.recv() => {
+                match command {
+                    Some(WorkerCommand::Cancel(_)) => {
+                        record_cancelled_before_response(
+                            &state,
+                            &control,
+                            &path,
+                            started_at,
+                            raw_bytes,
+                            traffic,
+                        );
+                        let _ = events.send(WorkerEvent::Cancelled { lease: None }).await;
+                        return None;
+                    }
+                    None => return None,
+                    Some(WorkerCommand::Forward(_, _)) => {}
+                }
+            }
+        }
+    };
+    Some(response)
+}
+
+fn record_cancelled_before_response(
+    state: &ProxyState,
+    control: &HttpTimingControl,
+    path: &str,
+    started_at: Instant,
+    raw_bytes: u64,
+    traffic: HttpTraffic,
+) {
+    control.cancel();
+    if !control.claim_recording() {
+        return;
+    }
+    state.metrics.record_http_with_timing(
+        HttpRequestMetric {
+            path,
+            status: 499,
+            raw_bytes: usize::try_from(raw_bytes).unwrap_or(usize::MAX),
+            sent_bytes: 0,
+            compressed: false,
+            result: super::super::traffic::TrafficResult::Error,
+            route: traffic.route,
+            failure_reason: Some("request cancelled by client"),
+        },
+        None,
+        Some(super::super::timing::elapsed_ms(started_at, Instant::now())),
+    );
 }
 
 pub(super) fn build_http_request(headers: HeaderMap, uri: Uri, payload: Vec<u8>) -> AxumRequest {

@@ -150,7 +150,9 @@ enum WorkerEvent {
         reason: String,
     },
     TransportFallback(TransportFallback),
-    Cancelled,
+    Cancelled {
+        lease: Option<Box<Lease>>,
+    },
     Error {
         code: u16,
         message: String,
