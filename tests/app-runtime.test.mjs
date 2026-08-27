@@ -1198,12 +1198,9 @@ test("请求详情 hover 时移出滚动容器并使用可见状态", async () =
   });
 });
 
-test("已打开详情在异步会话信息到达后更新内容", async () => {
-  let resolveThreadInfo;
-  const threadInfoPromise = new Promise((resolve) => { resolveThreadInfo = resolve; });
+test("已打开详情只通过状态轮询更新会话名称", async () => {
   const live = await liveTailHarness({
     enableTooltipRefresh: true,
-    threadInfoPromise,
     recentRequests: [{
       id: 1,
       timestampMs: 1_000,
@@ -1216,10 +1213,12 @@ test("已打开详情在异步会话信息到达后更新内容", async () => {
       result: "success",
       threadId: "thread-1",
     }],
+    sessionNames: { "thread-1": null },
   });
 
   live.hoverFirstDetail();
-  resolveThreadInfo({ name: "代码审查" });
+  live.setSessionNames({ "thread-1": { name: "代码审查" } });
+  await live.tick();
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.match(live.tooltipHtml(), /<dt>会话名称<\/dt><dd>代码审查<\/dd>/);
@@ -1493,12 +1492,6 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
     ['[data-action="toggle-connections"]', summaryTrigger],
   ]);
   const invoked = [];
-  const infoCalls = [];
-  const threadInfos = {
-    "thread-12345678-alpha": { name: "Nash", parentName: "Turbo 主会话", isSubagent: true },
-    "thread-12345678-beta": { name: "", parentName: null, isSubagent: false },
-    "thread-released": { name: "已结束会话", parentName: null, isSubagent: false },
-  };
   const snapshot = {
     currentConnections: 10,
     prewarm: 2,
@@ -1521,6 +1514,11 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
       { id: "C003", threadId: "thread-released", connectionId: "S009", reason: "Codex 线程结束", agoSeconds: 3, normal: true },
     ],
   };
+  const sessionNames = {
+    "thread-12345678-alpha": { name: "Nash", parentName: "Turbo 主会话", isSubagent: true },
+    "thread-12345678-beta": null,
+    "thread-released": { name: "已结束会话", parentName: null, isSubagent: false },
+  };
   let onClick;
   let onKeydown;
   let onTick;
@@ -1540,15 +1538,11 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
     },
   };
   const window = {
-    __TAURI__: { core: { invoke: async (command, args) => {
-      if (command === "get_codex_thread_info") {
-        infoCalls.push(args.threadId);
-        return threadInfos[args.threadId] ?? null;
-      }
+    __TAURI__: { core: { invoke: async (command) => {
       invoked.push(command);
       return command === "get_connection_snapshot"
         ? snapshot
-        : { serviceHealthy: true, configState: "managed", trafficWindows: [], recentRequests: [] };
+        : { serviceHealthy: true, configState: "managed", trafficWindows: [], recentRequests: [], sessionNames };
     } } },
     location: { href: "tauri://localhost/?tab=live" },
     history: { replaceState() {} },
@@ -1756,11 +1750,9 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.match(closed.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?c-session-icon" data-connection-state="bound"/);
 
   transitionDetails[0].open = true;
-  const infoCallCount = infoCalls.length;
   await onTick();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(invoked.slice(-2), ["get_app_status", "get_connection_snapshot"]);
-  assert.equal(infoCalls.length, infoCallCount);
   assert.equal(transitionDetails[0].dataset.transitionId, "T003");
   assert.equal(transitionDetails[0].open, true);
 

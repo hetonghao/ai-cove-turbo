@@ -42,15 +42,10 @@ const TRAFFIC_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 const TRAFFIC_COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 fn codex_database_path(config_path: &Path) -> PathBuf {
-    let codex_home = std::env::var_os("CODEX_HOME").map_or_else(
-        || {
-            config_path
-                .parent()
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
-        },
-        PathBuf::from,
-    );
-    codex_home.join("state_5.sqlite")
+    config_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+        .join("state_5.sqlite")
 }
 
 #[derive(Clone, Debug)]

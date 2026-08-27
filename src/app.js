@@ -222,7 +222,6 @@
   const sessionNumbers = new Map();
   const connectionNumbers = new Map();
   const sessionInfos = new Map();
-  const sessionInfoRequests = new Set();
   const closedSessionLayouts = new Map();
 
   const actions = {
@@ -877,7 +876,6 @@
     renderControls();
     renderConfigView();
     renderModelCatalog();
-    requestSessionInfos({ boundThreads: [], transitions: [] }, []);
     if (state.tab === "live" && statusHydrated) renderLiveStream(options);
     if (state.tab === "statistics") renderStatistics();
   }
@@ -1083,7 +1081,6 @@
 
   function sessionTitle(threadId) {
     if (!invoke) return "Preview 会话";
-    if (!sessionInfos.has(threadId)) return "读取中…";
     return sessionInfos.get(threadId)?.name || "-";
   }
 
@@ -1106,6 +1103,10 @@
 
   function applySessionNames(sessionNames) {
     if (!sessionNames || typeof sessionNames !== "object") return;
+    const receivedThreadIds = new Set(Object.keys(sessionNames));
+    for (const threadId of sessionInfos.keys()) {
+      if (!receivedThreadIds.has(threadId)) sessionInfos.delete(threadId);
+    }
     Object.entries(sessionNames).forEach(([threadId, value]) => {
       const next = normalizeSessionInfo(value);
       const previous = sessionInfos.get(threadId);
@@ -1113,29 +1114,6 @@
       sessionInfos.set(threadId, next);
       if (connectionPanelOpen) renderConnectionInspector();
       refreshRequestDetailRows(threadId);
-    });
-  }
-
-  function requestSessionInfos(snapshot, recentClosed) {
-    if (!invoke) return;
-    const items = [...snapshot.boundThreads, ...snapshot.transitions, ...recentClosed, ...(state.recentRequests || [])];
-    new Set(items.map(connectionThreadId).filter(Boolean)).forEach((threadId) => {
-      if (Object.hasOwn(state.sessionNames || {}, threadId)) {
-        applySessionNames({ [threadId]: state.sessionNames[threadId] });
-        return;
-      }
-      if (sessionInfoRequests.has(threadId)) return;
-      sessionInfoRequests.add(threadId);
-      void invoke("get_codex_thread_info", { threadId })
-        .then((info) => {
-          sessionInfos.set(threadId, normalizeSessionInfo(info));
-          if (connectionPanelOpen) renderConnectionInspector();
-          refreshRequestDetailRows(threadId);
-        })
-        .catch(() => {
-          sessionInfos.set(threadId, null);
-          refreshRequestDetailRows(threadId);
-        });
     });
   }
 
@@ -1344,7 +1322,6 @@
     const snapshot = normalizeConnectionSnapshot(connectionSnapshot);
     const recentClosed = snapshot.recentClosed.slice(0, RECENT_CLOSED_LIMIT);
     reconcileConnectionNumbers(snapshot, recentClosed);
-    requestSessionInfos(snapshot, recentClosed);
     const activityCounts = snapshot.boundThreads.reduce((counts, item) => {
       const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
       counts[activity] += 1;
