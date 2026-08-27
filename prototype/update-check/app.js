@@ -135,6 +135,7 @@
     const currentDay = dayKey();
     const labels = { idle: "等待检查", checking: "检查中", available: "发现新版本", ignored: "已忽略", current: "已是最新", redirecting: "正在跳转", installing: "安装中", updated: "已完成" };
     const stateLabel = labels[state.updateState] || state.updateState;
+    document.body.dataset.bubbleOpen = String(state.bubbleOpen);
     $("[data-hero-status]").textContent = state.updateState === "available" ? `v${latestVersion} 可更新` : stateLabel;
     $("[data-status-dot]").dataset.state = state.updateState;
     $("[data-route-label]").textContent = state.route === "update-page" ? "已跳转到现有更新页" : "已返回现有配置页";
