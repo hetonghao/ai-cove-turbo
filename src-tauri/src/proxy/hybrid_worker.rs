@@ -182,7 +182,6 @@ pub(super) async fn handle_worker_event(
             handle_cancelled_event(client, session, active, lease).await
         }
         WorkerEvent::Error { code, message } => {
-            mark_websocket_first_frame(session, active.as_ref());
             retire_failed_websocket(session, active, code, &message).await;
             let _ = send_error(client, "server_error", &message).await;
             let _ = close_client(client, code, &message).await;

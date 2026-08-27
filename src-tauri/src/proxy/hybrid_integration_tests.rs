@@ -854,7 +854,7 @@ async fn active_ws_failure_closes_client_without_replay() -> io::Result<()> {
             (event.get("route") == Some(&Value::from("hybridWs"))).then_some(event)
         })
         .ok_or_else(|| io::Error::other("active failure traffic event missing"))?;
-    assert!(event.get("firstFrameMs").is_some());
+    assert!(event.get("firstFrameMs").is_none());
     drop(client);
     proxy.stop().await;
     server.stop().await;
