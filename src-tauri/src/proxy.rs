@@ -826,6 +826,7 @@ struct ProxyState {
     max_request_body_bytes: usize,
     model_policy: Arc<model_policy::ModelPolicyStore>,
     capability_cache: Arc<transport_capability::CapabilityCache>,
+    capability_headers: HeaderMap,
 }
 
 type WebSocketClient = Client<HttpsConnector<HttpConnector>, Empty<Bytes>>;
@@ -865,6 +866,21 @@ pub(crate) async fn start_proxy_with_policy(
             .unwrap_or_else(|| std::path::PathBuf::from("ai_cove_turbo_model_policy.json")),
     ));
     let capability_cache = Arc::new(transport_capability::CapabilityCache::default());
+    let startup_auth_headers = if options.ai_cove_private_websocket_zstd {
+        codex_auth::effective_auth_headers(codex_config_path.as_deref()).map(|mut headers| {
+            headers.insert(
+                HeaderName::from_static("x-ai-cove-client"),
+                header::HeaderValue::from_static("turbo"),
+            );
+            headers.insert(
+                HeaderName::from_static("x-ai-cove-client-version"),
+                header::HeaderValue::from_static(turbo_client_version()),
+            );
+            headers
+        })
+    } else {
+        None
+    };
     let state = ProxyState {
         upstream: options.upstream,
         compression_enabled: options.compression_enabled,
@@ -884,20 +900,13 @@ pub(crate) async fn start_proxy_with_policy(
         },
         model_policy: Arc::clone(&model_policy),
         capability_cache: Arc::clone(&capability_cache),
+        capability_headers: startup_auth_headers.clone().unwrap_or_default(),
     };
     let bootstrap = if enable_bootstrap_prewarm
         && state.ai_cove_private_websocket_zstd
         && state.websocket_enabled.load(Ordering::Relaxed)
     {
-        codex_auth::effective_auth_headers(codex_config_path.as_deref()).map(|mut headers| {
-            headers.insert(
-                HeaderName::from_static("x-ai-cove-client"),
-                header::HeaderValue::from_static("turbo"),
-            );
-            headers.insert(
-                HeaderName::from_static("x-ai-cove-client-version"),
-                header::HeaderValue::from_static(turbo_client_version()),
-            );
+        startup_auth_headers.map(|headers| {
             let target = resolve_target(&state.upstream, &Uri::from_static("/v1/responses"));
             let scope = hybrid_pool::HybridScope::new(&target, &headers);
             (target, scope, headers)

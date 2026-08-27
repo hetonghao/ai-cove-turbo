@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderName, header};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -174,7 +174,7 @@ pub(super) async fn fetch_batch(
         .append_pair("models", &models.join(","));
     let response = client
         .get(target)
-        .headers(headers.clone())
+        .headers(capability_request_headers(headers))
         .send()
         .await
         .map_err(|_| "request_failed")?;
@@ -183,6 +183,20 @@ pub(super) async fn fetch_batch(
     }
     let bytes = response.bytes().await.map_err(|_| "response_failed")?;
     CapabilityResponse::parse(&bytes)
+}
+
+fn capability_request_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut sanitized = HeaderMap::new();
+    for name in [
+        header::AUTHORIZATION,
+        HeaderName::from_static("x-ai-cove-client"),
+        HeaderName::from_static("x-ai-cove-client-version"),
+    ] {
+        if let Some(value) = headers.get(&name) {
+            sanitized.insert(name, value.clone());
+        }
+    }
+    sanitized
 }
 
 pub(super) const fn ttl() -> Duration {
@@ -199,6 +213,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{CapabilityCache, CapabilityResponse};
+    use axum::http::{HeaderMap, HeaderValue, header};
     use std::time::Duration;
 
     #[test]
@@ -225,5 +240,46 @@ mod tests {
         .expect("valid capability response");
         cache.apply(&response, Duration::from_secs(30));
         assert!(!cache.needs_refresh(&["gpt-http".to_owned()]));
+    }
+
+    #[test]
+    fn capability_headers_keep_startup_auth_and_drop_client_websocket_handshake() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer startup-key"),
+        );
+        headers.insert("x-ai-cove-client", HeaderValue::from_static("turbo"));
+        headers.insert(
+            "x-ai-cove-client-version",
+            HeaderValue::from_static("mac/0.1.0-test"),
+        );
+        headers.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("openai-insecure-api-key-stale-key"),
+        );
+        headers.insert(
+            header::SEC_WEBSOCKET_KEY,
+            HeaderValue::from_static("stale-handshake"),
+        );
+        headers.insert("session-id", HeaderValue::from_static("session-1"));
+
+        let sanitized = super::capability_request_headers(&headers);
+
+        assert_eq!(
+            sanitized.get(header::AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer startup-key"))
+        );
+        assert_eq!(
+            sanitized.get("x-ai-cove-client"),
+            Some(&HeaderValue::from_static("turbo"))
+        );
+        assert_eq!(
+            sanitized.get("x-ai-cove-client-version"),
+            Some(&HeaderValue::from_static("mac/0.1.0-test"))
+        );
+        assert!(!sanitized.contains_key(header::SEC_WEBSOCKET_PROTOCOL));
+        assert!(!sanitized.contains_key(header::SEC_WEBSOCKET_KEY));
+        assert!(!sanitized.contains_key("session-id"));
     }
 }

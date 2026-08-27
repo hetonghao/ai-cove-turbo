@@ -150,7 +150,7 @@ impl Session {
         if !self.state.capability_cache.needs_refresh(&models) {
             return None;
         }
-        let headers = self.client_headers.clone();
+        let headers = self.state.capability_headers.clone();
         let result = super::super::transport_capability::fetch_batch(
             &self.state.client,
             &self.state.upstream,
