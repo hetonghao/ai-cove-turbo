@@ -105,9 +105,7 @@ pub(super) async fn handle_worker_event(
                 .as_ref()
                 .is_some_and(|item| item.kind == ActiveKind::WebSocket);
             if from_websocket {
-                if session.websocket_first_frame_at.is_none() {
-                    session.websocket_first_frame_at = Some(std::time::Instant::now());
-                }
+                mark_websocket_first_frame(session, active.as_ref());
                 if session.websocket_first_token_at.is_none() && is_first_output_message(&message) {
                     session.websocket_first_token_at = Some(std::time::Instant::now());
                 }
@@ -165,6 +163,7 @@ pub(super) async fn handle_worker_event(
                 session.max_websocket_request_bytes =
                     session.max_websocket_request_bytes.min(raw_bytes);
             }
+            mark_websocket_first_frame(session, active.as_ref());
             if !retire_failed_websocket(session, active, code, &reason).await {
                 return false;
             }
@@ -183,6 +182,7 @@ pub(super) async fn handle_worker_event(
             handle_cancelled_event(client, session, active, lease).await
         }
         WorkerEvent::Error { code, message } => {
+            mark_websocket_first_frame(session, active.as_ref());
             retire_failed_websocket(session, active, code, &message).await;
             let _ = send_error(client, "server_error", &message).await;
             let _ = close_client(client, code, &message).await;
@@ -235,6 +235,14 @@ pub(super) async fn retire_failed_websocket(
             .await;
     }
     failed
+}
+
+pub(super) fn mark_websocket_first_frame(session: &mut Session, active: Option<&Active>) {
+    if active.is_some_and(|item| item.kind == ActiveKind::WebSocket)
+        && session.websocket_first_frame_at.is_none()
+    {
+        session.websocket_first_frame_at = Some(std::time::Instant::now());
+    }
 }
 
 fn record_websocket_outcome(session: &mut Session, status: u16, failure_reason: Option<&str>) {

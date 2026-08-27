@@ -824,7 +824,7 @@ async fn active_ws_failure_closes_client_without_replay() -> io::Result<()> {
         delay_http: false,
     })
     .await?;
-    let (proxy, _) = start_test_proxy(&server).await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
     send_create(&mut client).await?;
@@ -845,6 +845,16 @@ async fn active_ws_failure_closes_client_without_replay() -> io::Result<()> {
         return Err(io::Error::other("active failure close frame missing"));
     };
     assert_eq!(u16::from(frame.code), 1011);
+    let event = metrics
+        .traffic_snapshot()
+        .recent_requests
+        .into_iter()
+        .find_map(|event| {
+            let event = serde_json::to_value(event).ok()?;
+            (event.get("route") == Some(&Value::from("hybridWs"))).then_some(event)
+        })
+        .ok_or_else(|| io::Error::other("active failure traffic event missing"))?;
+    assert!(event.get("firstFrameMs").is_some());
     drop(client);
     proxy.stop().await;
     server.stop().await;
@@ -885,6 +895,7 @@ async fn active_ws_1009_keeps_client_and_routes_same_retry_over_http() -> io::Re
         event.get("failureReason"),
         Some(&Value::from("message too big"))
     );
+    assert!(event.get("firstFrameMs").is_some());
 
     send_create(&mut client).await?;
     server.fixture.wait_http(1).await?;
@@ -1099,6 +1110,7 @@ async fn failed_terminal_then_1012_records_one_active_failure_without_replay() -
             "upstream_error: upstream requires HTTP replay"
         ))
     );
+    assert!(failure.get("firstFrameMs").is_some());
     send_create(&mut client).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     server.fixture.wait_ready(2).await?;

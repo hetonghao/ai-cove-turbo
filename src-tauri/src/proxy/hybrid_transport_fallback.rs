@@ -2,7 +2,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::super::hybrid_pool::LeaseRetirement;
 use super::common::{close_client, send_error};
-use super::worker::retire_failed_websocket;
+use super::worker::{mark_websocket_first_frame, retire_failed_websocket};
 use super::{Active, ActiveKind, ClientWebSocket, Session, TransportFallback, http};
 use crate::proxy::HttpTraffic;
 
@@ -35,6 +35,7 @@ pub(super) async fn apply(
             .flatten()
     });
     let Some(http_payload) = http_payload else {
+        mark_websocket_first_frame(session, active.as_ref());
         return if retire_failed_websocket(session, active, code, &reason).await {
             Action::Forward(response)
         } else {
