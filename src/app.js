@@ -369,7 +369,9 @@
     if (isNetworkIssue(request)) return NETWORK_ERROR_MESSAGE;
     const reason = String(request?.failureReason ?? "").trim();
     if (recovering) {
-      const prefix = releaseRebuild ? "连接正在随版本发布重建。" : "连接正在恢复。";
+      const prefix = releaseRebuild
+        ? "连接正在随版本发布重建，Turbo 会自动发起恢复连接，可以忽略此错误。"
+        : "连接正在恢复。";
       return reason ? `${prefix}\n详细原因：${reason}` : prefix;
     }
     if (request?.result !== "error") return "";

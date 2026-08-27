@@ -2346,7 +2346,7 @@ test("仅真实发布排空的空闲 1012 显示发布重建", async () => {
 
   assert.equal(live.requestStream.innerHTML.match(/Hybrid WS.*发布重建/gu)?.length, 1);
   assert.equal(live.requestStream.innerHTML.match(/Hybrid WS.*连接恢复/gu)?.length, 1);
-  assert.match(live.requestStream.innerHTML, /id="request-detail-2" role="tooltip"><strong>请求详情<\/strong>[\s\S]*<dt>异常<\/dt><dd>连接正在随版本发布重建。<br>详细原因：service restarting<\/dd>/);
+  assert.match(live.requestStream.innerHTML, /id="request-detail-2" role="tooltip"><strong>请求详情<\/strong>[\s\S]*<dt>异常<\/dt><dd>连接正在随版本发布重建，Turbo 会自动发起恢复连接，可以忽略此错误。<br>详细原因：service restarting<\/dd>/);
   assert.match(live.requestStream.innerHTML, /id="request-detail-3" role="tooltip"><strong>请求详情<\/strong>[\s\S]*<dt>异常<\/dt><dd>连接正在恢复。<br>详细原因：upstream requires HTTP replay<\/dd>/);
 });
 
