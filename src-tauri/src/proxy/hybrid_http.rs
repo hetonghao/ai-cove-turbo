@@ -14,7 +14,7 @@ use super::{
     common::{context_length_exceeded_message, text_message},
     sse::{SseParser, is_terminal_event},
 };
-use crate::proxy::{HttpRequestMetric, HttpTraffic, ProxyState};
+use crate::proxy::{HttpRequestMetric, HttpTraffic, ProxyState, traffic};
 
 pub(super) fn start_http_worker(
     session: &super::Session,
@@ -30,6 +30,7 @@ pub(super) fn start_http_worker(
         path: session.path.clone(),
         started_at: Instant::now(),
         raw_bytes,
+        metadata: traffic::request_metadata(&session.client_headers, &payload),
         request: build_http_request(
             session.client_headers.clone(),
             session.request_uri.clone(),
@@ -55,6 +56,7 @@ struct WorkerContext {
     path: String,
     started_at: Instant,
     raw_bytes: u64,
+    metadata: traffic::RequestMetadata,
     request: AxumRequest,
     traffic: HttpTraffic,
 }
@@ -153,6 +155,7 @@ async fn wait_for_http_response(
     let path = context.path.clone();
     let started_at = context.started_at;
     let raw_bytes = context.raw_bytes;
+    let metadata = context.metadata.clone();
     let traffic = context.traffic;
     let request = context.request;
     let request_future = super::super::proxy_http_with_control(
@@ -176,6 +179,7 @@ async fn wait_for_http_response(
                             started_at,
                             raw_bytes,
                             traffic,
+                            metadata.clone(),
                         );
                         let _ = events.send(WorkerEvent::Cancelled { lease: None }).await;
                         return None;
@@ -189,6 +193,7 @@ async fn wait_for_http_response(
     Some(response)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_cancelled_before_response(
     state: &ProxyState,
     control: &HttpTimingControl,
@@ -196,12 +201,13 @@ fn record_cancelled_before_response(
     started_at: Instant,
     raw_bytes: u64,
     traffic: HttpTraffic,
+    metadata: traffic::RequestMetadata,
 ) {
     control.cancel();
     if !control.claim_recording() {
         return;
     }
-    state.metrics.record_http_with_timing(
+    state.metrics.record_http_with_timing_and_metadata(
         HttpRequestMetric {
             path,
             status: 499,
@@ -214,6 +220,7 @@ fn record_cancelled_before_response(
         },
         None,
         Some(super::super::timing::elapsed_ms(started_at, Instant::now())),
+        Some(metadata),
     );
 }
 

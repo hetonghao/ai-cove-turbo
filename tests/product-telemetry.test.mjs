@@ -159,7 +159,9 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   assert.doesNotMatch(recoveredRow, /Hybrid WS · 失败/);
   assert.match(restartRow, /Hybrid WS.*发布重建/);
   requestRows.forEach((row) => {
-    assert.match(row, /class="c-request-row"[^>]*tabindex="0" aria-describedby="request-detail-/);
+    assert.match(row, /class="c-request-row"[^>]*data-request-id="/);
+    assert.doesNotMatch(row, /class="c-request-row"[^>]*tabindex="0"/);
+    assert.match(row, /class="c-transport__detail"[^>]*tabindex="0" aria-describedby="request-detail-/);
     assert.equal((row.match(/<td>/g) ?? []).length, 6);
     assert.doesNotMatch(row, /c-request-color|颜色/);
   });

@@ -7,7 +7,7 @@ const SQLITE_CLI: &str = "/usr/bin/sqlite3";
 #[cfg(not(target_os = "macos"))]
 const SQLITE_CLI: &str = "sqlite3";
 
-#[derive(Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodexThreadInfo {
     pub(crate) name: Option<String>,
@@ -20,6 +20,21 @@ struct CliThreadInfo {
     name: Option<String>,
     parent_name: Option<String>,
     is_subagent: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ThreadInfoRow {
+    pub(crate) thread_id: String,
+    pub(crate) info: CodexThreadInfo,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ThreadInfoReadError {
+    InvalidThreadId,
+    DatabaseMissing,
+    CommandFailed,
+    InvalidOutput,
+    Timeout,
 }
 
 pub(crate) fn is_codex_thread_id(thread_id: &str) -> bool {
@@ -43,6 +58,7 @@ pub(crate) fn read_with_cli(
     }
     let query = format!(
         r"
+PRAGMA busy_timeout = 1500;
 SELECT
     CASE
         WHEN child.thread_source = 'subagent'
@@ -81,6 +97,94 @@ LIMIT 1;
         parent_name: row.parent_name,
         is_subagent: row.is_subagent != 0,
     })
+}
+
+pub(crate) fn read_batch_with_cli(
+    executable: &Path,
+    database: &Path,
+    thread_ids: &[String],
+) -> Result<Vec<ThreadInfoRow>, ThreadInfoReadError> {
+    if thread_ids
+        .iter()
+        .any(|thread_id| !is_codex_thread_id(thread_id))
+    {
+        return Err(ThreadInfoReadError::InvalidThreadId);
+    }
+    if !database.is_file() {
+        return Err(ThreadInfoReadError::DatabaseMissing);
+    }
+    if thread_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids = thread_ids
+        .iter()
+        .map(|thread_id| format!("'{thread_id}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let query = format!(
+        r"
+PRAGMA busy_timeout = 1500;
+SELECT
+    child.id AS thread_id,
+    CASE
+        WHEN child.thread_source = 'subagent'
+            THEN COALESCE(NULLIF(child.agent_nickname, ''), NULLIF(child.name, ''))
+        ELSE NULLIF(child.name, '')
+    END AS name,
+    CASE
+        WHEN child.thread_source = 'subagent'
+            THEN NULLIF(parent.name, '')
+        ELSE NULL
+    END AS parent_name,
+    CASE WHEN child.thread_source = 'subagent' THEN 1 ELSE 0 END AS is_subagent
+FROM threads AS child
+LEFT JOIN thread_spawn_edges AS edge ON edge.child_thread_id = child.id
+LEFT JOIN threads AS parent ON parent.id = edge.parent_thread_id
+WHERE child.id IN ({ids});
+"
+    );
+    let output = Command::new(executable)
+        .arg("-readonly")
+        .arg("-json")
+        .arg(database)
+        .arg(query)
+        .output()
+        .map_err(|_| ThreadInfoReadError::CommandFailed)?;
+    if !output.status.success() {
+        return Err(ThreadInfoReadError::CommandFailed);
+    }
+    let rows = serde_json::from_slice::<Vec<CliBatchThreadInfo>>(&output.stdout)
+        .map_err(|_| ThreadInfoReadError::InvalidOutput)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ThreadInfoRow {
+            thread_id: row.thread_id,
+            info: CodexThreadInfo {
+                name: row.name,
+                parent_name: row.parent_name,
+                is_subagent: row.is_subagent != 0,
+            },
+        })
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct CliBatchThreadInfo {
+    thread_id: String,
+    name: Option<String>,
+    parent_name: Option<String>,
+    is_subagent: i64,
+}
+
+pub(crate) async fn read_batch(
+    database: std::path::PathBuf,
+    thread_ids: Vec<String>,
+) -> Result<Vec<ThreadInfoRow>, ThreadInfoReadError> {
+    tokio::task::spawn_blocking(move || {
+        read_batch_with_cli(Path::new(SQLITE_CLI), &database, &thread_ids)
+    })
+    .await
+    .map_err(|_| ThreadInfoReadError::CommandFailed)?
 }
 
 pub(crate) async fn read(

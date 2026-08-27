@@ -114,19 +114,20 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
   });
   const message = element({ modelCatalogMessage: "" });
   const restart = element({ modelCatalogRestart: "" });
+  const documentBody = element({ configView: "settings" });
   const restartControl = element({ action: "restart-codex", catalogRestart: "", restartHint: "" });
   const configViewButtons = ["settings", "catalog"].map((configView) => {
     const target = element({ configView });
-    target.closest = (selector) => selector === "[data-config-view]" ? target : null;
+    target.closest = (selector) => selector === '[data-config-view][role="tab"]' || selector === "[data-config-view]" ? target : null;
     return target;
   });
   const configViewPanels = ["settings", "catalog"].map((configView) => element({ configViewPanel: configView }));
   const actions = ["save-model-settings", "undo-model-settings"].map((action) => {
     const target = element({ action });
-    target.closest = (selector) => selector === "[data-action]" ? target : null;
+    target.closest = (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-action]" ? target : null;
     return target;
   });
-  restartControl.closest = (selector) => selector === "[data-action]" ? restartControl : null;
+  restartControl.closest = (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-action]" ? restartControl : null;
   actions.push(restartControl);
   const selectors = new Map([
     ["[data-model-catalog-info]", info],
@@ -153,7 +154,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
   const document = {
     hidden: false,
     readyState: "complete",
-    body: element(),
+    body: documentBody,
     addEventListener(type, handler) { listeners.set(type, handler); },
     querySelector(selector) { return selectors.get(selector) ?? null; },
     querySelectorAll(selector) {
@@ -199,7 +200,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     url() { return window.location.href; },
     change(slug, value) {
       const button = element({ modelTransport: value });
-      button.closest = (selector) => selector === "[data-model-transport]" ? button : selector === "[data-model-slug]" ? row(slug) : null;
+      button.closest = (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-model-transport]" ? button : selector === "[data-model-slug]" ? row(slug) : null;
       listeners.get("click")?.({ target: button });
     },
     drag(from, to) {
@@ -235,8 +236,8 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
       return { during, targetHighlighted, after: [...domOrder] };
     },
     toggleVisibility(slug) {
-      const button = { closest: (selector) => selector === "[data-model-slug]" ? row(slug) : null, setAttribute() {}, title: "", innerHTML: "" };
-      listeners.get("click")?.({ target: { closest: (selector) => selector === "[data-model-visibility-toggle]" ? button : null } });
+      const button = { closest: (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-model-visibility-toggle]" ? button : selector === "[data-model-slug]" ? row(slug) : null, setAttribute() {}, title: "", innerHTML: "" };
+      listeners.get("click")?.({ target: { closest: (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-model-visibility-toggle]" ? button : null } });
     },
     disabled(action) { return actions.find((target) => target.dataset.action === action)?.disabled; },
     restartRequired() { return restartControl.dataset.required === "true"; },
@@ -552,6 +553,40 @@ async function liveTailHarness(overrides = {}) {
   const requestStream = element();
   requestStream.innerHTML = "";
   requestStream.insertAdjacentHTML = (_position, value) => { requestStream.innerHTML += value; };
+  const tooltipById = new Map();
+  let requestStreamMarkup = "";
+  let requestRow;
+  let requestTrigger;
+  let requestTooltip;
+  if (overrides.enableTooltipRefresh) {
+    requestRow = { dataset: { requestId: "1" } };
+    requestTooltip = {
+      parentElement: requestRow,
+      classList: { add() {}, remove() {} },
+      style: { setProperty() {} },
+      getBoundingClientRect: () => ({ width: 240, height: 80 }),
+      innerHTML: "",
+    };
+    requestRow.querySelector = () => requestTooltip.parentElement === requestRow ? requestTooltip : null;
+    requestTrigger = {
+      parentElement: requestRow,
+      getAttribute: (name) => name === "aria-describedby" ? "request-detail-1" : null,
+      setAttribute() {},
+      removeAttribute() {},
+      contains: () => false,
+      getBoundingClientRect: () => ({ top: 120, right: 320, bottom: 140 }),
+      closest: (selector) => selector === ".c-transport__detail" ? requestTrigger : null,
+    };
+    tooltipById.set("request-detail-1", requestTooltip);
+    Object.defineProperty(requestStream, "innerHTML", {
+      get: () => requestStreamMarkup,
+      set: (value) => {
+        requestStreamMarkup = String(value);
+        requestTooltip.innerHTML = requestStreamMarkup;
+      },
+    });
+    requestStream.querySelectorAll = (selector) => selector === "[data-request-id]" ? [requestRow] : [];
+  }
   let onScroll;
   const terminal = {
     scrollHeight: 300,
@@ -572,6 +607,9 @@ async function liveTailHarness(overrides = {}) {
     ["[data-live-follow-label]", followLabel],
   ]);
   const elementsById = new Map();
+  const body = element();
+  body.tagName = "BODY";
+  body.appendChild = (child) => { child.parentElement = body; return child; };
   let onClick;
   let onFocusIn;
   let onPointerOver;
@@ -579,20 +617,21 @@ async function liveTailHarness(overrides = {}) {
   const document = {
     hidden: false,
     readyState: "complete",
-    body: element(),
+    body,
     addEventListener(type, handler) {
       if (type === "click") onClick = handler;
       if (type === "focusin") onFocusIn = handler;
       if (type === "pointerover") onPointerOver = handler;
     },
-    getElementById(id) { return elementsById.get(id) ?? null; },
+    getElementById(id) { return tooltipById.get(id) ?? elementsById.get(id) ?? null; },
     querySelector(selector) { return selectors.get(selector) ?? null; },
     querySelectorAll() { return []; },
   };
   const window = {
-    __TAURI__: { core: { invoke: async () => status } },
+    __TAURI__: { core: { invoke: async (command) => command === "get_codex_thread_info" ? (overrides.threadInfoPromise ?? status) : status } },
     location: { href: "tauri://localhost/?tab=live" },
     innerWidth: 1_280,
+    innerHeight: 720,
     history: { replaceState() {} },
     addEventListener() {},
     setInterval(handler) { onTick = handler; },
@@ -606,21 +645,39 @@ async function liveTailHarness(overrides = {}) {
     followLabel,
     requestStream,
     terminal,
-    positionNetworkTooltip({ eventType = "pointerover", tooltipBounds, triggerBounds, viewportWidth }) {
+    positionNetworkTooltip({ eventType = "pointerover", targetType = "detail", tooltipBounds, triggerBounds, viewportWidth, viewportHeight = 720, includePortal = false }) {
       window.innerWidth = viewportWidth;
+      window.innerHeight = viewportHeight;
       const properties = new Map();
       const tooltipId = "request-detail-test";
-      elementsById.set(tooltipId, {
+      const detailParent = { tagName: "SPAN", appendChild(child) { child.parentElement = detailParent; return child; } };
+      const tooltipClasses = new Set();
+      const tooltip = {
         getBoundingClientRect: () => tooltipBounds,
         style: { setProperty(name, value) { properties.set(name, value); } },
-      });
+        parentElement: detailParent,
+        classList: {
+          add(name) { tooltipClasses.add(name); },
+          remove(name) { tooltipClasses.delete(name); },
+        },
+      };
+      elementsById.set(tooltipId, tooltip);
       const trigger = {
-        closest: (selector) => selector === ".c-transport__detail" ? trigger : null,
+        parentElement: detailParent,
+        closest: (selector) => selector === (targetType === "row" ? ".c-request-row" : ".c-transport__detail") ? trigger : null,
         getAttribute: (name) => name === "aria-describedby" ? tooltipId : null,
+        setAttribute() {},
+        removeAttribute() {},
+        contains: () => false,
         getBoundingClientRect: () => triggerBounds,
       };
       (eventType === "focusin" ? onFocusIn : onPointerOver)({ target: trigger });
-      return Object.fromEntries(properties);
+      const placement = Object.fromEntries(properties);
+      if (includePortal) {
+        placement.parentTag = tooltip.parentElement?.tagName;
+        placement.className = Array.from(tooltipClasses).join(" ");
+      }
+      return placement;
     },
     async click(action) {
       const control = action === "follow-live" ? follow : element({ action });
@@ -633,6 +690,10 @@ async function liveTailHarness(overrides = {}) {
       onScroll();
     },
     setRequests(recentRequests) { status = { ...status, recentRequests }; },
+    setSessionNames(sessionNames) { status = { ...status, sessionNames }; },
+    hoverFirstDetail() { onPointerOver?.({ target: requestTrigger }); },
+    tooltipHtml() { return requestTooltip?.innerHTML ?? ""; },
+    tooltipParent() { return requestTooltip?.parentElement?.tagName ?? null; },
     tick: () => onTick(),
   };
 }
@@ -1096,7 +1157,102 @@ test("网络异常 Hover 和键盘聚焦会把提示定位在视口内", async (
   });
 });
 
-test("请求行本身是统一 hover/focus 详情入口", async () => {
+test("详情较高且触发记录靠近底部时仍保持在视口内", async () => {
+  const { positionNetworkTooltip } = await liveTailHarness();
+
+  assert.deepEqual(positionNetworkTooltip({
+    viewportWidth: 1_280,
+    viewportHeight: 591,
+    triggerBounds: { top: 280, right: 1_200, bottom: 298 },
+    tooltipBounds: { width: 420, height: 360 },
+  }), {
+    "--c-network-tooltip-left": "780px",
+    "--c-network-tooltip-top": "215px",
+  });
+
+  assert.deepEqual(positionNetworkTooltip({
+    viewportWidth: 1_280,
+    viewportHeight: 591,
+    triggerBounds: { top: 280, right: 1_200, bottom: 298 },
+    tooltipBounds: { width: 420, height: 800 },
+  }), {
+    "--c-network-tooltip-left": "780px",
+    "--c-network-tooltip-top": "16px",
+  });
+});
+
+test("请求详情 hover 时移出滚动容器并使用可见状态", async () => {
+  const { positionNetworkTooltip } = await liveTailHarness();
+
+  assert.deepEqual(positionNetworkTooltip({
+    viewportWidth: 1_280,
+    viewportHeight: 591,
+    triggerBounds: { top: 436, right: 1_014, bottom: 452 },
+    tooltipBounds: { width: 420, height: 124 },
+    includePortal: true,
+  }), {
+    "--c-network-tooltip-left": "594px",
+    "--c-network-tooltip-top": "303px",
+    parentTag: "BODY",
+    className: "is-visible",
+  });
+});
+
+test("已打开详情在异步会话信息到达后更新内容", async () => {
+  let resolveThreadInfo;
+  const threadInfoPromise = new Promise((resolve) => { resolveThreadInfo = resolve; });
+  const live = await liveTailHarness({
+    enableTooltipRefresh: true,
+    threadInfoPromise,
+    recentRequests: [{
+      id: 1,
+      timestampMs: 1_000,
+      status: 200,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "WS",
+      route: "hybridWs",
+      result: "success",
+      threadId: "thread-1",
+    }],
+  });
+
+  live.hoverFirstDetail();
+  resolveThreadInfo({ name: "代码审查" });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(live.tooltipHtml(), /<dt>会话名称<\/dt><dd>代码审查<\/dd>/);
+});
+
+test("状态轮询收到后端会话名称更新时恢复请求详情", async () => {
+  const live = await liveTailHarness({
+    enableTooltipRefresh: true,
+    recentRequests: [{
+      id: 1,
+      timestampMs: 1_000,
+      status: 200,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "WS",
+      route: "hybridWs",
+      result: "success",
+      threadId: "thread-1",
+    }],
+    sessionNames: { "thread-1": null },
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(live.tooltipHtml(), /<dt>会话名称<\/dt><dd>-<\/dd>/);
+
+  live.setSessionNames({ "thread-1": { name: "排查 Turbo 与 New API 耗时差距" } });
+  await live.tick();
+
+  assert.match(live.tooltipHtml(), /<dt>会话名称<\/dt><dd>排查 Turbo 与 New API 耗时差距<\/dd>/);
+});
+
+test("只有传输方式文本是请求详情 hover/focus 入口", async () => {
   const { requestStream } = await liveTailHarness({
     recentRequests: [{
       id: 1,
@@ -1110,8 +1266,19 @@ test("请求行本身是统一 hover/focus 详情入口", async () => {
       result: "success",
     }],
   });
-  assert.match(requestStream.innerHTML, /<tr class="c-request-row"[^>]*tabindex="0" aria-describedby="request-detail-1"/);
+  assert.match(requestStream.innerHTML, /<tr class="c-request-row"[^>]*data-request-id="1"/);
+  assert.doesNotMatch(requestStream.innerHTML, /<tr class="c-request-row"[^>]*tabindex="0"/);
+  assert.match(requestStream.innerHTML, /<span class="c-transport__detail"[^>]*tabindex="0" aria-describedby="request-detail-1">/);
   assert.match(requestStream.innerHTML, /id="request-detail-1" role="tooltip"><strong>请求详情<\/strong>/);
+});
+
+test("请求行其它单元格 hover 不显示详情，传输方式文本 hover 才显示", async () => {
+  const { positionNetworkTooltip } = await liveTailHarness();
+  const tooltip = { width: 240, height: 48 };
+  const trigger = { top: 120, right: 320, bottom: 140 };
+
+  assert.deepEqual(positionNetworkTooltip({ targetType: "row", tooltipBounds: tooltip, triggerBounds: trigger, viewportWidth: 1280 }), {});
+  assert.notDeepEqual(positionNetworkTooltip({ targetType: "detail", tooltipBounds: tooltip, triggerBounds: trigger, viewportWidth: 1280 }), {});
 });
 
 test("状态读取失败时提供就地恢复和折叠技术详情", async () => {
@@ -2125,7 +2292,7 @@ test("实时终端只增量追加新请求并同步触发传输脉冲", async ()
     ...status,
     recentRequests: [
       ...status.recentRequests,
-      { id: 2, timestampMs: 2_000, status: 200, path: "/v1/responses", rawBytes: 120, sentBytes: 60, transport: "WS", result: "success" },
+      { id: 2, timestampMs: 2_000, status: 200, path: "/v1/responses", rawBytes: 120, sentBytes: 60, transport: "WS", result: "success", model: "gpt-5.3-codex", threadId: "thread-123", sessionId: "session-123" },
     ],
   };
   await onTick();
@@ -2134,6 +2301,9 @@ test("实时终端只增量追加新请求并同步触发传输脉冲", async ()
   assert.equal(appends.length, 1);
   assert.match(appends[0], /class="c-request-row is-new"/);
   assert.match(appends[0], /data-request-id="2"/);
+  assert.match(appends[0], /<span class="c-transport__detail"[^>]*aria-describedby="request-detail-2"/);
+  assert.match(appends[0], /<dt>模型<\/dt><dd>gpt-5\.3-codex<\/dd>/);
+  assert.match(appends[0], /<dt>会话\/连接 ID<\/dt><dd>session-123 · —<\/dd>/);
   assert.equal(pulses.length, 1);
   assert.equal(pulses[0], 0.5);
 });

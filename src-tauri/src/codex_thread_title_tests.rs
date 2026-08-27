@@ -1,8 +1,10 @@
 #![cfg(unix)]
 
-use std::{fs, io, os::unix::fs::PermissionsExt};
+use std::{fs, io, os::unix::fs::PermissionsExt, path::Path};
 
-use crate::codex_thread_title::{is_codex_thread_id, read_with_cli};
+use crate::codex_thread_title::{
+    ThreadInfoReadError, is_codex_thread_id, read_batch_with_cli, read_with_cli,
+};
 
 #[test]
 fn accepts_only_codex_uuid_thread_ids() {
@@ -49,5 +51,52 @@ fn reads_subagent_name_and_parent_through_the_read_only_cli() -> io::Result<()> 
     assert!(recorded.contains("parent_name"));
     assert!(!recorded.contains("child.title"));
     assert!(!recorded.contains("parent.title"));
+    Ok(())
+}
+
+#[test]
+fn reads_multiple_thread_names_in_one_read_only_batch() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let cli = root.path().join("sqlite3");
+    fs::write(
+        &cli,
+        "#!/bin/sh\nprintf '%s\\n' '[{\"thread_id\":\"019fc8b1-a38c-7e70-9169-d6d76a7fcedc\",\"name\":\"代码审查\",\"parent_name\":null,\"is_subagent\":0}]'\n",
+    )?;
+    let mut permissions = fs::metadata(&cli)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&cli, permissions)?;
+    let database = root.path().join("state_5.sqlite");
+    fs::write(&database, [])?;
+    let ids = vec![
+        "019fc8b1-a38c-7e70-9169-d6d76a7fcedc".to_owned(),
+        "019fc8b1-a38c-7e70-9169-d6d76a7fcedd".to_owned(),
+    ];
+
+    let rows = read_batch_with_cli(&cli, &database, &ids)
+        .map_err(|error| io::Error::other(format!("batch read failed: {error:?}")))?;
+
+    assert_eq!(rows.len(), 1);
+    let row = rows
+        .first()
+        .ok_or_else(|| io::Error::other("batch read returned no rows"))?;
+    let first_id = ids
+        .first()
+        .ok_or_else(|| io::Error::other("test ids are empty"))?;
+    assert_eq!(row.thread_id, *first_id);
+    assert_eq!(row.info.name.as_deref(), Some("代码审查"));
+    Ok(())
+}
+
+#[test]
+fn rejects_invalid_batch_thread_ids_before_running_sqlite() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let database = root.path().join("state_5.sqlite");
+    fs::write(&database, [])?;
+    let ids = vec!["thread-1".to_owned()];
+
+    assert_eq!(
+        read_batch_with_cli(Path::new("/missing/sqlite3"), &database, &ids),
+        Err(ThreadInfoReadError::InvalidThreadId),
+    );
     Ok(())
 }

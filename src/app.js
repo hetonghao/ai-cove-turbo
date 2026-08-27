@@ -80,6 +80,7 @@
     sentBytes: 0,
     compressionRatio: 0,
     recentRequests: [],
+    sessionNames: {},
     trafficWindows: [],
     updateState: "idle",
     updateMessage: "尚未检查更新",
@@ -90,7 +91,7 @@
   function buildPreviewTelemetry() {
     const now = Date.now();
     const samples = [
-      { id: 1, ageSeconds: 3, status: 200, path: "/v1/responses", rawBytes: 186_420, sentBytes: 82_110, transport: "WS", result: "success", route: "hybridWs", model: "gpt-5.3-codex", sessionId: "会话 01", connectionId: "连接 02", sessionName: "代码审查", firstTokenMs: 420, durationMs: 1_800 },
+      { id: 1, ageSeconds: 3, status: 200, path: "/v1/responses", rawBytes: 186_420, sentBytes: 82_110, transport: "WS", result: "success", route: "hybridWs", model: "gpt-5.3-codex", sessionId: "会话 01", connectionId: "连接 02", sessionName: "代码审查", firstFrameMs: 120, firstTokenMs: 420, durationMs: 1_800 },
       { id: 2, ageSeconds: 11, status: 200, path: "/v1/responses", rawBytes: 94_280, sentBytes: 51_360, transport: "HTTP", result: "success", route: "hybridColdStartHttp", model: "gpt-5.4", sessionId: "会话 02", sessionName: "—", durationMs: 2_400 },
       { id: 3, ageSeconds: 48, status: 201, path: "/v1/files", rawBytes: 128_610, sentBytes: 67_240, transport: "HTTP", result: "success", route: "directHttp", model: "—", sessionId: "—", connectionId: "—", sessionName: "—", durationMs: 310 },
       { id: 4, ageSeconds: 210, status: 200, path: "/v1/responses", rawBytes: 121_000, sentBytes: 116_000, transport: "HTTP", result: "fallback", route: "hybridRecoveryHttp", model: "gpt-5.3-codex", sessionId: "会话 01", connectionId: "—", sessionName: "代码审查", durationMs: 3_100 },
@@ -384,25 +385,58 @@
     const text = String(value ?? "").trim();
     if (!text) return "—";
     const alternate = prefix === "会话" ? "session" : "connection";
-    return text.replace(new RegExp(`^(?:${prefix}|${alternate})\\s*`, "i"), "") || text;
+    return text.replace(new RegExp(`^(?:${prefix}\\s*|${alternate}\\s+)`, "i"), "") || text;
   }
 
   function requestDetailRows(request, exception) {
+    const threadId = request?.threadId || request?.thread_id;
+    const suppliedSessionName = request?.sessionName || request?.session_name;
+    const sessionName = suppliedSessionName && suppliedSessionName !== "—"
+      ? suppliedSessionName
+      : threadId
+        ? sessionTitle(String(threadId))
+        : "—";
     const rows = [
       ["模型", request?.model || request?.modelSlug || "—"],
-      ["会话/连接 ID", `${compactRequestId(request?.sessionId || request?.session_id, "会话")} · ${compactRequestId(request?.connectionId || request?.connection_id, "连接")}`],
-      ["会话名称", request?.sessionName || request?.session_name || "—"],
+      ["会话/连接 ID", `${compactRequestId(request?.sessionId || request?.session_id || threadId, "会话")} · ${compactRequestId(request?.connectionId || request?.connection_id, "连接")}`],
+      ["会话名称", sessionName],
       ["首帧/首字/耗时", `${telemetry.formatDuration(request?.firstFrameMs ?? request?.first_frame_ms)} / ${telemetry.formatDuration(request?.firstTokenMs ?? request?.first_token_ms)} / ${telemetry.formatDuration(request?.durationMs ?? request?.duration_ms)}`],
     ];
     if (exception) rows.push(["异常", exception]);
     return rows;
   }
 
-  function requestDetailMarkup(request, exception, tooltipId, label = requestFailureLabel(request)) {
+  function requestDetailContentMarkup(request, exception) {
     const rows = requestDetailRows(request, exception)
-      .map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value).replaceAll("\n", "<br>")}</dd></div>`)
+      .map(([key, value]) => `<div class="c-transport__tooltip-row${key === "异常" ? " c-transport__tooltip-row--exception" : ""}"><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value).replaceAll("\n", "<br>")}</dd></div>`)
       .join("");
-    return `<span class="c-transport__detail">${escapeHtml(label)}</span><span class="c-transport__tooltip" id="${tooltipId}" role="tooltip"><strong>请求详情</strong><dl>${rows}</dl></span>`;
+    return `<strong>请求详情</strong><dl>${rows}</dl>`;
+  }
+
+  function requestDetailTooltipId(requestId) {
+    return `request-detail-${String(requestId).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  }
+
+  function requestDetailMarkup(request, exception, tooltipId, label = requestFailureLabel(request)) {
+    return `<span class="c-transport__detail" tabindex="0" aria-describedby="${tooltipId}">${escapeHtml(label)}</span><span class="c-transport__tooltip" id="${tooltipId}" role="tooltip">${requestDetailContentMarkup(request, exception)}</span>`;
+  }
+
+  function refreshRequestDetailRows(threadId) {
+    if (state.tab !== "live") return;
+    const body = $("[data-request-stream]");
+    const rows = Array.from(body?.querySelectorAll?.("[data-request-id]") || []);
+    displayedRequests
+      .filter((request) => String(request?.threadId || request?.thread_id || "") === threadId)
+      .forEach((request) => {
+        const row = rows.find((candidate) => candidate.dataset.requestId === String(request.id));
+        const tooltip = document.getElementById?.(requestDetailTooltipId(request.id))
+          || row?.querySelector?.(".c-transport__tooltip");
+        if (!tooltip) return;
+        const recovering = request.failurePhase === "hybridIdle";
+        const releaseRebuild = recovering && Number(request.status) === 1012 && request.failureReason === "service restarting";
+        tooltip.innerHTML = requestDetailContentMarkup(request, requestFailureDetail(request, { releaseRebuild, recovering }));
+        if (activeNetworkTooltip?.tooltip === tooltip) positionNetworkTooltip(activeNetworkTooltip.trigger);
+      });
   }
 
   function formatCodexState() {
@@ -843,6 +877,7 @@
     renderControls();
     renderConfigView();
     renderModelCatalog();
+    requestSessionInfos({ boundThreads: [], transitions: [] }, []);
     if (state.tab === "live" && statusHydrated) renderLiveStream(options);
     if (state.tab === "statistics") renderStatistics();
   }
@@ -915,17 +950,52 @@
       .replaceAll("'", "&#39;");
   }
 
+  let activeNetworkTooltip = null;
+
+  function restoreNetworkTooltip() {
+    if (!activeNetworkTooltip) return;
+    const { trigger, tooltip } = activeNetworkTooltip;
+    trigger?.removeAttribute?.("data-tooltip-open");
+    tooltip?.classList?.remove?.("is-visible");
+    if (trigger?.parentElement) trigger.parentElement.appendChild(tooltip);
+    else tooltip?.remove?.();
+    activeNetworkTooltip = null;
+  }
+
+  function openNetworkTooltip(trigger) {
+    const tooltip = document.getElementById?.(trigger.getAttribute?.("aria-describedby"));
+    if (!tooltip) return;
+    if (activeNetworkTooltip?.trigger !== trigger) restoreNetworkTooltip();
+    if (tooltip.parentElement !== document.body) document.body?.appendChild?.(tooltip);
+    trigger.setAttribute?.("data-tooltip-open", "true");
+    tooltip.classList?.add?.("is-visible");
+    activeNetworkTooltip = { trigger, tooltip };
+    positionNetworkTooltip(trigger);
+  }
+
+  function closeNetworkTooltip(trigger) {
+    if (!activeNetworkTooltip || (trigger && activeNetworkTooltip.trigger !== trigger)) return;
+    restoreNetworkTooltip();
+  }
+
   function positionNetworkTooltip(trigger) {
     const tooltip = document.getElementById?.(trigger.getAttribute?.("aria-describedby"));
     if (!tooltip) return;
     const triggerBounds = trigger.getBoundingClientRect();
     const tooltipBounds = tooltip.getBoundingClientRect();
     const viewportMargin = 16;
+    const topBoundary = 70;
     const gap = 9;
     const width = Math.min(tooltipBounds.width, window.innerWidth - viewportMargin * 2);
     const left = Math.max(viewportMargin, Math.min(triggerBounds.right - width, window.innerWidth - width - viewportMargin));
+    const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || 720;
     const preferredTop = triggerBounds.top - tooltipBounds.height - gap;
-    const top = preferredTop >= 70 ? preferredTop : triggerBounds.bottom + gap;
+    const belowTop = triggerBounds.bottom + gap;
+    const top = preferredTop >= topBoundary
+      ? preferredTop
+      : belowTop + tooltipBounds.height <= viewportHeight - viewportMargin
+        ? belowTop
+        : Math.max(viewportMargin, viewportHeight - tooltipBounds.height - viewportMargin);
     tooltip.style.setProperty("--c-network-tooltip-left", `${left}px`);
     tooltip.style.setProperty("--c-network-tooltip-top", `${top}px`);
   }
@@ -1026,22 +1096,46 @@
     return details;
   }
 
+  function normalizeSessionInfo(info) {
+    return info && typeof info === "object" ? {
+      name: String(info.name || "").trim(),
+      parentName: String(info.parentName || "").trim(),
+      isSubagent: Boolean(info.isSubagent),
+    } : null;
+  }
+
+  function applySessionNames(sessionNames) {
+    if (!sessionNames || typeof sessionNames !== "object") return;
+    Object.entries(sessionNames).forEach(([threadId, value]) => {
+      const next = normalizeSessionInfo(value);
+      const previous = sessionInfos.get(threadId);
+      if (JSON.stringify(previous) === JSON.stringify(next) && sessionInfos.has(threadId)) return;
+      sessionInfos.set(threadId, next);
+      if (connectionPanelOpen) renderConnectionInspector();
+      refreshRequestDetailRows(threadId);
+    });
+  }
+
   function requestSessionInfos(snapshot, recentClosed) {
     if (!invoke) return;
-    const items = [...snapshot.boundThreads, ...snapshot.transitions, ...recentClosed];
+    const items = [...snapshot.boundThreads, ...snapshot.transitions, ...recentClosed, ...(state.recentRequests || [])];
     new Set(items.map(connectionThreadId).filter(Boolean)).forEach((threadId) => {
+      if (Object.hasOwn(state.sessionNames || {}, threadId)) {
+        applySessionNames({ [threadId]: state.sessionNames[threadId] });
+        return;
+      }
       if (sessionInfoRequests.has(threadId)) return;
       sessionInfoRequests.add(threadId);
       void invoke("get_codex_thread_info", { threadId })
         .then((info) => {
-          sessionInfos.set(threadId, info && typeof info === "object" ? {
-            name: String(info.name || "").trim(),
-            parentName: String(info.parentName || "").trim(),
-            isSubagent: Boolean(info.isSubagent),
-          } : null);
+          sessionInfos.set(threadId, normalizeSessionInfo(info));
           if (connectionPanelOpen) renderConnectionInspector();
+          refreshRequestDetailRows(threadId);
         })
-        .catch(() => sessionInfos.set(threadId, null));
+        .catch(() => {
+          sessionInfos.set(threadId, null);
+          refreshRequestDetailRows(threadId);
+        });
     });
   }
 
@@ -1602,7 +1696,7 @@
     const protocol = route ?? request.transport;
     const networkIssue = isNetworkIssue(request);
     const detail = requestFailureDetail(request, { releaseRebuild, recovering });
-    const tooltipId = `request-detail-${String(request.id).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+    const tooltipId = requestDetailTooltipId(request.id);
     const transportLabel = networkIssue
       ? `${protocol} · 网络异常`
       : releaseRebuild
@@ -1613,7 +1707,7 @@
             ? `${protocol} · ${requestFailureLabel(request)}`
             : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
     const networkMarkup = requestDetailMarkup(request, detail, tooltipId, transportLabel);
-    return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}" tabindex="0" aria-describedby="${tooltipId}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}">${networkMarkup}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
+    return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}">${networkMarkup}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
   }
 
   function renderLiveFollow() {
@@ -1635,11 +1729,14 @@
     const body = $("[data-request-stream]");
     if (body) {
       const nextIds = displayedRequests.map((request) => String(request.id));
+      const terminal = $(".c-terminal__window");
       if (!liveStreamHydrated) {
+        restoreNetworkTooltip();
         body.innerHTML = displayedRequests.map((request) => renderRequestRow(request)).join("");
         liveStreamHydrated = true;
         renderedRequestIds = nextIds;
       } else if (nextIds.length !== renderedRequestIds.length || nextIds.some((id, index) => id !== renderedRequestIds[index])) {
+        restoreNetworkTooltip();
         let overlap = Math.min(renderedRequestIds.length, nextIds.length);
         while (overlap && renderedRequestIds.slice(-overlap).some((id, index) => id !== nextIds[index])) overlap -= 1;
         const newRequests = displayedRequests.slice(overlap);
@@ -1777,6 +1874,7 @@
       state = { ...state, ...status, technicalDetail: "" };
       if (status.catalog && JSON.stringify(status.catalog.models || []) !== previousModels) catalogDraft = null;
       if (status.modelPolicy && policySignature(status.modelPolicy) !== previousPolicy) modelPolicyDraft = null;
+      applySessionNames(state.sessionNames);
     }
     syncLiveRequests();
     renderState(options);
@@ -2100,7 +2198,7 @@
       renderLiveFollow();
     }, { passive: true });
     document.addEventListener("click", (event) => {
-      const configView = event.target.closest?.("[data-config-view]");
+      const configView = event.target.closest?.('[data-config-view][role="tab"]');
       if (configView) {
         selectConfigView(configView.dataset.configView, { focus: true });
         return;
@@ -2136,12 +2234,16 @@
       if (tab) selectTab(tab.dataset.tab);
     });
     document.addEventListener("pointerover", (event) => {
-      const trigger = event.target.closest?.(".c-request-row") || event.target.closest?.(".c-transport__detail");
-      if (trigger) positionNetworkTooltip(trigger);
+      const trigger = event.target.closest?.(".c-transport__detail");
+      if (trigger) openNetworkTooltip(trigger);
+    });
+    document.addEventListener("pointerout", (event) => {
+      const trigger = event.target.closest?.(".c-transport__detail");
+      if (trigger && !trigger.contains?.(event.relatedTarget)) closeNetworkTooltip(trigger);
     });
     window.addEventListener("resize", () => {
-      const row = document.activeElement?.closest?.(".c-request-row");
-      if (row) positionNetworkTooltip(row);
+      const detail = document.activeElement?.closest?.(".c-transport__detail");
+      if (detail) positionNetworkTooltip(detail);
     }, { passive: true });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && aiCoveBubbleOpen) {
@@ -2156,17 +2258,21 @@
       if (chartSlot && handleChartKeydown(event, chartSlot)) return;
       const tab = event.target.closest?.("[data-tab]");
       if (tab) handleTabKeydown(event, tab);
-      const configView = event.target.closest?.("[data-config-view]");
+      const configView = event.target.closest?.('[data-config-view][role="tab"]');
       if (configView) handleConfigViewKeydown(event, configView);
     });
     document.addEventListener("focusin", (event) => {
-      const networkTrigger = event.target.closest?.(".c-request-row") || event.target.closest?.(".c-transport__detail");
-      if (networkTrigger) positionNetworkTooltip(networkTrigger);
+      const networkTrigger = event.target.closest?.(".c-transport__detail");
+      if (networkTrigger) openNetworkTooltip(networkTrigger);
       const chartSlot = event.target.closest?.(".c-bar-slot");
       if (!chartSlot) return;
       const slots = Array.from(all("[data-stat-bars] .c-bar-slot"));
       const index = slots.indexOf(chartSlot);
       if (index >= 0) activeChartIndex = index;
+    });
+    document.addEventListener("focusout", (event) => {
+      const trigger = event.target.closest?.(".c-transport__detail");
+      if (trigger && !trigger.contains?.(event.relatedTarget)) closeNetworkTooltip(trigger);
     });
     document.addEventListener("change", (event) => {
       if (event.target.matches?.("[data-filter]")) renderStatistics();

@@ -80,6 +80,7 @@ pub(super) struct HttpTiming {
     saw_sse_event: bool,
     terminal_seen: bool,
     recorded: bool,
+    metadata: Option<super::traffic::RequestMetadata>,
 }
 
 impl HttpTiming {
@@ -93,7 +94,12 @@ impl HttpTiming {
             saw_sse_event: false,
             terminal_seen: false,
             recorded: false,
+            metadata: None,
         }
+    }
+
+    pub(super) fn set_metadata(&mut self, metadata: super::traffic::RequestMetadata) {
+        self.metadata = Some(metadata);
     }
 
     pub(super) fn observe(&mut self, chunk: &[u8]) {
@@ -136,15 +142,15 @@ impl HttpTiming {
             self.terminal_seen = true;
             return;
         }
+        if self.first_frame_at.is_none() {
+            self.first_frame_at = Some(Instant::now());
+        }
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data) else {
             return;
         };
         let Some(event_type) = value.get("type").and_then(serde_json::Value::as_str) else {
             return;
         };
-        if self.first_frame_at.is_none() {
-            self.first_frame_at = Some(Instant::now());
-        }
         if matches!(
             event_type,
             "response.completed"
@@ -234,21 +240,24 @@ impl HttpTiming {
         let first_token_ms = self
             .first_token_at
             .map(|first_token_at| elapsed_ms(self.input.started_at, first_token_at));
-        self.input.metrics.record_http_with_first_frame_timing(
-            HttpRequestMetric {
-                path: &self.input.path,
-                status,
-                raw_bytes: usize::try_from(self.input.raw_bytes).unwrap_or(usize::MAX),
-                sent_bytes: usize::try_from(self.input.sent_bytes).unwrap_or(usize::MAX),
-                compressed: self.input.compressed,
-                result: self.input.traffic.result,
-                route: self.input.traffic.route,
-                failure_reason,
-            },
-            first_frame_ms,
-            first_token_ms,
-            duration_ms,
-        );
+        self.input
+            .metrics
+            .record_http_with_first_frame_timing_and_metadata(
+                HttpRequestMetric {
+                    path: &self.input.path,
+                    status,
+                    raw_bytes: usize::try_from(self.input.raw_bytes).unwrap_or(usize::MAX),
+                    sent_bytes: usize::try_from(self.input.sent_bytes).unwrap_or(usize::MAX),
+                    compressed: self.input.compressed,
+                    result: self.input.traffic.result,
+                    route: self.input.traffic.route,
+                    failure_reason,
+                },
+                first_frame_ms,
+                first_token_ms,
+                duration_ms,
+                self.metadata.clone(),
+            );
     }
 }
 

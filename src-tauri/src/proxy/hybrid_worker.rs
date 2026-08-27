@@ -267,10 +267,14 @@ fn record_websocket_outcome(session: &mut Session, status: u16, failure_reason: 
         Some(_) => (TrafficResult::Error, Some(FailurePhase::HybridActive)),
         None => (TrafficResult::Success, None),
     };
+    let metadata = session.request_metadata.clone().map(|mut metadata| {
+        metadata.connection_id.clone_from(&session.connection_id);
+        metadata
+    });
     session
         .state
         .metrics
-        .record_websocket_outcome_with_first_frame_timing(
+        .record_websocket_outcome_with_first_frame_timing_and_metadata(
             TrafficRecord {
                 timestamp_ms: traffic::now_ms(),
                 status,
@@ -287,6 +291,7 @@ fn record_websocket_outcome(session: &mut Session, status: u16, failure_reason: 
             first_frame_ms,
             first_token_ms,
             duration_ms,
+            metadata,
         );
 }
 

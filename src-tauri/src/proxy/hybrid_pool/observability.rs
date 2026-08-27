@@ -208,6 +208,19 @@ impl PoolState {
 }
 
 impl HybridPool {
+    pub(super) async fn leased_connection_id(
+        &self,
+        scope: &HybridScope,
+        session_id: u64,
+    ) -> Option<u64> {
+        let state = self.inner.state.lock().await;
+        state
+            .scopes
+            .get(scope)
+            .and_then(|entry| entry.leased.get(&session_id))
+            .map(|lease| lease.connection_id)
+    }
+
     pub(in crate::proxy) async fn record_response_create(
         &self,
         scope: &HybridScope,

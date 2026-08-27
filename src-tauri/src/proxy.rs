@@ -284,21 +284,39 @@ impl Metrics {
         self.record_http_with_timing(record, None, None);
     }
 
+    #[cfg(test)]
     fn record_http_with_timing(
         &self,
         record: HttpRequestMetric<'_>,
         first_token_ms: Option<u64>,
         duration_ms: Option<u64>,
     ) {
-        self.record_http_with_first_frame_timing(record, None, first_token_ms, duration_ms);
+        self.record_http_with_timing_and_metadata(record, first_token_ms, duration_ms, None);
     }
 
-    fn record_http_with_first_frame_timing(
+    fn record_http_with_timing_and_metadata(
+        &self,
+        record: HttpRequestMetric<'_>,
+        first_token_ms: Option<u64>,
+        duration_ms: Option<u64>,
+        metadata: Option<traffic::RequestMetadata>,
+    ) {
+        self.record_http_with_first_frame_timing_and_metadata(
+            record,
+            None,
+            first_token_ms,
+            duration_ms,
+            metadata,
+        );
+    }
+
+    fn record_http_with_first_frame_timing_and_metadata(
         &self,
         record: HttpRequestMetric<'_>,
         first_frame_ms: Option<u64>,
         first_token_ms: Option<u64>,
         duration_ms: Option<u64>,
+        metadata: Option<traffic::RequestMetadata>,
     ) {
         let result = if record.status >= 400 {
             traffic::TrafficResult::Error
@@ -324,7 +342,7 @@ impl Metrics {
         if result == traffic::TrafficResult::Fallback {
             self.http_fallbacks.fetch_add(1, Ordering::Relaxed);
         }
-        self.traffic.record_with_first_frame_timing(
+        self.traffic.record_with_first_frame_timing_and_metadata(
             traffic::TrafficRecord {
                 timestamp_ms: traffic::now_ms(),
                 status: record.status,
@@ -341,6 +359,7 @@ impl Metrics {
             first_frame_ms,
             first_token_ms,
             duration_ms,
+            metadata,
         );
     }
 
@@ -502,32 +521,53 @@ impl Metrics {
         first_token_ms: Option<u64>,
         duration_ms: Option<u64>,
     ) {
-        self.record_websocket_outcome_with_first_frame_timing(
+        self.record_websocket_outcome_with_timing_and_metadata(
+            record,
+            compressed,
+            first_token_ms,
+            duration_ms,
+            None,
+        );
+    }
+
+    fn record_websocket_outcome_with_timing_and_metadata(
+        &self,
+        record: traffic::TrafficRecord<'_>,
+        compressed: bool,
+        first_token_ms: Option<u64>,
+        duration_ms: Option<u64>,
+        metadata: Option<traffic::RequestMetadata>,
+    ) {
+        self.record_websocket_outcome_with_first_frame_timing_and_metadata(
             record,
             compressed,
             None,
             first_token_ms,
             duration_ms,
+            metadata,
         );
     }
 
-    fn record_websocket_outcome_with_first_frame_timing(
+    #[allow(clippy::too_many_arguments)]
+    fn record_websocket_outcome_with_first_frame_timing_and_metadata(
         &self,
         record: traffic::TrafficRecord<'_>,
         compressed: bool,
         first_frame_ms: Option<u64>,
         first_token_ms: Option<u64>,
         duration_ms: Option<u64>,
+        metadata: Option<traffic::RequestMetadata>,
     ) {
         if is_responses_path(record.path) && record.result == traffic::TrafficResult::Success {
             self.successful_responses.fetch_add(1, Ordering::Relaxed);
         }
-        self.record_websocket_message_with_first_frame_timing(
+        self.record_websocket_message_with_first_frame_timing_and_metadata(
             record,
             compressed,
             first_frame_ms,
             first_token_ms,
             duration_ms,
+            metadata,
         );
     }
 
@@ -542,23 +582,42 @@ impl Metrics {
         first_token_ms: Option<u64>,
         duration_ms: Option<u64>,
     ) {
-        self.record_websocket_message_with_first_frame_timing(
+        self.record_websocket_message_with_timing_and_metadata(
+            record,
+            compressed,
+            first_token_ms,
+            duration_ms,
+            None,
+        );
+    }
+
+    fn record_websocket_message_with_timing_and_metadata(
+        &self,
+        record: traffic::TrafficRecord<'_>,
+        compressed: bool,
+        first_token_ms: Option<u64>,
+        duration_ms: Option<u64>,
+        metadata: Option<traffic::RequestMetadata>,
+    ) {
+        self.record_websocket_message_with_first_frame_timing_and_metadata(
             record,
             compressed,
             None,
             first_token_ms,
             duration_ms,
+            metadata,
         );
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record_websocket_message_with_first_frame_timing(
+    fn record_websocket_message_with_first_frame_timing_and_metadata(
         &self,
         record: traffic::TrafficRecord<'_>,
         compressed: bool,
         first_frame_ms: Option<u64>,
         first_token_ms: Option<u64>,
         duration_ms: Option<u64>,
+        metadata: Option<traffic::RequestMetadata>,
     ) {
         self.websocket_messages.fetch_add(1, Ordering::Relaxed);
         self.websocket_raw_bytes
@@ -572,15 +631,27 @@ impl Metrics {
             self.record_websocket_failure();
         }
         if first_frame_ms.is_none() && first_token_ms.is_none() && duration_ms.is_none() {
-            self.record_websocket_traffic(record);
+            self.record_websocket_traffic_with_metadata(record, metadata);
         } else {
-            self.record_websocket_traffic_with_first_frame_timing(
+            self.record_websocket_traffic_with_first_frame_timing_and_metadata(
                 record,
                 first_frame_ms,
                 first_token_ms,
                 duration_ms,
+                metadata,
             );
         }
+    }
+
+    fn record_websocket_traffic_with_metadata(
+        &self,
+        record: traffic::TrafficRecord<'_>,
+        metadata: Option<traffic::RequestMetadata>,
+    ) {
+        self.traffic
+            .record_with_timing_and_metadata(record, None, None, metadata);
+        #[cfg(test)]
+        self.traffic_recorded.notify_one();
     }
 
     fn record_websocket_traffic(&self, record: traffic::TrafficRecord<'_>) {
@@ -589,18 +660,20 @@ impl Metrics {
         self.traffic_recorded.notify_one();
     }
 
-    fn record_websocket_traffic_with_first_frame_timing(
+    fn record_websocket_traffic_with_first_frame_timing_and_metadata(
         &self,
         record: traffic::TrafficRecord<'_>,
         first_frame_ms: Option<u64>,
         first_token_ms: Option<u64>,
         duration_ms: Option<u64>,
+        metadata: Option<traffic::RequestMetadata>,
     ) {
-        self.traffic.record_with_first_frame_timing(
+        self.traffic.record_with_first_frame_timing_and_metadata(
             record,
             first_frame_ms,
             first_token_ms,
             duration_ms,
+            metadata,
         );
         #[cfg(test)]
         self.traffic_recorded.notify_one();
@@ -952,11 +1025,13 @@ fn record_http_without_stream(
     metrics: &Metrics,
     started_at: Instant,
     record: HttpRequestMetric<'_>,
+    metadata: Option<traffic::RequestMetadata>,
 ) {
-    metrics.record_http_with_timing(
+    metrics.record_http_with_timing_and_metadata(
         record,
         None,
         Some(timing::elapsed_ms(started_at, Instant::now())),
+        metadata,
     );
 }
 
@@ -990,6 +1065,7 @@ async fn proxy_http(
     proxy_http_with_control(state, request, traffic, None).await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn proxy_http_with_control(
     state: ProxyState,
     request: AxumRequest,
@@ -1014,10 +1090,12 @@ async fn proxy_http_with_control(
                 route: traffic.route,
                 failure_reason: Some("local request body limit exceeded"),
             },
+            None,
         );
         return json_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
     };
     let raw_len = raw_body.len();
+    let metadata = traffic::request_metadata(&parts.headers, &raw_body);
     let should_compress = state.compression_enabled.load(Ordering::Relaxed)
         && is_compressible_json(&parts.method, &parts.headers);
     let (outbound_body, compressed) = if should_compress {
@@ -1041,6 +1119,7 @@ async fn proxy_http_with_control(
                         route: traffic.route,
                         failure_reason: None,
                     },
+                    Some(metadata.clone()),
                 );
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, "compression failed");
             }
@@ -1074,11 +1153,12 @@ async fn proxy_http_with_control(
                 route: traffic.route,
                 failure_reason: None,
             },
+            Some(metadata.clone()),
         );
         return json_error(StatusCode::BAD_GATEWAY, "upstream request failed");
     };
     let status = upstream_response.status();
-    let timing = HttpTiming::new(HttpTimingInput {
+    let mut timing = HttpTiming::new(HttpTimingInput {
         metrics: Arc::clone(&state.metrics),
         started_at,
         path,
@@ -1091,6 +1171,7 @@ async fn proxy_http_with_control(
             .then_some("HTTP upstream returned status 413".to_owned()),
         control,
     });
+    timing.set_metadata(metadata);
     streaming_http_response(upstream_response, timing)
 }
 
@@ -1363,7 +1444,9 @@ mod tests {
         });
 
         timing.observe(
-            br#"data: {"type":"response.output_text.delta","delta":"hi"}
+            br#"data: {"type":"response.created","response":{"output":[]}}
+
+data: {"type":"response.output_text.delta","delta":"hi"}
 
 "#,
         );
@@ -1383,7 +1466,12 @@ mod tests {
                 .and_then(serde_json::Value::as_u64)
                 .is_some()
         );
-        assert!(event.get("firstFrameMs").is_some());
+        assert!(
+            event
+                .get("firstFrameMs")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
         assert!(
             event
                 .get("durationMs")
@@ -1437,7 +1525,7 @@ mod tests {
             failure_reason: None,
             control: None,
         });
-        timing.observe(b"data: not-json\n\n");
+        timing.observe(br#"data: {"type":"response.output_text.delta"}"#);
         timing.finish();
 
         let event = serde_json::to_value(
@@ -1449,7 +1537,6 @@ mod tests {
                 .expect("response event missing"),
         )
         .expect("event must serialize");
-        assert!(event.get("firstFrameMs").is_none());
         assert!(event.get("firstTokenMs").is_none());
     }
 

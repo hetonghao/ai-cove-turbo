@@ -12,11 +12,11 @@ async fn active_ws_not_submitted_fallback_completes_over_http_on_same_client() -
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
     server.fixture.wait_ready(6).await?;
-    send_create(&mut client).await?;
+    send_create_with_metadata(&mut client).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
 
     // When: New API proves that the next WS request was not submitted.
-    send_create(&mut client).await?;
+    send_create_with_metadata(&mut client).await?;
     server.fixture.wait_messages(2).await?;
 
     // Then: Turbo consumes the transport error and completes exactly one HTTP request.
@@ -38,6 +38,9 @@ async fn active_ws_not_submitted_fallback_completes_over_http_on_same_client() -
             .is_some_and(|events| events.iter().any(|event| {
                 event.get("route") == Some(&Value::from("hybridRecoveryHttp"))
                     && event.get("result") == Some(&Value::from("fallback"))
+                    && event.get("model") == Some(&Value::from("gpt-5.3-codex"))
+                    && event.get("threadId") == Some(&Value::from("thread-123"))
+                    && event.get("sessionId") == Some(&Value::from("session-123"))
             }))
     );
 

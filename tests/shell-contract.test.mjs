@@ -69,6 +69,9 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.match(configPanel, /class="b-version-bar__percent[^>]*data-state="update-progress"/);
   assert.match(css, /\.b-version-bar \.b-progress\s*\{[^}]*position: absolute;/s);
   assert.match(css, /transform: scaleX\(var\(--progress, 0\)\)/);
+  assert.match(css, /\.c-transport__tooltip\s*\{[\s\S]*?max-height:\s*min\(420px, calc\(100dvh - 32px\)\);[\s\S]*?overflow-y:\s*auto;/);
+  assert.match(css, /\.c-transport__tooltip\s*\{[\s\S]*?z-index:\s*var\(--turbo-focus-layer\);[\s\S]*?background:\s*var\(--turbo-tooltip-bg\);[\s\S]*?visibility:\s*hidden;/);
+  assert.match(css, /\.c-transport__tooltip\.is-visible\s*\{[\s\S]*?opacity:\s*1;[\s\S]*?visibility:\s*visible;/);
   assert.doesNotMatch(css, /\.b-progress\s*\{[^}]*height: 18px;/s);
   assert.doesNotMatch(configPanel.slice(configCardIndex), /data-action="check-for-updates"|data-state="update-state"/);
   assert.doesNotMatch(html, /00:09:42|STREAMING/);

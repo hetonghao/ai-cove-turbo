@@ -97,6 +97,87 @@ pub(crate) struct RequestEvent {
     first_token_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection_id: Option<String>,
+}
+
+impl RequestEvent {
+    pub(crate) fn thread_id(&self) -> Option<&str> {
+        self.thread_id.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RequestMetadata {
+    pub(crate) model: Option<String>,
+    pub(crate) thread_id: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) connection_id: Option<String>,
+}
+
+pub(crate) fn request_metadata(headers: &axum::http::HeaderMap, payload: &[u8]) -> RequestMetadata {
+    let value = serde_json::from_slice::<serde_json::Value>(payload).ok();
+    let object = value.as_ref().and_then(serde_json::Value::as_object);
+    let client_metadata = object
+        .and_then(|object| object.get("client_metadata"))
+        .and_then(serde_json::Value::as_object);
+    let header_turn_metadata = header_string(headers, "x-codex-turn-metadata")
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(&metadata).ok());
+    let turn_metadata = client_metadata
+        .and_then(|metadata| metadata.get("x-codex-turn-metadata"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .or(header_turn_metadata);
+    let header_thread_id = header_string(headers, "thread-id");
+    let header_session_id = header_string(headers, "session-id");
+
+    RequestMetadata {
+        model: object
+            .and_then(|object| object.get("model"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned),
+        thread_id: turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("thread_id"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                client_metadata
+                    .and_then(|metadata| metadata.get("thread_id"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or(header_thread_id.as_deref())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned),
+        session_id: turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("session_id"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                client_metadata
+                    .and_then(|metadata| metadata.get("session_id"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or(header_session_id.as_deref())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned),
+        connection_id: None,
+    }
+}
+
+fn header_string(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -300,15 +381,32 @@ impl TrafficStore {
         first_token_ms: Option<u64>,
         duration_ms: Option<u64>,
     ) {
-        self.record_with_first_frame_timing(record, None, first_token_ms, duration_ms);
+        self.record_with_timing_and_metadata(record, first_token_ms, duration_ms, None);
     }
 
-    pub(crate) fn record_with_first_frame_timing(
+    pub(crate) fn record_with_timing_and_metadata(
+        &self,
+        record: TrafficRecord<'_>,
+        first_token_ms: Option<u64>,
+        duration_ms: Option<u64>,
+        metadata: Option<RequestMetadata>,
+    ) {
+        self.record_with_first_frame_timing_and_metadata(
+            record,
+            None,
+            first_token_ms,
+            duration_ms,
+            metadata,
+        );
+    }
+
+    pub(crate) fn record_with_first_frame_timing_and_metadata(
         &self,
         record: TrafficRecord<'_>,
         first_frame_ms: Option<u64>,
         first_token_ms: Option<u64>,
         duration_ms: Option<u64>,
+        metadata: Option<RequestMetadata>,
     ) {
         if record.failure_phase == Some(FailurePhase::HybridIdle) && record.status != 1012 {
             return;
@@ -328,6 +426,10 @@ impl TrafficStore {
             first_frame_ms,
             first_token_ms,
             duration_ms,
+            model: metadata.as_ref().and_then(|item| item.model.clone()),
+            thread_id: metadata.as_ref().and_then(|item| item.thread_id.clone()),
+            session_id: metadata.as_ref().and_then(|item| item.session_id.clone()),
+            connection_id: metadata.and_then(|item| item.connection_id),
         };
         let mut state = lock(&self.state);
         state.next_id = state.next_id.saturating_add(1);

@@ -102,6 +102,23 @@ async fn send_create(client: &mut ClientWebSocket) -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
+async fn send_create_with_metadata(client: &mut ClientWebSocket) -> io::Result<()> {
+    let request = serde_json::json!({
+        "type": "response.create",
+        "model": "gpt-5.3-codex",
+        "input": "test",
+        "client_metadata": {
+            "session_id": "session-123",
+            "thread_id": "thread-123",
+            "x-codex-turn-metadata": r#"{"session_id":"session-123","thread_id":"thread-123"}"#,
+        },
+    });
+    client
+        .send(Message::Text(request.to_string().into()))
+        .await
+        .map_err(io::Error::other)
+}
+
 async fn send_create_with_size(client: &mut ClientWebSocket, bytes: usize) -> io::Result<()> {
     const PREFIX: &str = r#"{"type":"response.create","model":"test","input":""#;
     const SUFFIX: &str = r#""}"#;
@@ -204,7 +221,7 @@ async fn local_101_stays_responsive_when_pool_prewarm_fails() -> io::Result<()> 
         delay_http: false,
     })
     .await?;
-    let (proxy, _) = start_test_proxy(&server).await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
     server.fixture.wait_private(6).await?;
@@ -288,15 +305,6 @@ async fn delayed_prewarm_keeps_not_ready_turns_http_then_switches_to_ws() -> io:
     assert_eq!(snapshot.hybrid_cold_start_http, 2);
     assert_eq!(snapshot.hybrid_recovery_http, 0);
     assert_eq!(snapshot.direct_http, 0);
-    assert!(
-        metrics
-            .traffic_snapshot()
-            .recent_requests
-            .iter()
-            .filter_map(|event| serde_json::to_value(event).ok())
-            .any(|event| event.get("route") == Some(&Value::from("hybridWs"))
-                && event.get("firstFrameMs").is_some())
-    );
     let routes = metrics
         .traffic_snapshot()
         .recent_requests
@@ -996,6 +1004,48 @@ async fn active_ws_silence_pings_and_pong_keeps_the_request_alive() -> io::Resul
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     assert_eq!(server.fixture.counts().await.active_pings, 1);
     assert_counts_with_min_private(server.fixture.counts().await, 6, 1, 0);
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_request_records_model_and_codex_context() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    server.fixture.wait_ready(6).await?;
+
+    send_create_with_metadata(&mut client).await?;
+    server.fixture.wait_messages(1).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+
+    let event = metrics
+        .traffic_snapshot()
+        .recent_requests
+        .into_iter()
+        .find_map(|event| {
+            let event = serde_json::to_value(event).ok()?;
+            (event.get("route") == Some(&Value::from("hybridWs"))).then_some(event)
+        })
+        .ok_or_else(|| io::Error::other("websocket traffic event missing"))?;
+    assert_eq!(event.get("model"), Some(&Value::from("gpt-5.3-codex")));
+    assert_eq!(event.get("threadId"), Some(&Value::from("thread-123")));
+    assert_eq!(event.get("sessionId"), Some(&Value::from("session-123")));
+    assert!(event.get("firstFrameMs").is_some());
+    assert!(
+        event
+            .get("connectionId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    );
+
     drop(client);
     proxy.stop().await;
     server.stop().await;

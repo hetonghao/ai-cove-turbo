@@ -10,6 +10,7 @@ use super::super::{
         SessionHandle,
     },
     model_policy::ModelPolicy,
+    traffic::RequestMetadata,
     transport_capability::CapabilityHint,
 };
 use super::{Active, ActiveKind, ClientWebSocket, WebSocketSendReceipt, WorkerEvent, flow, worker};
@@ -33,6 +34,8 @@ pub(super) struct Session {
     pub(super) max_websocket_request_bytes: usize,
     observed_activity: Option<ConnectionActivity>,
     pub(super) thread_id: Option<String>,
+    pub(super) request_metadata: Option<RequestMetadata>,
+    pub(super) connection_id: Option<String>,
     pub(super) last_terminal_response_id: Option<String>,
     pub(super) response_started: bool,
     pub(super) drain_reconnect_pending: bool,
@@ -68,6 +71,8 @@ impl Session {
             max_websocket_request_bytes: super::MAX_HYBRID_WEBSOCKET_REQUEST_BYTES,
             observed_activity: None,
             thread_id: None,
+            request_metadata: None,
+            connection_id: None,
             last_terminal_response_id: None,
             response_started: false,
             drain_reconnect_pending: false,

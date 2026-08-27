@@ -2,6 +2,7 @@ use super::*;
 
 use std::{error::Error, fs, io::Write};
 
+use axum::http::{HeaderMap, HeaderValue};
 use tempfile::tempdir;
 
 fn record(timestamp_ms: u64, raw_bytes: u64) -> TrafficRecord<'static> {
@@ -254,7 +255,13 @@ fn persisted_traffic_keeps_websocket_failure_context() -> Result<(), Box<dyn Err
 #[test]
 fn persisted_traffic_keeps_optional_timing_measurements() -> Result<(), Box<dyn Error>> {
     let store = TrafficStore::default();
-    store.record_with_first_frame_timing(record(21_000, 100), Some(120), Some(420), Some(1_800));
+    store.record_with_first_frame_timing_and_metadata(
+        record(21_000, 100),
+        Some(120),
+        Some(420),
+        Some(1_800),
+        None,
+    );
 
     let event = serde_json::to_value(
         store
@@ -269,6 +276,62 @@ fn persisted_traffic_keeps_optional_timing_measurements() -> Result<(), Box<dyn 
     assert_eq!(event.get("durationMs"), Some(&serde_json::json!(1_800)));
     assert_eq!(event.get("firstFrameMs"), Some(&serde_json::json!(120)));
     Ok(())
+}
+
+#[test]
+fn request_details_preserve_model_and_connection_context() -> Result<(), Box<dyn Error>> {
+    let store = TrafficStore::default();
+    store.record_with_timing_and_metadata(
+        record(21_000, 100),
+        Some(420),
+        Some(1_800),
+        Some(RequestMetadata {
+            model: Some("gpt-5.3-codex".to_owned()),
+            thread_id: Some("thread-123".to_owned()),
+            session_id: Some("7".to_owned()),
+            connection_id: Some("42".to_owned()),
+        }),
+    );
+
+    let event = serde_json::to_value(
+        store
+            .snapshot_at(21_000)
+            .recent_requests
+            .into_iter()
+            .next()
+            .ok_or("request detail event missing")?,
+    )?;
+    assert_eq!(
+        event.get("model"),
+        Some(&serde_json::json!("gpt-5.3-codex"))
+    );
+    assert_eq!(
+        event.get("threadId"),
+        Some(&serde_json::json!("thread-123"))
+    );
+    assert_eq!(event.get("sessionId"), Some(&serde_json::json!("7")));
+    assert_eq!(event.get("connectionId"), Some(&serde_json::json!("42")));
+    Ok(())
+}
+
+#[test]
+fn request_metadata_reads_model_and_codex_ids() {
+    let mut headers = HeaderMap::new();
+    headers.insert("session-id", HeaderValue::from_static("session-header"));
+    let payload = serde_json::json!({
+        "model": "gpt-5.3-codex",
+        "client_metadata": {
+            "session_id": "session-body",
+            "thread_id": "thread-flat",
+            "x-codex-turn-metadata": r#"{"session_id":"session-turn","thread_id":"thread-canonical"}"#,
+        },
+    });
+
+    let metadata = request_metadata(&headers, payload.to_string().as_bytes());
+
+    assert_eq!(metadata.model.as_deref(), Some("gpt-5.3-codex"));
+    assert_eq!(metadata.thread_id.as_deref(), Some("thread-canonical"));
+    assert_eq!(metadata.session_id.as_deref(), Some("session-turn"));
 }
 
 #[test]

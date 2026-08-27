@@ -8,6 +8,7 @@ use crate::proxy::HttpTraffic;
 use super::super::{
     hybrid_pool::{Lease, LeaseRetirement},
     model_policy::Transport,
+    traffic,
 };
 use super::{
     Active, ClientWebSocket, Session,
@@ -156,7 +157,7 @@ async fn reject_missing_continuation(
     true
 }
 
-#[allow(clippy::large_futures)]
+#[allow(clippy::large_futures, clippy::too_many_lines)]
 async fn start_response(
     client: &mut ClientWebSocket,
     session: &mut Session,
@@ -189,6 +190,9 @@ async fn start_response(
     if !session.bind_thread_id(prepared.thread_id).await {
         return reject_thread_switch(client).await;
     }
+    let mut metadata = traffic::request_metadata(&session.client_headers, &payload);
+    metadata.thread_id = session.thread_id.clone().or(metadata.thread_id);
+    session.request_metadata = Some(metadata);
     session.response_started = true;
     let previous_response_id = prepared.previous_response_id;
     if previous_response_id.is_none() {
@@ -217,6 +221,11 @@ async fn start_response(
         .await;
     }
     if !large_http_request && let Some(lease) = session.ready.take() {
+        session.connection_id = session
+            .handle
+            .leased_connection_id()
+            .await
+            .map(|connection_id| connection_id.to_string());
         session.handle.record_response_create().await;
         session
             .observe_activity(super::ConnectionActivity::Up)

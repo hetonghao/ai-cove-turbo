@@ -21,6 +21,7 @@ use url::Url;
 
 use crate::{
     catalog::{self, CatalogModelUpdate, CatalogStatus},
+    codex_thread_title::CodexThreadInfo,
     config::{
         AI_COVE_UPSTREAM, ConfigError, ManagedConfig, ManagedOwnership, Preflight, RestoreOutcome,
         SessionHandoff, StaleRecovery, UpstreamCompatibility, managed_ownership, preflight,
@@ -33,11 +34,24 @@ use crate::{
         ProxyHandle, ProxyOptions, start_proxy_with_policy,
         traffic::{RequestEvent, TrafficWindow},
     },
+    session_names::{SessionNameCache, SessionNameSnapshot, SessionNameTask},
 };
 
 const DEFAULT_PORT: u16 = 44_175;
 const TRAFFIC_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 const TRAFFIC_COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+fn codex_database_path(config_path: &Path) -> PathBuf {
+    let codex_home = std::env::var_os("CODEX_HOME").map_or_else(
+        || {
+            config_path
+                .parent()
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+        },
+        PathBuf::from,
+    );
+    codex_home.join("state_5.sqlite")
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimePaths {
@@ -133,6 +147,7 @@ pub(crate) struct AppStatus {
     pub(crate) hybrid_large_request_http: u64,
     pub(crate) direct_http: u64,
     pub(crate) recent_requests: Vec<RequestEvent>,
+    pub(crate) session_names: SessionNameSnapshot,
     pub(crate) traffic_windows: Vec<TrafficWindow>,
     pub(crate) autostart_enabled: bool,
     pub(crate) dock_visible: bool,
@@ -190,6 +205,7 @@ impl AppStatus {
             hybrid_large_request_http: 0,
             direct_http: 0,
             recent_requests: Vec::new(),
+            session_names: std::collections::HashMap::<String, Option<CodexThreadInfo>>::new(),
             traffic_windows: Vec::new(),
             autostart_enabled: true,
             dock_visible: preferences.dock_visible,
@@ -235,6 +251,8 @@ pub(crate) struct AppRuntime {
     codex_pid_before_restart: Mutex<Option<u32>>,
     activation_baseline: AtomicU64,
     shutting_down: AtomicBool,
+    session_names: Arc<SessionNameCache>,
+    session_name_task: AsyncMutex<Option<SessionNameTask>>,
 }
 
 #[derive(Debug)]
@@ -247,6 +265,7 @@ impl AppRuntime {
     pub(crate) fn new(paths: RuntimePaths) -> Arc<Self> {
         let preferences = load_preferences(&paths.preferences_path());
         let mut status = AppStatus::starting(&preferences);
+        let session_names = SessionNameCache::new(codex_database_path(&paths.config_path));
         let home = paths
             .config_path
             .parent()
@@ -270,6 +289,8 @@ impl AppRuntime {
             codex_pid_before_restart: Mutex::new(None),
             activation_baseline: AtomicU64::new(0),
             shutting_down: AtomicBool::new(false),
+            session_names,
+            session_name_task: AsyncMutex::new(None),
         })
     }
 
@@ -279,6 +300,7 @@ impl AppRuntime {
         if self.shutting_down.load(Ordering::Relaxed) {
             return;
         }
+        self.start_session_name_task().await;
         self.start_traffic_persistence().await;
         if self.proxy.lock().await.is_some() {
             return;
@@ -410,6 +432,7 @@ impl AppRuntime {
         self.refresh_catalog();
         self.refresh_ownership().await;
         self.verify_codex_restart().await;
+        let _ = self.connection_snapshot().await;
         let metrics = self.metrics.snapshot();
         let waiting_for_request = read_lock(&self.status).codex_state == "waiting_request";
         if metrics.successful_responses > self.activation_baseline.load(Ordering::Relaxed)
@@ -470,7 +493,11 @@ impl AppRuntime {
         status.hybrid_large_request_http = metrics.hybrid_large_request_http;
         status.direct_http = metrics.direct_http;
         let traffic = self.metrics.traffic_snapshot();
+        self.session_names
+            .observe_requests(&traffic.recent_requests)
+            .await;
         status.recent_requests = traffic.recent_requests;
+        status.session_names = self.session_names.snapshot().await;
         status.traffic_windows = traffic.windows;
         if status.websocket_state != "conflict" {
             status.websocket_state = if !status.websocket_enabled {
@@ -518,10 +545,13 @@ impl AppRuntime {
 
     pub(crate) async fn connection_snapshot(&self) -> ConnectionSnapshot {
         let proxy = self.proxy.lock().await;
-        match proxy.as_ref() {
+        let snapshot = match proxy.as_ref() {
             Some(proxy) => proxy.connection_snapshot().await,
             None => ConnectionSnapshot::default(),
-        }
+        };
+        drop(proxy);
+        self.session_names.observe_connections(&snapshot).await;
+        snapshot
     }
 
     pub(crate) async fn update_model_policy(
@@ -801,6 +831,7 @@ impl AppRuntime {
     pub(crate) async fn shutdown(&self) -> Result<(), ConfigError> {
         let _guard = self.lifecycle_lock.lock().await;
         self.shutting_down.store(true, Ordering::Relaxed);
+        self.stop_session_name_task().await;
         let managed = lock_mutex(&self.managed).clone();
         let recovery_path = self.paths.recovery_path();
         let handoff_path = self.paths.session_handoff_path();
@@ -893,6 +924,20 @@ impl AppRuntime {
         let path = self.paths.traffic_path();
         let task = tauri::async_runtime::spawn(persist_traffic(metrics, path, stopped));
         *persistence = Some(TrafficPersistence { stop, task });
+    }
+
+    async fn start_session_name_task(&self) {
+        let mut task = self.session_name_task.lock().await;
+        if task.is_none() {
+            *task = Some(self.session_names.start());
+        }
+    }
+
+    async fn stop_session_name_task(&self) {
+        let task = self.session_name_task.lock().await.take();
+        if let Some(task) = task {
+            task.stop().await;
+        }
     }
 
     async fn stop_traffic_persistence(&self) -> Result<(), ConfigError> {

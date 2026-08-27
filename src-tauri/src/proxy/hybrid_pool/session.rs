@@ -163,6 +163,12 @@ impl SessionHandle {
             .await;
     }
 
+    pub(in crate::proxy) async fn leased_connection_id(&self) -> Option<u64> {
+        self.pool
+            .leased_connection_id(&self.scope, self.session_id)
+            .await
+    }
+
     pub(in crate::proxy) async fn has_initialized(&self) -> bool {
         self.pool.has_initialized(&self.scope).await
     }
