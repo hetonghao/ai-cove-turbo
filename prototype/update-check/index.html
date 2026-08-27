@@ -9,9 +9,8 @@
     <title>Turbo 更新提示气泡原型</title>
     <link rel="icon" type="image/png" href="../assets/turbo-icon.png" />
     <link rel="stylesheet" href="./styles.css" />
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
   </head>
-  <body data-variant="A" data-route="turbo">
+  <body data-variant="B" data-route="turbo">
     <a class="skip-link" href="#prototype-main">跳到原型内容</a>
 
     <div class="turbo-shell">
@@ -23,8 +22,9 @@
             <span><strong>Turbo</strong><small>AI Cove</small></span>
           </a>
           <div class="header-bubble-slot">
-          <section class="bubble-variant bubble-variant--brand" data-variant-panel="B" aria-label="方案 B，品牌入口下方气泡" hidden>
-            <aside class="update-bubble update-bubble--brand" data-update-card>
+          <section class="bubble-variant bubble-variant--brand" aria-label="B 方案，品牌入口下方 Tilted Card 气泡">
+            <aside class="update-bubble update-bubble--brand update-bubble--tilted" data-update-card data-tilt-card>
+              <span class="tilt-glare" data-tilt-glare aria-hidden="true"></span>
               <span class="bubble-label" data-card-state>发现新版本</span><h2>更新已准备好</h2><p data-card-message>v0.1.0-beta.11 已通过签名校验。</p>
               <div class="bubble-actions"><button class="button button--primary" type="button" data-action="install">立即更新</button><button class="button button--quiet" type="button" data-action="ignore">忽略</button></div>
             </aside>
@@ -42,24 +42,6 @@
           <div class="version-row">
             <div class="version-lockup"><span aria-hidden="true">//</span><strong>AI COVE TURBO</strong><em>/ SETTING</em><code>v0.1.0-beta.10</code></div>
             <div class="version-status"><span class="status-dot" data-status-dot></span><span data-hero-status>检查中</span><button type="button" class="text-button" data-action="open">重新打开</button></div>
-          </div>
-
-          <div class="bubble-stage">
-            <section class="bubble-variant bubble-variant--rail" data-variant-panel="A" aria-label="方案 A，版本栏锚定气泡">
-              <div class="bubble-anchor bubble-anchor--rail" aria-hidden="true"></div>
-              <aside class="update-bubble" data-update-card>
-                <div class="bubble-top"><span class="bubble-icon"><img src="../assets/turbo-icon.png" alt="" /></span><span class="bubble-label" data-card-state>发现新版本</span></div>
-                <h2>Turbo 有新版本</h2><p data-card-message>v0.1.0-beta.11 可以安装。今天只提醒一次。</p>
-                <div class="bubble-actions"><button class="button button--primary" type="button" data-action="install">立即更新</button><button class="button button--quiet" type="button" data-action="ignore">忽略</button></div>
-              </aside>
-            </section>
-
-            <section class="bubble-variant bubble-variant--toast" data-variant-panel="C" aria-label="方案 C，右下角轻提示" hidden>
-              <aside class="update-bubble update-bubble--toast" data-update-card>
-                <div><span class="bubble-label" data-card-state>发现新版本</span><h2>有新的 Turbo</h2><p data-card-message>v0.1.0-beta.11 可更新</p></div>
-                <div class="bubble-actions"><button class="button button--primary" type="button" data-action="install">立即更新</button><button class="button button--quiet" type="button" data-action="ignore">忽略</button></div>
-              </aside>
-            </section>
           </div>
 
           <div class="config-card">
@@ -96,7 +78,7 @@
     <aside class="prototype-tools" aria-label="原型控制">
       <div class="tool-group"><span>测试日期</span><button type="button" data-action="day-today" aria-pressed="true">今天</button><button type="button" data-action="day-tomorrow" aria-pressed="false">模拟明天</button></div>
       <div class="tool-group"><button type="button" data-action="open">重新打开 Turbo</button><button type="button" data-action="reset">重置</button></div>
-      <div class="variant-switcher" aria-label="原型方案切换"><button type="button" data-variant-step="-1" aria-label="上一个方案"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3-5 5 5 5" /></svg></button><strong data-variant-label>A — 版本栏锚定气泡</strong><button type="button" data-variant-step="1" aria-label="下一个方案"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5" /></svg></button></div>
+      <span class="locked-variant">B · 品牌入口下方气泡 · Tilted Card</span>
       <details class="state-inspector"><summary>状态检查器</summary><pre data-state-inspector></pre></details>
     </aside>
 

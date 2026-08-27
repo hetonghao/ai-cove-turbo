@@ -1,16 +1,11 @@
 (() => {
   "use strict";
 
-  // PROTOTYPE: 只验证更新提示气泡与跳转逻辑，不重做现有更新流程。
-  const variants = [
-    { key: "A", name: "版本栏锚定气泡" },
-    { key: "B", name: "品牌入口下方气泡" },
-    { key: "C", name: "右下角轻提示" },
-  ];
+  // PROTOTYPE: B 方案锁定，验证品牌入口下方 Tilted Card 气泡。
   const baseDate = new Date();
   const latestVersion = "0.1.0-beta.11";
   const state = {
-    variant: "A", dayOffset: 0, route: "turbo", currentVersion: "0.1.0-beta.10", latestVersion,
+    dayOffset: 0, route: "turbo", currentVersion: "0.1.0-beta.10", latestVersion,
     lastCheckDay: null, ignoredDay: null, updateState: "idle", bubbleOpen: false,
     checkCount: 0, updateProgress: 0, autoClickStatus: "未触发", activity: [],
   };
@@ -32,7 +27,7 @@
 
   function updateUrl() {
     const url = new URL(window.location.href);
-    url.searchParams.set("variant", state.variant);
+    url.searchParams.set("variant", "B");
     url.searchParams.set("day", String(state.dayOffset));
     window.history.replaceState({}, "", url);
   }
@@ -43,19 +38,6 @@
     all("[data-route-view]").forEach((view) => { view.hidden = view.dataset.routeView !== route; });
     const existingUpdateButton = $(".existing-update-button");
     if (existingUpdateButton && route === "turbo") existingUpdateButton.disabled = true;
-    const view = $(`[data-route-view="${route}"]`);
-    if (view && window.gsap && route === "update-page") window.gsap.fromTo(view, { opacity: 0.35, y: 8 }, { opacity: 1, y: 0, duration: 0.28, ease: "power2.out" });
-  }
-
-  function setVariant(variant) {
-    const changed = state.variant !== document.body.dataset.variant;
-    state.variant = variant;
-    document.body.dataset.variant = variant;
-    all("[data-variant-panel]").forEach((panel) => { panel.hidden = panel.dataset.variantPanel !== variant; });
-    const selected = variants.find((item) => item.key === variant);
-    $("[data-variant-label]").textContent = `${selected.key} — ${selected.name}`;
-    const panel = $(`[data-variant-panel="${variant}"]`);
-    if (changed && panel && window.gsap && variant !== "C") window.gsap.fromTo(panel, { opacity: 0.35, x: 10 }, { opacity: 1, x: 0, duration: 0.24, ease: "power2.out" });
   }
 
   function setStatus(updateState, message, bubble = state.bubbleOpen) {
@@ -161,9 +143,10 @@
     $("[data-install-progress]").style.transform = `scaleX(${state.updateProgress / 100})`;
     $('[data-route-view="update-page"] [role="progressbar"]').setAttribute("aria-valuenow", String(state.updateProgress));
     $("[data-footer-state]").textContent = state.activity[0] || `${dayLabel()}等待每日检查`;
-    $("[data-state-inspector]").textContent = JSON.stringify({ ...state, day: currentDay }, null, 2);
+    $("[data-state-inspector]").textContent = JSON.stringify({ ...state, day: currentDay, variant: "B" }, null, 2);
+    $("[data-action=day-today]").setAttribute("aria-pressed", String(state.dayOffset === 0));
+    $("[data-action=day-tomorrow]").setAttribute("aria-pressed", String(state.dayOffset === 1));
     all('[data-action="install"], [data-action="ignore"]').forEach((control) => { control.disabled = state.updateState !== "available"; });
-    setVariant(state.variant);
     setRoute(state.route);
     updateUrl();
   }
@@ -177,37 +160,62 @@
     if (action === "day-tomorrow") switchDay(1);
   }
 
-  function handleExistingUpdateClick() {
-    if (state.route !== "update-page") return;
-    state.autoClickStatus = "已自动点击更新";
-    state.updateState = "installing";
-    addActivity("现有更新页收到自动点击");
-    render();
-  }
-
-  function stepVariant(direction) {
-    const index = variants.findIndex((item) => item.key === state.variant);
-    setVariant(variants[(index + direction + variants.length) % variants.length].key);
-    render();
+  function bindTiltedCard() {
+    const card = $("[data-tilt-card]");
+    const glare = $("[data-tilt-glare]");
+    if (!card || !glare) return;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const target = { x: 0, y: 0, scale: 1, glareX: 50, glareY: 50 };
+    const current = { ...target };
+    let frame = 0;
+    let active = false;
+    const tick = () => {
+      frame = 0;
+      current.x += (target.x - current.x) * 0.16;
+      current.y += (target.y - current.y) * 0.16;
+      current.scale += (target.scale - current.scale) * 0.16;
+      current.glareX += (target.glareX - current.glareX) * 0.16;
+      current.glareY += (target.glareY - current.glareY) * 0.16;
+      if (!reducedMotion.matches) {
+        card.style.transform = `perspective(800px) rotateX(${current.y}deg) rotateY(${current.x}deg) scale(${current.scale})`;
+        card.style.setProperty("--tilt-glare-x", `${current.glareX}%`);
+        card.style.setProperty("--tilt-glare-y", `${current.glareY}%`);
+        glare.style.opacity = active ? "1" : "0";
+      }
+      if (active || Math.abs(target.x - current.x) > 0.05 || Math.abs(target.y - current.y) > 0.05 || Math.abs(target.scale - current.scale) > 0.001) frame = window.requestAnimationFrame(tick);
+    };
+    const schedule = () => { if (!frame) frame = window.requestAnimationFrame(tick); };
+    card.addEventListener("pointerenter", (event) => { if (event.pointerType === "touch" || reducedMotion.matches) return; active = true; target.scale = 1.025; schedule(); });
+    card.addEventListener("pointermove", (event) => {
+      if (event.pointerType === "touch" || reducedMotion.matches) return;
+      const rect = card.getBoundingClientRect();
+      const x = (event.clientX - rect.left) / rect.width;
+      const y = (event.clientY - rect.top) / rect.height;
+      target.x = (x - 0.5) * 14;
+      target.y = (0.5 - y) * 14;
+      target.glareX = x * 100;
+      target.glareY = y * 100;
+      schedule();
+    });
+    card.addEventListener("pointerleave", () => { active = false; target.x = 0; target.y = 0; target.scale = 1; target.glareX = 50; target.glareY = 50; schedule(); });
+    reducedMotion.addEventListener?.("change", () => { if (reducedMotion.matches) { active = false; card.style.transform = "none"; glare.style.opacity = "0"; } });
   }
 
   document.addEventListener("click", (event) => {
     const action = event.target.closest?.("[data-action]")?.dataset.action;
     if (action) handleAction(action);
-    const direction = event.target.closest?.("[data-variant-step]")?.dataset.variantStep;
-    if (direction) stepVariant(Number(direction));
   });
-  $(".existing-update-button").addEventListener("click", handleExistingUpdateClick);
-  window.addEventListener("keydown", (event) => {
-    if (["INPUT", "TEXTAREA"].includes(event.target.tagName) || event.target.isContentEditable) return;
-    if (event.key === "ArrowLeft") stepVariant(-1);
-    if (event.key === "ArrowRight") stepVariant(1);
+  $(".existing-update-button").addEventListener("click", () => {
+    if (state.route !== "update-page") return;
+    state.autoClickStatus = "已自动点击更新";
+    state.updateState = "installing";
+    addActivity("现有更新页收到自动点击");
+    render();
   });
-  window.addEventListener("popstate", () => { const params = new URL(window.location.href).searchParams; const requested = params.get("variant"); if (variants.some((item) => item.key === requested)) state.variant = requested; state.dayOffset = Number(params.get("day")) === 1 ? 1 : 0; render(); });
 
   const params = new URL(window.location.href).searchParams;
-  if (variants.some((item) => item.key === params.get("variant"))) state.variant = params.get("variant");
   state.dayOffset = Number(params.get("day")) === 1 ? 1 : 0;
+  bindTiltedCard();
   render();
   openTurbo();
 })();
