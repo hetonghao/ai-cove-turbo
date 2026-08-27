@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="AI Cove Turbo 每日更新提示气泡与跳转逻辑原型" />
+    <meta name="prototype-question" content="只比较更新提示气泡，不重做现有更新流程" />
+    <meta name="theme-color" content="#080c0b" />
+    <title>Turbo 更新提示气泡原型</title>
+    <link rel="icon" type="image/png" href="../assets/turbo-icon.png" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+  </head>
+  <body data-variant="A" data-route="turbo">
+    <a class="skip-link" href="#prototype-main">跳到原型内容</a>
+
+    <div class="turbo-shell">
+      <header class="shell-header">
+        <span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+        <div class="brand-anchor-wrap">
+          <a class="brand" href="#top" aria-label="AI Cove Turbo 原型首页">
+            <img src="../assets/turbo-icon.png" width="30" height="30" alt="" />
+            <span><strong>Turbo</strong><small>AI Cove</small></span>
+          </a>
+          <div class="header-bubble-slot">
+          <section class="bubble-variant bubble-variant--brand" data-variant-panel="B" aria-label="方案 B，品牌入口下方气泡" hidden>
+            <aside class="update-bubble update-bubble--brand" data-update-card>
+              <span class="bubble-label" data-card-state>发现新版本</span><h2>更新已准备好</h2><p data-card-message>v0.1.0-beta.11 已通过签名校验。</p>
+              <div class="bubble-actions"><button class="button button--primary" type="button" data-action="install">立即更新</button><button class="button button--quiet" type="button" data-action="ignore">忽略</button></div>
+            </aside>
+          </section>
+          </div>
+        </div>
+        <nav class="tabs" aria-label="Turbo 页面">
+          <a href="#live">实时</a><a href="#statistics">统计</a><a class="is-active" href="#config" aria-current="page">配置</a>
+        </nav>
+        <span class="shell-note">现有配置页语境 · 原型</span>
+      </header>
+
+      <main id="prototype-main" class="app-surface">
+        <section class="config-context" data-route-view="turbo" aria-labelledby="config-title">
+          <div class="version-row">
+            <div class="version-lockup"><span aria-hidden="true">//</span><strong>AI COVE TURBO</strong><em>/ SETTING</em><code>v0.1.0-beta.10</code></div>
+            <div class="version-status"><span class="status-dot" data-status-dot></span><span data-hero-status>检查中</span><button type="button" class="text-button" data-action="open">重新打开</button></div>
+          </div>
+
+          <div class="bubble-stage">
+            <section class="bubble-variant bubble-variant--rail" data-variant-panel="A" aria-label="方案 A，版本栏锚定气泡">
+              <div class="bubble-anchor bubble-anchor--rail" aria-hidden="true"></div>
+              <aside class="update-bubble" data-update-card>
+                <div class="bubble-top"><span class="bubble-icon"><img src="../assets/turbo-icon.png" alt="" /></span><span class="bubble-label" data-card-state>发现新版本</span></div>
+                <h2>Turbo 有新版本</h2><p data-card-message>v0.1.0-beta.11 可以安装。今天只提醒一次。</p>
+                <div class="bubble-actions"><button class="button button--primary" type="button" data-action="install">立即更新</button><button class="button button--quiet" type="button" data-action="ignore">忽略</button></div>
+              </aside>
+            </section>
+
+            <section class="bubble-variant bubble-variant--toast" data-variant-panel="C" aria-label="方案 C，右下角轻提示" hidden>
+              <aside class="update-bubble update-bubble--toast" data-update-card>
+                <div><span class="bubble-label" data-card-state>发现新版本</span><h2>有新的 Turbo</h2><p data-card-message>v0.1.0-beta.11 可更新</p></div>
+                <div class="bubble-actions"><button class="button button--primary" type="button" data-action="install">立即更新</button><button class="button button--quiet" type="button" data-action="ignore">忽略</button></div>
+              </aside>
+            </section>
+          </div>
+
+          <div class="config-card">
+            <section class="config-status">
+              <p class="eyebrow">AI Cove / 本地通道正常</p>
+              <h1 id="config-title">Turbo 已接管</h1>
+              <p class="endpoint"><code>127.0.0.1:4317</code> 正在转发</p>
+              <div class="health-list" aria-label="现有配置状态"><span><b>服务</b>正常</span><span><b>配置</b>已接管</span><span><b>Codex</b>就绪</span><span><b>HTTP / WS</b>已验证</span></div>
+            </section>
+            <section class="config-controls" aria-label="现有运行偏好">
+              <div class="controls-heading"><p class="eyebrow">现有界面</p><h2>运行偏好</h2><span>以下内容仅作为气泡的宿主语境</span></div>
+              <button type="button" class="control-row"><span class="control-mark" aria-hidden="true"></span><span><strong>压缩模式</strong><small>减少请求上行字节</small></span><b>开</b></button>
+              <button type="button" class="control-row"><span class="control-mark" aria-hidden="true"></span><span><strong>WebSocket</strong><small>连接复用 · 自动协商 zstd</small></span><b>开</b></button>
+              <button type="button" class="control-row"><span class="control-mark" aria-hidden="true"></span><span><strong>开机自启动</strong><small>登录系统后在后台启动 Turbo</small></span><b>开</b></button>
+            </section>
+          </div>
+
+        </section>
+
+        <section class="existing-update-page" data-route-view="update-page" aria-labelledby="update-page-title" hidden>
+          <div class="existing-page-note"><span class="eyebrow">现有更新页 · 不在本次重设计范围</span><span class="route-chip"><i aria-hidden="true"></i><b data-route-label>已跳转</b></span></div>
+          <h1 id="update-page-title">打开现有更新页面</h1>
+          <p>这里只验证导航与自动点击逻辑，安装流程沿用现有页面。</p>
+          <button class="button button--primary existing-update-button" type="button" disabled><span class="button-spinner" aria-hidden="true"></span><span data-auto-click-status>等待自动点击</span></button>
+          <div class="existing-progress" role="progressbar" aria-label="现有更新页进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i data-install-progress></i></div>
+          <div class="existing-progress-meta"><span data-install-status>准备交给现有流程</span><code>v0.1.0-beta.10 → v0.1.0-beta.11</code></div>
+          <button class="text-button" type="button" data-action="open">返回现有配置页</button>
+        </section>
+
+        <section class="scope-note" aria-label="本次原型范围"><strong>本次只验证提示和跳转</strong><span>底下的配置控件、更新页和安装流程均为现有语境占位。</span><span data-footer-state>等待每日检查</span></section>
+      </main>
+    </div>
+
+    <aside class="prototype-tools" aria-label="原型控制">
+      <div class="tool-group"><span>测试日期</span><button type="button" data-action="day-today" aria-pressed="true">今天</button><button type="button" data-action="day-tomorrow" aria-pressed="false">模拟明天</button></div>
+      <div class="tool-group"><button type="button" data-action="open">重新打开 Turbo</button><button type="button" data-action="reset">重置</button></div>
+      <div class="variant-switcher" aria-label="原型方案切换"><button type="button" data-variant-step="-1" aria-label="上一个方案"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3-5 5 5 5" /></svg></button><strong data-variant-label>A — 版本栏锚定气泡</strong><button type="button" data-variant-step="1" aria-label="下一个方案"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5" /></svg></button></div>
+      <details class="state-inspector"><summary>状态检查器</summary><pre data-state-inspector></pre></details>
+    </aside>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
