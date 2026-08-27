@@ -75,6 +75,7 @@ pub(super) struct HttpTiming {
     input: HttpTimingInput,
     pending: Vec<u8>,
     data: Vec<u8>,
+    first_frame_at: Option<Instant>,
     first_token_at: Option<Instant>,
     saw_sse_event: bool,
     terminal_seen: bool,
@@ -87,6 +88,7 @@ impl HttpTiming {
             input,
             pending: Vec::new(),
             data: Vec::new(),
+            first_frame_at: None,
             first_token_at: None,
             saw_sse_event: false,
             terminal_seen: false,
@@ -140,6 +142,9 @@ impl HttpTiming {
         let Some(event_type) = value.get("type").and_then(serde_json::Value::as_str) else {
             return;
         };
+        if self.first_frame_at.is_none() {
+            self.first_frame_at = Some(Instant::now());
+        }
         if matches!(
             event_type,
             "response.completed"
@@ -223,10 +228,13 @@ impl HttpTiming {
             }
         }
         let duration_ms = Some(elapsed_ms(self.input.started_at, Instant::now()));
+        let first_frame_ms = self
+            .first_frame_at
+            .map(|first_frame_at| elapsed_ms(self.input.started_at, first_frame_at));
         let first_token_ms = self
             .first_token_at
             .map(|first_token_at| elapsed_ms(self.input.started_at, first_token_at));
-        self.input.metrics.record_http_with_timing(
+        self.input.metrics.record_http_with_first_frame_timing(
             HttpRequestMetric {
                 path: &self.input.path,
                 status,
@@ -237,6 +245,7 @@ impl HttpTiming {
                 route: self.input.traffic.route,
                 failure_reason,
             },
+            first_frame_ms,
             first_token_ms,
             duration_ms,
         );

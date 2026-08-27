@@ -254,7 +254,7 @@ fn persisted_traffic_keeps_websocket_failure_context() -> Result<(), Box<dyn Err
 #[test]
 fn persisted_traffic_keeps_optional_timing_measurements() -> Result<(), Box<dyn Error>> {
     let store = TrafficStore::default();
-    store.record_with_timing(record(21_000, 100), Some(420), Some(1_800));
+    store.record_with_first_frame_timing(record(21_000, 100), Some(120), Some(420), Some(1_800));
 
     let event = serde_json::to_value(
         store
@@ -267,6 +267,7 @@ fn persisted_traffic_keeps_optional_timing_measurements() -> Result<(), Box<dyn 
 
     assert_eq!(event.get("firstTokenMs"), Some(&serde_json::json!(420)));
     assert_eq!(event.get("durationMs"), Some(&serde_json::json!(1_800)));
+    assert_eq!(event.get("firstFrameMs"), Some(&serde_json::json!(120)));
     Ok(())
 }
 

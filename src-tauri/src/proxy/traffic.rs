@@ -92,6 +92,8 @@ pub(crate) struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_frame_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     first_token_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
@@ -298,6 +300,16 @@ impl TrafficStore {
         first_token_ms: Option<u64>,
         duration_ms: Option<u64>,
     ) {
+        self.record_with_first_frame_timing(record, None, first_token_ms, duration_ms);
+    }
+
+    pub(crate) fn record_with_first_frame_timing(
+        &self,
+        record: TrafficRecord<'_>,
+        first_frame_ms: Option<u64>,
+        first_token_ms: Option<u64>,
+        duration_ms: Option<u64>,
+    ) {
         if record.failure_phase == Some(FailurePhase::HybridIdle) && record.status != 1012 {
             return;
         }
@@ -313,6 +325,7 @@ impl TrafficStore {
             route: record.route,
             failure_phase: record.failure_phase,
             failure_reason: record.failure_reason.map(str::to_owned),
+            first_frame_ms,
             first_token_ms,
             duration_ms,
         };

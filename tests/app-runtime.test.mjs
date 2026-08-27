@@ -1040,7 +1040,7 @@ test("认证失败列表只显示短标签，hover 保留上游原因且不归�
   assert.doesNotMatch(requestStream.innerHTML, /检查 API 密钥/);
 });
 
-test("请求详情显示真实首字/耗时并诚实保留缺失占位符", async () => {
+test("请求详情显示真实首帧/首字/耗时并诚实保留缺失占位符", async () => {
   const { requestStream } = await liveTailHarness({
     recentRequests: [{
       id: 1,
@@ -1052,6 +1052,7 @@ test("请求详情显示真实首字/耗时并诚实保留缺失占位符", asyn
       transport: "WS",
       route: "hybridWs",
       result: "success",
+      firstFrameMs: 120,
       firstTokenMs: 420,
       durationMs: 1_800,
     }, {
@@ -1068,8 +1069,8 @@ test("请求详情显示真实首字/耗时并诚实保留缺失占位符", asyn
     }] ,
   });
   const rows = requestStream.innerHTML.match(/<tr\b.*?<\/tr>/g) ?? [];
-  assert.match(rows[0] ?? "", /<dt>首字\/耗时<\/dt><dd>420 ms \/ 1\.8 s<\/dd>/);
-  assert.match(rows[1] ?? "", /<dt>首字\/耗时<\/dt><dd>— \/ 1\.8 s<\/dd>/);
+  assert.match(rows[0] ?? "", /<dt>首帧\/首字\/耗时<\/dt><dd>120 ms \/ 420 ms \/ 1\.8 s<\/dd>/);
+  assert.match(rows[1] ?? "", /<dt>首帧\/首字\/耗时<\/dt><dd>— \/ — \/ 1\.8 s<\/dd>/);
 });
 
 test("网络异常 Hover 和键盘聚焦会把提示定位在视口内", async () => {

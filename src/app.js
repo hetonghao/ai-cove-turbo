@@ -392,7 +392,7 @@
       ["模型", request?.model || request?.modelSlug || "—"],
       ["会话/连接 ID", `${compactRequestId(request?.sessionId || request?.session_id, "会话")} · ${compactRequestId(request?.connectionId || request?.connection_id, "连接")}`],
       ["会话名称", request?.sessionName || request?.session_name || "—"],
-      ["首字/耗时", `${telemetry.formatDuration(request?.firstTokenMs ?? request?.first_token_ms)} / ${telemetry.formatDuration(request?.durationMs ?? request?.duration_ms)}`],
+      ["首帧/首字/耗时", `${telemetry.formatDuration(request?.firstFrameMs ?? request?.first_frame_ms)} / ${telemetry.formatDuration(request?.firstTokenMs ?? request?.first_token_ms)} / ${telemetry.formatDuration(request?.durationMs ?? request?.duration_ms)}`],
     ];
     if (exception) rows.push(["异常", exception]);
     return rows;

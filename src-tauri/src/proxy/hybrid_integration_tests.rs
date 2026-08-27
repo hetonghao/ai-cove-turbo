@@ -288,6 +288,15 @@ async fn delayed_prewarm_keeps_not_ready_turns_http_then_switches_to_ws() -> io:
     assert_eq!(snapshot.hybrid_cold_start_http, 2);
     assert_eq!(snapshot.hybrid_recovery_http, 0);
     assert_eq!(snapshot.direct_http, 0);
+    assert!(
+        metrics
+            .traffic_snapshot()
+            .recent_requests
+            .iter()
+            .filter_map(|event| serde_json::to_value(event).ok())
+            .any(|event| event.get("route") == Some(&Value::from("hybridWs"))
+                && event.get("firstFrameMs").is_some())
+    );
     let routes = metrics
         .traffic_snapshot()
         .recent_requests

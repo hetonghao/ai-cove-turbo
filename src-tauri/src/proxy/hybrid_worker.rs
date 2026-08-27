@@ -105,6 +105,9 @@ pub(super) async fn handle_worker_event(
                 .as_ref()
                 .is_some_and(|item| item.kind == ActiveKind::WebSocket);
             if from_websocket {
+                if session.websocket_first_frame_at.is_none() {
+                    session.websocket_first_frame_at = Some(std::time::Instant::now());
+                }
                 if session.websocket_first_token_at.is_none() && is_first_output_message(&message) {
                     session.websocket_first_token_at = Some(std::time::Instant::now());
                 }
@@ -119,6 +122,7 @@ pub(super) async fn handle_worker_event(
         }
         WorkerEvent::WebSocketSent(receipt) => {
             session.websocket_receipt = Some(receipt);
+            session.websocket_first_frame_at = None;
             session.websocket_first_token_at = None;
             true
         }
@@ -235,6 +239,13 @@ pub(super) async fn retire_failed_websocket(
 
 fn record_websocket_outcome(session: &mut Session, status: u16, failure_reason: Option<&str>) {
     let receipt = session.websocket_receipt.take().unwrap_or_default();
+    let first_frame_ms = session
+        .websocket_first_frame_at
+        .take()
+        .zip(receipt.started_at)
+        .map(|(first_frame_at, started_at)| {
+            super::super::timing::elapsed_ms(started_at, first_frame_at)
+        });
     let first_token_ms = session
         .websocket_first_token_at
         .take()
@@ -249,23 +260,27 @@ fn record_websocket_outcome(session: &mut Session, status: u16, failure_reason: 
         Some(_) => (TrafficResult::Error, Some(FailurePhase::HybridActive)),
         None => (TrafficResult::Success, None),
     };
-    session.state.metrics.record_websocket_outcome_with_timing(
-        TrafficRecord {
-            timestamp_ms: traffic::now_ms(),
-            status,
-            path: &session.path,
-            raw_bytes: receipt.raw_bytes,
-            sent_bytes: receipt.sent_bytes,
-            transport: TrafficTransport::Ws,
-            result,
-            route: Some(TrafficRoute::HybridWs),
-            failure_phase,
-            failure_reason,
-        },
-        receipt.compressed,
-        first_token_ms,
-        duration_ms,
-    );
+    session
+        .state
+        .metrics
+        .record_websocket_outcome_with_first_frame_timing(
+            TrafficRecord {
+                timestamp_ms: traffic::now_ms(),
+                status,
+                path: &session.path,
+                raw_bytes: receipt.raw_bytes,
+                sent_bytes: receipt.sent_bytes,
+                transport: TrafficTransport::Ws,
+                result,
+                route: Some(TrafficRoute::HybridWs),
+                failure_phase,
+                failure_reason,
+            },
+            receipt.compressed,
+            first_frame_ms,
+            first_token_ms,
+            duration_ms,
+        );
 }
 
 fn is_first_output_message(message: &tokio_tungstenite::tungstenite::Message) -> bool {
