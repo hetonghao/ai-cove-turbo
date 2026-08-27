@@ -142,15 +142,15 @@ impl HttpTiming {
             self.terminal_seen = true;
             return;
         }
-        if self.first_frame_at.is_none() {
-            self.first_frame_at = Some(Instant::now());
-        }
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data) else {
             return;
         };
         let Some(event_type) = value.get("type").and_then(serde_json::Value::as_str) else {
             return;
         };
+        if self.first_frame_at.is_none() {
+            self.first_frame_at = Some(Instant::now());
+        }
         if matches!(
             event_type,
             "response.completed"

@@ -1511,7 +1511,7 @@ data: {"type":"response.output_text.delta","delta":"hi"}
     }
 
     #[test]
-    fn http_timing_requires_a_complete_json_sse_event() {
+    fn http_timing_requires_a_complete_valid_json_sse_event() {
         let metrics = Arc::new(Metrics::default());
         let mut timing = HttpTiming::new(HttpTimingInput {
             metrics: Arc::clone(&metrics),
@@ -1525,7 +1525,7 @@ data: {"type":"response.output_text.delta","delta":"hi"}
             failure_reason: None,
             control: None,
         });
-        timing.observe(br#"data: {"type":"response.output_text.delta"}"#);
+        timing.observe(b"data: not-json\n\ndata: {\"event\":\"metadata\"}\n\n");
         timing.finish();
 
         let event = serde_json::to_value(
@@ -1537,6 +1537,7 @@ data: {"type":"response.output_text.delta","delta":"hi"}
                 .expect("response event missing"),
         )
         .expect("event must serialize");
+        assert!(event.get("firstFrameMs").is_none());
         assert!(event.get("firstTokenMs").is_none());
     }
 

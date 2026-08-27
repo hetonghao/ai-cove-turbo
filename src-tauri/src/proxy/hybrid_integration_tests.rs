@@ -221,7 +221,7 @@ async fn local_101_stays_responsive_when_pool_prewarm_fails() -> io::Result<()> 
         delay_http: false,
     })
     .await?;
-    let (proxy, metrics) = start_test_proxy(&server).await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
     server.fixture.wait_private(6).await?;
