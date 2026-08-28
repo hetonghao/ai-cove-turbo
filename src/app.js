@@ -21,7 +21,7 @@
   const HTTP_DEGRADATION_MIN_SPAN_MS = 30_000;
   const HTTP_DEGRADATION_MIN_REQUESTS = 5;
   const MODEL_CONTEXT_MIN = 125_000;
-  const MODEL_REASONING_OPTIONS = ["low", "medium", "high", "xhigh"];
+  const MODEL_REASONING_OPTIONS = ["low", "medium", "high", "xhigh", "max", "ultra"];
   const DEFAULT_MODEL_CAPABILITIES = Object.freeze({
     inputModalities: ["text", "image"],
     supportsSearchTool: true,
@@ -962,7 +962,7 @@
       autoCompactTokenLimit: null,
       truncationPolicy: "auto",
       inputModalities: [...DEFAULT_MODEL_CAPABILITIES.inputModalities],
-      supportedReasoningLevels: ["low", "medium", "high", "xhigh"].map((effort) => ({ effort, description: "" })),
+      supportedReasoningLevels: MODEL_REASONING_OPTIONS.map((effort) => ({ effort, description: "" })),
       defaultReasoningLevel: "high",
       supportsReasoningSummaryParameter: false,
       defaultReasoningSummary: "none",

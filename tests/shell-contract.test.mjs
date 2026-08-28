@@ -301,7 +301,7 @@ test("模型目录支持上游发现、编辑向导与完整能力字段", async
   assert.doesNotMatch(html, /<legend>输入与工具<\/legend>|<legend>服务与协议<\/legend>/);
   assert.match(app, /discover_model_catalog/);
   assert.match(app, /MODEL_REASONING_OPTIONS/);
-  assert.match(app, /\["low", "medium", "high", "xhigh"\]\.map/);
+  assert.match(app, /MODEL_REASONING_OPTIONS = \["low", "medium", "high", "xhigh", "max", "ultra"\][\s\S]*supportedReasoningLevels: MODEL_REASONING_OPTIONS\.map/);
   assert.match(app, /defaultReasoningLevel: "high"/);
   assert.match(app, /effectiveContextWindowPercent: 95/);
   assert.match(app, /truncationPolicy: "auto"/);
