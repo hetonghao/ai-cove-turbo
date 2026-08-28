@@ -261,6 +261,7 @@
   let editorMode = "create";
   let editorOriginal = null;
   let editorTouchedFields = new Set();
+  let editorDraftKey = "";
 
   function readTab() {
     const requestedTab = new URL(window.location.href).searchParams.get("tab");
@@ -1079,15 +1080,21 @@
 
   function closeModelDialog(dialog) {
     if (!dialog) return;
+    if (dialog === $("[data-model-editor]") && editorDraft) editorDraft = readModelEditor();
     if (dialog.open && dialog.close) dialog.close();
     dialog.hidden = true;
   }
 
-  function openModelEditor(model, mode) {
+  function openModelEditor(model, mode, sourceSlug = "") {
+    const draftKey = `${mode}:${sourceSlug || model?.slug || "new"}`;
+    const reuseDraft = Boolean(editorDraft && editorDraftKey === draftKey);
     editorMode = mode;
-    editorOriginal = model ? cloneModel(model) : null;
-    editorTouchedFields = new Set();
-    editorDraft = cloneModel(model || createModelDraft());
+    if (!reuseDraft) {
+      editorOriginal = model ? cloneModel(model) : null;
+      editorTouchedFields = new Set();
+      editorDraft = cloneModel(model || createModelDraft());
+      editorDraftKey = draftKey;
+    }
     if (!editorDraft.fieldSources) editorDraft.fieldSources = {};
     const title = $("[data-model-editor] h2");
     if (title) title.textContent = mode === "copy" ? "复制模型" : mode === "edit" ? "编辑模型" : "添加模型";
@@ -1228,9 +1235,12 @@
         .filter((candidate) => candidate.slug !== persisted.slug && modelIsComplete(candidate))
         .concat(persisted);
       const saved = await invoke("save_model_settings", { models, expectedRevision: state.catalog.revision, policy: policyUpdate });
-      if (saved?.error) throw new Error(saved.error);
-      state.catalog = saved.catalog;
+      if (saved?.catalog) state.catalog = saved.catalog;
       state.modelPolicy = saved.modelPolicy || state.modelPolicy;
+      if (saved?.error) {
+        state.catalog = { ...state.catalog, state: saved.partialFailure ? "error" : state.catalog.state };
+        throw new Error(saved.error);
+      }
     } else {
       const models = [...previousStateModels.filter((candidate) => candidate.slug !== persisted.slug), persisted]
         .sort((left, right) => (Number(left.priority) || 0) - (Number(right.priority) || 0));
@@ -1270,6 +1280,7 @@
     editorDraft = null;
     editorOriginal = null;
     editorTouchedFields = new Set();
+    editorDraftKey = "";
     renderedModelCatalogMarkup = "";
     renderState();
   }
@@ -1312,20 +1323,20 @@
     const normalized = cloneModel(model);
     const maximum = Number(normalized.maxContextWindow);
     const current = Number(normalized.contextWindow);
-    normalized.maxContextWindow = Number.isFinite(maximum) && maximum >= MODEL_CONTEXT_MIN ? maximum : MODEL_CONTEXT_MIN;
-    normalized.contextWindow = Number.isFinite(current) && current >= MODEL_CONTEXT_MIN
+    normalized.maxContextWindow = Number.isFinite(maximum) && maximum >= MODEL_CONTEXT_MIN ? maximum : null;
+    normalized.contextWindow = normalized.maxContextWindow && Number.isFinite(current) && current >= MODEL_CONTEXT_MIN
       ? Math.min(current, normalized.maxContextWindow)
-      : MODEL_CONTEXT_MIN;
+      : null;
     normalized.effectiveContextWindowPercent = normalized.effectiveContextWindowPercent ?? 95;
-    normalized.autoCompactTokenLimit = Math.floor(normalized.contextWindow * 0.9);
+    normalized.autoCompactTokenLimit = normalized.contextWindow ? Math.floor(normalized.contextWindow * 0.9) : null;
     normalized.truncationPolicy = normalized.truncationPolicy || "auto";
     normalized.inputModalities = normalized.inputModalities?.length ? [...normalized.inputModalities] : ["text"];
     normalized.supportedReasoningLevels = normalized.supportedReasoningLevels?.length
       ? normalized.supportedReasoningLevels.map((level) => ({ ...level }))
-      : [{ effort: "none", description: "" }];
+      : [];
     normalized.defaultReasoningLevel = normalized.supportedReasoningLevels.some((level) => level.effort === normalized.defaultReasoningLevel)
       ? normalized.defaultReasoningLevel
-      : normalized.supportedReasoningLevels[0].effort;
+      : null;
     normalized.supportsReasoningSummaryParameter = Boolean(normalized.supportsReasoningSummaryParameter);
     normalized.defaultReasoningSummary = normalized.supportsReasoningSummaryParameter ? normalized.defaultReasoningSummary || "none" : "none";
     normalized.serviceTiers = normalized.serviceTiers?.map((tier) => ({ ...tier })) || [];
@@ -1372,18 +1383,24 @@
     const previousStateModels = state.catalog?.models || [];
     const nextPriority = Math.max(0, ...previousStateModels.map((candidate) => Number(candidate.priority) || 0)) + 1;
     const imported = discovered.map((model, index) => ({ ...normalizeDiscoveredModel(model), visibility: "list", priority: nextPriority + index }));
-    const models = previousStateModels.filter(modelIsComplete).concat(imported);
+    const completeImported = imported.filter(modelIsComplete);
+    const incompleteImported = imported.filter((model) => !modelIsComplete(model));
+    const models = previousStateModels.filter(modelIsComplete).concat(completeImported);
     const policy = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...(state.modelPolicy?.models || {}) } };
-    if (invoke) {
+    if (invoke && completeImported.length) {
       const saved = await invoke("save_model_settings", { models, expectedRevision: state.catalog.revision, policy });
-      if (saved?.error) throw new Error(saved.error);
-      state.catalog = saved.catalog;
+      if (saved?.catalog) state.catalog = saved.catalog;
       state.modelPolicy = saved.modelPolicy || state.modelPolicy;
-    } else {
+      if (saved?.error) {
+        state.catalog = { ...state.catalog, state: saved.partialFailure ? "error" : state.catalog.state };
+        throw new Error(saved.error);
+      }
+    } else if (!invoke) {
       state.catalog = { ...state.catalog, models: [...previousStateModels, ...imported], restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
       state.modelPolicy = { ...state.modelPolicy, models: policy.models };
     }
-    catalogDraft = mergeSavedModelIntoListDraft(state.catalog.models, previousDraft, previousStateModels);
+    const merged = mergeSavedModelIntoListDraft(state.catalog.models, previousDraft, previousStateModels) || state.catalog.models.map(cloneModel);
+    catalogDraft = [...merged, ...incompleteImported];
   }
 
   async function importDiscoveredModels() {
@@ -2548,6 +2565,10 @@
       try {
         const saveCatalog = catalogListDirty();
         const savePolicy = policyDraftDirty();
+        const unsavedModel = catalogModels().find((model) => !state.catalog?.models?.some((current) => current.slug === model.slug));
+        if (saveCatalog && unsavedModel && !modelIsComplete(unsavedModel)) {
+          throw new Error("请先编辑 " + (unsavedModel.displayName || unsavedModel.slug) + "，补充上下文和思考能力");
+        }
         if (saveCatalog) {
           const updates = catalogModels().map((model, priority) => ({ slug: model.slug, visibility: model.visibility, priority: priority + 1 }));
           state.catalog = invoke
@@ -2755,6 +2776,10 @@
     state.tab = readTab();
     state.configView = readConfigView();
     syncLiveRequests();
+    const editorDialog = $("[data-model-editor]");
+    editorDialog?.addEventListener?.("cancel", () => {
+      if (editorDraft) editorDraft = readModelEditor();
+    });
     const terminal = $(".c-terminal__window");
     terminal?.addEventListener("scroll", () => {
       liveTailFollowing = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight <= LIVE_TAIL_THRESHOLD_PX;
@@ -2789,7 +2814,7 @@
           copy.slug = "";
           copy.displayName = (copy.displayName || copy.slug) + " 副本";
           copy.fieldSources = { ...(copy.fieldSources || {}), slug: "用户", displayName: "用户" };
-          openModelEditor(copy, "copy");
+          openModelEditor(copy, "copy", model.slug);
         }
         return;
       }

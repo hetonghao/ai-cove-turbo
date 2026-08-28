@@ -155,6 +155,8 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
   });
   const editButton = element({ modelEdit: "" });
   editButton.closest = (selector) => selector === "[data-model-edit]" ? editButton : selector === "[data-model-slug]" ? row("alpha") : null;
+  const editorClose = element({ modelDialogClose: "editor" });
+  editorClose.closest = (selector) => selector === "[data-model-dialog-close]" ? editorClose : null;
   const documentBody = element({ configView: "settings" });
   const restartControl = element({ action: "restart-codex", catalogRestart: "", restartHint: "" });
   const configViewButtons = ["settings", "catalog"].map((configView) => {
@@ -240,9 +242,15 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     editModel() {
       listeners.get("click")?.({ target: editButton });
     },
+    closeEditor() {
+      listeners.get("click")?.({ target: editorClose });
+    },
     async saveEditor() {
       listeners.get("click")?.({ target: editorActions.get("save") });
       await new Promise((resolve) => setImmediate(resolve));
+    },
+    clickEditorUndo() {
+      listeners.get("click")?.({ target: editorActions.get("undo") });
     },
     editorField(name) { return editorFields.get(name); },
     selectConfigView(view) {
@@ -375,6 +383,13 @@ test("模型弹窗保存独立于列表草稿并保留原上下文", async () =>
   harness.toggleVisibility("alpha");
   harness.editModel();
   assert.equal(harness.editorField("context-window").value, "200000");
+  harness.editorField("displayName").value = "Alpha updated";
+  harness.closeEditor();
+  harness.editModel();
+  assert.equal(harness.editorField("displayName").value, "Alpha updated");
+  harness.editorField("displayName").value = "discarded";
+  harness.clickEditorUndo();
+  assert.equal(harness.editorField("displayName").value, "Alpha");
   harness.editorField("displayName").value = "Alpha updated";
   await harness.saveEditor();
 

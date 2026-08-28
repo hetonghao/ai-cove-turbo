@@ -4886,6 +4886,11 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
   cursor: pointer;
 }
 
+.b-model-editor__preserved-efforts {
+  grid-column: 1 / -1;
+  color: var(--b-muted);
+}
+
 .b-model-editor__advanced {
   border: 1px solid var(--b-line);
   border-radius: 9px;
