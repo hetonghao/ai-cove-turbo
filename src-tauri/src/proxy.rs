@@ -47,6 +47,11 @@ pub(crate) mod traffic;
 mod transport_capability;
 
 use compression::CompressionScheduler;
+
+pub(crate) fn effective_auth_headers(config_path: Option<&Path>) -> Option<HeaderMap> {
+    codex_auth::effective_auth_headers(config_path)
+}
+
 pub(crate) use hybrid_pool::ConnectionSnapshot;
 use private_websocket::{PrivateTlsConfig, client_upgrade_response};
 use timing::{HttpTiming, HttpTimingControl, HttpTimingInput, instrument_http_stream};
@@ -711,6 +716,28 @@ impl Metrics {
             route: traffic::TrafficRoute::DirectHttp,
             failure_reason: None,
         });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_successful_response_for_model_for_test(&self, model: &str) {
+        self.record_http_with_timing_and_metadata(
+            HttpRequestMetric {
+                path: "/v1/responses",
+                status: StatusCode::OK.as_u16(),
+                raw_bytes: 10,
+                sent_bytes: 10,
+                compressed: false,
+                result: traffic::TrafficResult::Success,
+                route: traffic::TrafficRoute::DirectHttp,
+                failure_reason: None,
+            },
+            None,
+            None,
+            Some(traffic::RequestMetadata {
+                model: Some(model.to_owned()),
+                ..traffic::RequestMetadata::default()
+            }),
+        );
     }
 
     #[cfg(test)]

@@ -182,6 +182,8 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
     "check_for_updates",
     "install_update",
     "update_model_catalog",
+    "save_model_settings",
+    "discover_model_catalog",
   ];
 
   // When: 前端加载并进入真实桌面运行时。
@@ -272,6 +274,78 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(css, /\.b-transport-toggle__option:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--b-accent\);/);
   assert.match(rust, /get_model_catalog/);
   assert.match(rust, /update_model_catalog/);
+});
+
+test("模型目录支持上游发现、编辑向导与完整能力字段", async () => {
+  // Given: 模型候选工作区的产品契约。
+  const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const app = await readFile(new URL("app.js", sourceUrl), "utf8");
+  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+
+  // When: 检查前端和原生命令是否暴露完整闭环。
+  // Then: 用户能发现、创建、编辑、复制模型，并配置上下文与 reasoning。
+  assert.match(html, /data-action="discover-models"/);
+  assert.match(html, /data-action="import-all-models"/);
+  assert.match(html, /data-model-editor/);
+  assert.match(html, /data-model-field="context-window"/);
+  assert.match(html, /data-model-field="max-context-window"/);
+  assert.match(html, /data-model-field="reasoning-effort"/);
+  assert.match(html, /data-model-field="reasoning-summary"/);
+  assert.match(app, /discover_model_catalog/);
+  assert.match(app, /data-model-source/);
+  assert.match(rust, /discover_model_catalog/);
+  assert.match(rust, /CatalogModelUpdate/);
+});
+
+test("模型发现支持单项导入并保护已存在模型", async () => {
+  const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const app = await readFile(new URL("app.js", sourceUrl), "utf8");
+
+  assert.match(app, /importDiscoveredModel\(/);
+  assert.match(app, /data-model-import=/);
+  assert.match(app, /escapeHtml\(model\.slug\)/);
+  assert.match(app, /disabled data-existing="true"/);
+  assert.match(app, /importableCount/);
+  assert.match(html, /disabled aria-disabled="true" data-action="import-all-models"/);
+  assert.match(app, /editorTouchedFields/);
+  assert.match(app, /result\.fieldSources\[field\] = changed/);
+});
+
+test("模型编辑器暴露完整的调用能力字段", async () => {
+  const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const app = await readFile(new URL("app.js", sourceUrl), "utf8");
+
+  for (const field of [
+    "effective-context-percent",
+    "truncation-policy",
+    "service-tiers",
+    "default-service-tier",
+    "use-responses-lite",
+    "prefer-websockets",
+    "image-detail-original",
+    "tool-mode",
+    "experimental-tools",
+  ]) assert.match(html, new RegExp(`data-model-field=\\"${field}\\"`));
+  for (const field of [
+    "effective-context-percent",
+    "truncation-policy",
+    "service-tiers",
+    "default-service-tier",
+    "use-responses-lite",
+    "prefer-websockets",
+    "image-detail-original",
+    "tool-mode",
+    "experimental-tools",
+  ]) assert.match(html, new RegExp(`data-model-field=\\"${field}\\"`));
+});
+
+test("模型请求验证必须命中重启后的目标模型", async () => {
+  const runtime = await readFile(new URL("../src-tauri/src/runtime.rs", import.meta.url), "utf8");
+  const traffic = await readFile(new URL("../src-tauri/src/proxy/traffic.rs", import.meta.url), "utf8");
+
+  assert.match(runtime, /pending_verification_models/);
+  assert.match(runtime, /is_successful_responses_for\(/);
+  assert.match(traffic, /pub\(crate\) fn is_successful_responses_for/);
 });
 
 test("Windows 重启 Codex 不闪出 PowerShell 并返回新进程", async () => {

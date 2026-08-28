@@ -1,6 +1,7 @@
 #![allow(clippy::assigning_clones)]
 
 use std::{
+    collections::{BTreeMap, HashSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -20,7 +21,8 @@ use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use url::Url;
 
 use crate::{
-    catalog::{self, CatalogModelUpdate, CatalogStatus},
+    catalog::{self, CatalogMetadata, CatalogModel, CatalogModelUpdate, CatalogStatus},
+    catalog_discovery::{self, DiscoveryResult},
     codex_thread_title::CodexThreadInfo,
     config::{
         AI_COVE_UPSTREAM, ConfigError, ManagedConfig, ManagedOwnership, Preflight, RestoreOutcome,
@@ -31,7 +33,7 @@ use crate::{
     },
     proxy::{
         CapabilityModelStatus, ConnectionSnapshot, Metrics, ModelPolicyStatus, ModelPolicyUpdate,
-        ProxyHandle, ProxyOptions, start_proxy_with_policy,
+        ProxyHandle, ProxyOptions, effective_auth_headers, start_proxy_with_policy,
         traffic::{RequestEvent, TrafficWindow},
     },
     session_names::{SessionNameCache, SessionNameSnapshot, SessionNameTask},
@@ -75,6 +77,11 @@ impl RuntimePaths {
         self.data_dir.join("ai_cove_turbo_model_policy.json")
     }
 
+    fn model_settings_journal_path(&self) -> PathBuf {
+        self.data_dir
+            .join("ai_cove_turbo_model_settings.journal.json")
+    }
+
     fn traffic_path(&self) -> PathBuf {
         self.data_dir.join("traffic.jsonl")
     }
@@ -92,6 +99,38 @@ struct Preferences {
     dock_initialized: bool,
     last_port: Option<u16>,
     confirmed_non_ai_cove_upstream: Option<String>,
+}
+
+const MODEL_SETTINGS_JOURNAL_VERSION: u8 = 1;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ModelSettingsJournal {
+    version: u8,
+    catalog_before: Vec<u8>,
+    catalog_before_revision: String,
+    catalog_after_revision: Option<String>,
+    metadata_before: CatalogMetadata,
+    #[serde(default)]
+    metadata_after: Option<CatalogMetadata>,
+    policy_before: Option<Vec<u8>>,
+    policy_after_revision: Option<String>,
+    #[serde(default)]
+    policy_after: Option<JournalPolicy>,
+    committed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct JournalPolicy {
+    default_transport: String,
+    models: BTreeMap<String, String>,
+}
+
+struct ModelSettingsJournalContext {
+    before: Vec<u8>,
+    metadata_before: CatalogMetadata,
+    policy_path: PathBuf,
+    journal_path: PathBuf,
+    journal: ModelSettingsJournal,
 }
 
 impl Default for Preferences {
@@ -160,6 +199,16 @@ pub(crate) struct AppStatus {
     pub(crate) catalog: CatalogStatus,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelSettingsSaveStatus {
+    pub(crate) catalog: CatalogStatus,
+    pub(crate) model_policy: ModelPolicyStatus,
+    pub(crate) rolled_back: bool,
+    pub(crate) partial_failure: bool,
+    pub(crate) error: Option<String>,
+}
+
 impl AppStatus {
     fn starting(preferences: &Preferences) -> Self {
         Self {
@@ -225,6 +274,7 @@ impl AppStatus {
                 loaded: false,
                 request_verified: false,
                 revision: String::new(),
+                metadata: CatalogMetadata::default(),
             },
         }
     }
@@ -236,6 +286,7 @@ pub(crate) struct AppRuntime {
     preferences: Mutex<Preferences>,
     status: RwLock<AppStatus>,
     catalog: Mutex<CatalogStatus>,
+    catalog_write_lock: AsyncMutex<()>,
     compression_enabled: Arc<AtomicBool>,
     websocket_enabled: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
@@ -245,6 +296,8 @@ pub(crate) struct AppRuntime {
     lifecycle_lock: AsyncMutex<()>,
     codex_pid_before_restart: Mutex<Option<u32>>,
     activation_baseline: AtomicU64,
+    activation_baseline_request_id: AtomicU64,
+    pending_verification_models: Mutex<HashSet<String>>,
     shutting_down: AtomicBool,
     session_names: Arc<SessionNameCache>,
     session_name_task: AsyncMutex<Option<SessionNameTask>>,
@@ -276,6 +329,7 @@ impl AppRuntime {
             preferences: Mutex::new(preferences),
             status: RwLock::new(status),
             catalog: Mutex::new(catalog_status),
+            catalog_write_lock: AsyncMutex::new(()),
             metrics,
             managed: Mutex::new(None),
             proxy: AsyncMutex::new(None),
@@ -283,6 +337,8 @@ impl AppRuntime {
             lifecycle_lock: AsyncMutex::new(()),
             codex_pid_before_restart: Mutex::new(None),
             activation_baseline: AtomicU64::new(0),
+            activation_baseline_request_id: AtomicU64::new(0),
+            pending_verification_models: Mutex::new(HashSet::new()),
             shutting_down: AtomicBool::new(false),
             session_names,
             session_name_task: AsyncMutex::new(None),
@@ -293,6 +349,10 @@ impl AppRuntime {
     pub(crate) async fn initialize(&self) {
         let _guard = self.lifecycle_lock.lock().await;
         if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Err(error) = self.recover_model_settings_journal() {
+            self.block(&error);
             return;
         }
         self.start_session_name_task().await;
@@ -429,6 +489,23 @@ impl AppRuntime {
         self.verify_codex_restart().await;
         let _ = self.connection_snapshot().await;
         let metrics = self.metrics.snapshot();
+        let traffic = self.metrics.traffic_snapshot();
+        let catalog_request_verified = {
+            let baseline_request_id = self.activation_baseline_request_id.load(Ordering::Relaxed);
+            let mut pending = lock_mutex(&self.pending_verification_models);
+            let verified = pending
+                .iter()
+                .filter(|model| {
+                    traffic.recent_requests.iter().any(|request| {
+                        request.id > baseline_request_id
+                            && request.is_successful_responses_for(model)
+                    })
+                })
+                .cloned()
+                .collect::<HashSet<_>>();
+            pending.retain(|model| !verified.contains(model));
+            !verified.is_empty() && pending.is_empty()
+        };
         let waiting_for_request = read_lock(&self.status).codex_state == "waiting_request";
         if metrics.successful_responses > self.activation_baseline.load(Ordering::Relaxed)
             && waiting_for_request
@@ -439,30 +516,17 @@ impl AppRuntime {
                 status.restart_required = false;
                 status.config_message = "已观察到本次配置后的成功 Responses 请求".to_owned();
             });
-            let catalog_update = {
-                let mut catalog = lock_mutex(&self.catalog);
-                if catalog.loaded {
-                    catalog.request_verified = true;
-                    Some(catalog.clone())
-                } else {
-                    None
-                }
-            };
-            if let Some(catalog) = catalog_update {
-                self.update_status(|status| status.catalog = catalog);
-            }
         }
-        let catalog_update = {
+        let catalog_update = if catalog_request_verified {
             let mut catalog = lock_mutex(&self.catalog);
-            if catalog.loaded
-                && !catalog.request_verified
-                && metrics.successful_responses > self.activation_baseline.load(Ordering::Relaxed)
-            {
+            if catalog.loaded && !catalog.request_verified {
                 catalog.request_verified = true;
                 Some(catalog.clone())
             } else {
                 None
             }
+        } else {
+            None
         };
         if let Some(catalog) = catalog_update {
             self.update_status(|status| status.catalog = catalog);
@@ -487,7 +551,6 @@ impl AppRuntime {
         status.hybrid_policy_http = metrics.hybrid_policy_http;
         status.hybrid_large_request_http = metrics.hybrid_large_request_http;
         status.direct_http = metrics.direct_http;
-        let traffic = self.metrics.traffic_snapshot();
         self.session_names
             .observe_requests(&traffic.recent_requests)
             .await;
@@ -668,10 +731,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn mark_desktop_restarted(&self, pid: Option<u32>) {
-        self.activation_baseline.store(
-            self.metrics.snapshot().successful_responses,
-            Ordering::Relaxed,
-        );
+        self.reset_activation_baseline();
         *lock_mutex(&self.codex_pid_before_restart) = pid;
         self.update_status(|status| {
             status.codex_state = "waiting_request".to_owned();
@@ -706,6 +766,7 @@ impl AppRuntime {
         updates: Vec<CatalogModelUpdate>,
         expected_revision: String,
     ) -> Result<CatalogStatus, catalog::CatalogError> {
+        let _write_guard = self.catalog_write_lock.lock().await;
         let home = self
             .paths
             .config_path
@@ -719,9 +780,416 @@ impl AppRuntime {
             &updates,
             &expected_revision,
         )?;
+        self.set_pending_verification_models(updates.iter().map(|update| update.slug.clone()));
         *lock_mutex(&self.catalog) = current.clone();
         self.update_status(|status| status.catalog = current.clone());
         Ok(current)
+    }
+
+    #[allow(clippy::unused_async)]
+    pub(crate) async fn save_model_catalog(
+        &self,
+        models: Vec<CatalogModel>,
+        expected_revision: String,
+    ) -> Result<CatalogStatus, catalog::CatalogError> {
+        let _write_guard = self.catalog_write_lock.lock().await;
+        let home = self
+            .paths
+            .config_path
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let current = catalog::save_catalog_models(
+            &home,
+            &self.paths.config_path,
+            &self.paths.catalog_recovery_path(),
+            &models,
+            &expected_revision,
+        )?;
+        self.set_pending_verification_models(models.iter().map(|model| model.slug.clone()));
+        *lock_mutex(&self.catalog) = current.clone();
+        self.update_status(|status| status.catalog = current.clone());
+        Ok(current)
+    }
+
+    fn prepare_model_settings_journal(
+        &self,
+        home: &Path,
+        expected_revision: &str,
+    ) -> Result<ModelSettingsJournalContext, String> {
+        let fixed_path = catalog::fixed_catalog_path(home);
+        let before = fs::read(&fixed_path).map_err(|_| "catalog_snapshot_failed".to_owned())?;
+        let metadata_before = catalog::read_metadata(home);
+        let policy_path = self.paths.model_policy_path();
+        let journal_path = self.paths.model_settings_journal_path();
+        let journal = ModelSettingsJournal {
+            version: MODEL_SETTINGS_JOURNAL_VERSION,
+            catalog_before_revision: expected_revision.to_owned(),
+            catalog_before: before.clone(),
+            catalog_after_revision: None,
+            metadata_before: metadata_before.clone(),
+            metadata_after: None,
+            policy_before: read_optional_file(&policy_path).map_err(|error| error.to_string())?,
+            policy_after_revision: None,
+            policy_after: None,
+            committed: false,
+        };
+        write_model_settings_journal(&journal_path, &journal)
+            .map_err(|error| format!("model_settings_journal_failed:{error}"))?;
+        Ok(ModelSettingsJournalContext {
+            before,
+            metadata_before,
+            policy_path,
+            journal_path,
+            journal,
+        })
+    }
+
+    async fn rollback_model_settings_catalog(
+        &self,
+        home: &Path,
+        context: &ModelSettingsJournalContext,
+        catalog: CatalogStatus,
+        error: String,
+    ) -> ModelSettingsSaveStatus {
+        let rollback = catalog::restore_catalog_bytes(
+            home,
+            &self.paths.config_path,
+            &self.paths.catalog_recovery_path(),
+            &catalog.revision,
+            &context.before,
+        );
+        if let Ok(restored) = rollback {
+            self.set_pending_verification_models(std::iter::empty());
+            if let Err(metadata_error) = catalog::save_metadata(home, &context.metadata_before) {
+                return ModelSettingsSaveStatus {
+                    catalog: restored,
+                    model_policy: self.current_model_policy().await,
+                    rolled_back: false,
+                    partial_failure: true,
+                    error: Some(format!(
+                        "model_settings_partial_failure:{error};metadata_rollback:{metadata_error}"
+                    )),
+                };
+            }
+            let _ = remove_file_if_present(&context.journal_path);
+            *lock_mutex(&self.catalog) = restored.clone();
+            self.update_status(|status| status.catalog = restored);
+            return ModelSettingsSaveStatus {
+                catalog: self.model_catalog().await,
+                model_policy: self.current_model_policy().await,
+                rolled_back: true,
+                partial_failure: false,
+                error: Some(format!("model_settings_rollback:{error}")),
+            };
+        }
+        self.set_pending_verification_models(std::iter::empty());
+        ModelSettingsSaveStatus {
+            catalog,
+            model_policy: self.current_model_policy().await,
+            rolled_back: false,
+            partial_failure: true,
+            error: Some(format!("model_settings_partial_failure:{error}")),
+        }
+    }
+
+    fn complete_model_settings_journal(
+        context: &mut ModelSettingsJournalContext,
+    ) -> Result<(), String> {
+        context.journal.policy_after_revision = read_optional_file(&context.policy_path)
+            .map_err(|error| error.to_string())?
+            .map(|bytes| catalog::revision(&bytes));
+        context.journal.committed = true;
+        write_model_settings_journal(&context.journal_path, &context.journal)
+            .map_err(|error| format!("model_settings_journal_failed:{error}"))?;
+        remove_file_if_present(&context.journal_path)
+            .map_err(|error| format!("model_settings_journal_cleanup_failed:{error}"))
+    }
+
+    pub(crate) async fn save_model_settings(
+        &self,
+        models: Vec<CatalogModel>,
+        expected_revision: String,
+        policy: ModelPolicyUpdate,
+    ) -> Result<ModelSettingsSaveStatus, String> {
+        let _write_guard = self.catalog_write_lock.lock().await;
+        let home = self
+            .paths
+            .config_path
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let mut context = self.prepare_model_settings_journal(&home, &expected_revision)?;
+        let (catalog_after_revision, metadata_after) = match catalog::preview_catalog_models(
+            &home,
+            &self.paths.config_path,
+            &self.paths.catalog_recovery_path(),
+            &models,
+            &expected_revision,
+        ) {
+            Ok(preview) => preview,
+            Err(error) => {
+                let _ = remove_file_if_present(&context.journal_path);
+                return Err(error.to_string());
+            }
+        };
+        context.journal.catalog_after_revision = Some(catalog_after_revision);
+        context.journal.metadata_after = Some(metadata_after);
+        context.journal.policy_after = Some(journal_policy(&policy));
+        if let Err(error) = write_model_settings_journal(&context.journal_path, &context.journal) {
+            let _ = remove_file_if_present(&context.journal_path);
+            return Err(format!("model_settings_journal_failed:{error}"));
+        }
+        let catalog = match catalog::save_catalog_models(
+            &home,
+            &self.paths.config_path,
+            &self.paths.catalog_recovery_path(),
+            &models,
+            &expected_revision,
+        ) {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                let catalog_restored = fs::read(catalog::fixed_catalog_path(&home))
+                    .is_ok_and(|bytes| bytes == context.before);
+                let metadata_restored = catalog::read_metadata(&home) == context.metadata_before;
+                if catalog_restored && metadata_restored {
+                    let _ = remove_file_if_present(&context.journal_path);
+                    return Err(error.to_string());
+                }
+                let catalog = match catalog::read_catalog(
+                    &home,
+                    &self.paths.config_path,
+                    &self.paths.catalog_recovery_path(),
+                    true,
+                    false,
+                    false,
+                ) {
+                    Ok(catalog) => catalog,
+                    Err(_) => self.model_catalog().await,
+                };
+                self.set_pending_verification_models(std::iter::empty());
+                return Ok(ModelSettingsSaveStatus {
+                    catalog,
+                    model_policy: self.current_model_policy().await,
+                    rolled_back: false,
+                    partial_failure: true,
+                    error: Some(format!("model_settings_partial_failure:{error}")),
+                });
+            }
+        };
+        let model_policy = match self.update_model_policy(policy).await {
+            Ok(status) => status,
+            Err(error) => {
+                return Ok(self
+                    .rollback_model_settings_catalog(&home, &context, catalog, error)
+                    .await);
+            }
+        };
+        if let Err(error) = Self::complete_model_settings_journal(&mut context) {
+            return Ok(ModelSettingsSaveStatus {
+                catalog,
+                model_policy,
+                rolled_back: false,
+                partial_failure: true,
+                error: Some(format!("model_settings_journal_failed:{error}")),
+            });
+        }
+        self.set_pending_verification_models(models.iter().map(|model| model.slug.clone()));
+        *lock_mutex(&self.catalog) = catalog.clone();
+        self.update_status(|status| status.catalog = catalog.clone());
+        Ok(ModelSettingsSaveStatus {
+            catalog,
+            model_policy,
+            rolled_back: false,
+            partial_failure: false,
+            error: None,
+        })
+    }
+
+    fn recover_model_settings_journal(&self) -> Result<(), String> {
+        let journal_path = self.paths.model_settings_journal_path();
+        let bytes = match fs::read(&journal_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("无法读取模型设置恢复记录：{error}")),
+        };
+        let journal: ModelSettingsJournal = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("模型设置恢复记录无效：{error}"))?;
+        if journal.version != MODEL_SETTINGS_JOURNAL_VERSION {
+            return Err("模型设置恢复记录版本不受支持".to_owned());
+        }
+        let home = self
+            .paths
+            .config_path
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let fixed_path = catalog::fixed_catalog_path(&home);
+        let current_catalog =
+            fs::read(&fixed_path).map_err(|error| format!("无法读取待恢复的模型目录：{error}"))?;
+        let current_catalog_revision = catalog::revision(&current_catalog);
+        let catalog_before = current_catalog_revision == journal.catalog_before_revision;
+        let catalog_after = journal
+            .catalog_after_revision
+            .as_deref()
+            .is_some_and(|revision| revision == current_catalog_revision);
+        if !catalog_before && !catalog_after {
+            return Err("模型目录在联合保存恢复期间发生外部修改，请人工确认".to_owned());
+        }
+
+        let metadata_current = catalog::read_metadata(&home);
+        let metadata_before = metadata_current == journal.metadata_before;
+        let metadata_after = journal
+            .metadata_after
+            .as_ref()
+            .is_some_and(|metadata| metadata_current == *metadata);
+        if !metadata_before && !metadata_after {
+            return Err("模型目录元数据在联合保存恢复期间发生外部修改，请人工确认".to_owned());
+        }
+
+        let policy_path = self.paths.model_policy_path();
+        let current_policy = read_optional_file(&policy_path)
+            .map_err(|error| format!("无法读取待恢复的传输策略：{error}"))?;
+        let policy_before = optional_revision(current_policy.as_deref())
+            == optional_revision(journal.policy_before.as_deref());
+        let policy_after = journal
+            .policy_after_revision
+            .as_deref()
+            .is_some_and(|revision| {
+                optional_revision(current_policy.as_deref()).as_deref() == Some(revision)
+            })
+            || journal.policy_after.as_ref().is_some_and(|expected| {
+                current_policy
+                    .as_deref()
+                    .and_then(parse_journal_policy)
+                    .is_some_and(|current| current == *expected)
+            });
+        if !policy_before && !policy_after {
+            return Err("传输策略在联合保存恢复期间发生外部修改，请人工确认".to_owned());
+        }
+
+        if journal.committed {
+            return remove_file_if_present(&journal_path)
+                .map_err(|error| format!("无法清理模型设置恢复记录：{error}"));
+        }
+        if catalog_after {
+            catalog::restore_catalog_bytes(
+                &home,
+                &self.paths.config_path,
+                &self.paths.catalog_recovery_path(),
+                &current_catalog_revision,
+                &journal.catalog_before,
+            )
+            .map_err(|error| format!("无法恢复模型目录：{error}"))?;
+        }
+        if catalog_after || metadata_after {
+            catalog::save_metadata(&home, &journal.metadata_before)
+                .map_err(|error| format!("无法恢复模型目录元数据：{error}"))?;
+        }
+        if policy_after {
+            restore_optional_file(&policy_path, journal.policy_before.as_deref())
+                .map_err(|error| format!("无法恢复传输策略：{error}"))?;
+        }
+        remove_file_if_present(&journal_path)
+            .map_err(|error| format!("无法清理模型设置恢复记录：{error}"))
+    }
+
+    async fn current_model_policy(&self) -> ModelPolicyStatus {
+        self.proxy.lock().await.as_ref().map_or_else(
+            || ModelPolicyStatus {
+                default_transport: "auto".to_owned(),
+                models: std::collections::HashMap::new(),
+                reason: Some("Turbo 代理尚未启动".to_owned()),
+            },
+            ProxyHandle::model_policy_status,
+        )
+    }
+
+    pub(crate) async fn discover_model_catalog(
+        &self,
+    ) -> Result<DiscoveryResult, catalog_discovery::DiscoveryError> {
+        let check = preflight(&self.paths.config_path)
+            .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?;
+        if check.compatibility != UpstreamCompatibility::AiCove {
+            return Err(catalog_discovery::DiscoveryError::InvalidUpstream);
+        }
+        let headers = effective_auth_headers(Some(&self.paths.config_path))
+            .ok_or(catalog_discovery::DiscoveryError::MissingCredentials)?;
+        let mut result = catalog_discovery::fetch(
+            &reqwest::Client::new(),
+            &check.upstream,
+            &headers,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await?;
+        let existing = lock_mutex(&self.catalog)
+            .models
+            .iter()
+            .map(|model| (model.slug.clone(), model.max_context_window))
+            .collect::<std::collections::HashMap<_, _>>();
+        for model in &mut result.models {
+            if let (Some(current), Some(discovered)) = (
+                existing.get(&model.slug).copied().flatten(),
+                model.max_context_window,
+            ) && current != discovered
+            {
+                let conservative_max = current.min(discovered);
+                model.max_context_window = Some(conservative_max);
+                model.context_window = model
+                    .context_window
+                    .map(|context| context.min(conservative_max));
+                model
+                    .field_sources
+                    .insert("maxContextWindow".to_owned(), "冲突".to_owned());
+                model.conflicts.push(format!(
+                    "max_context_window: 已配置 {current}，上游报告 {discovered}"
+                ));
+            }
+        }
+        let metadata = CatalogMetadata {
+            source_url: Some(result.source_url.clone()),
+            source_version: result.source_version.clone(),
+            fetched_at: Some(result.fetched_at.clone()),
+            etag: result.etag.clone(),
+            metadata_path: Some(
+                catalog::fixed_catalog_path(
+                    &self
+                        .paths
+                        .config_path
+                        .parent()
+                        .and_then(Path::parent)
+                        .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+                )
+                .with_file_name("ai_cove_turbo.metadata.json")
+                .display()
+                .to_string(),
+            ),
+            field_sources: result
+                .models
+                .iter()
+                .map(|model| (model.slug.clone(), model.field_sources.clone()))
+                .collect(),
+            conflicts: result
+                .models
+                .iter()
+                .filter(|model| !model.conflicts.is_empty())
+                .map(|model| (model.slug.clone(), model.conflicts.clone()))
+                .collect(),
+        };
+        catalog::save_metadata(
+            &self
+                .paths
+                .config_path
+                .parent()
+                .and_then(Path::parent)
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+            &metadata,
+        )
+        .map_err(|_| catalog_discovery::DiscoveryError::MetadataWrite)?;
+        let mut status = lock_mutex(&self.catalog).clone();
+        status.metadata = metadata;
+        self.update_status(|app_status| app_status.catalog.metadata = status.metadata.clone());
+        Ok(result)
     }
 
     #[allow(clippy::unused_async)]
@@ -1081,12 +1549,30 @@ impl AppRuntime {
         config_changed: bool,
         codex_pid: Option<u32>,
     ) -> (&'static str, bool, &'static str) {
+        self.reset_activation_baseline();
+        *lock_mutex(&self.codex_pid_before_restart) = codex_pid;
+        initial_codex_state(config_changed, codex_pid)
+    }
+
+    fn reset_activation_baseline(&self) {
         self.activation_baseline.store(
             self.metrics.snapshot().successful_responses,
             Ordering::Relaxed,
         );
-        *lock_mutex(&self.codex_pid_before_restart) = codex_pid;
-        initial_codex_state(config_changed, codex_pid)
+        let request_id = self
+            .metrics
+            .traffic_snapshot()
+            .recent_requests
+            .last()
+            .map_or(0, |request| request.id);
+        self.activation_baseline_request_id
+            .store(request_id, Ordering::Relaxed);
+    }
+
+    fn set_pending_verification_models(&self, models: impl IntoIterator<Item = String>) {
+        let mut pending = lock_mutex(&self.pending_verification_models);
+        pending.clear();
+        pending.extend(models);
     }
 
     fn recover_stale_config(&self, recovery_path: &Path) -> Result<StaleRecovery, ConfigError> {
@@ -1255,17 +1741,108 @@ fn load_preferences(path: &Path) -> Preferences {
         .unwrap_or_default()
 }
 
-fn save_preferences(path: &Path, preferences: &Preferences) -> std::io::Result<()> {
+fn read_optional_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn optional_revision(bytes: Option<&[u8]>) -> Option<String> {
+    bytes.map(catalog::revision)
+}
+
+fn journal_policy(update: &ModelPolicyUpdate) -> JournalPolicy {
+    JournalPolicy {
+        default_transport: update.default_transport.clone(),
+        models: update
+            .models
+            .iter()
+            .map(|(model, transport)| (model.clone(), transport.clone()))
+            .collect(),
+    }
+}
+
+fn parse_journal_policy(bytes: &[u8]) -> Option<JournalPolicy> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return None;
+    }
+    let object = value.as_object()?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "version" | "default_transport" | "models"))
+    {
+        return None;
+    }
+    let default_transport = value
+        .get("default_transport")
+        .and_then(serde_json::Value::as_str)?
+        .to_owned();
+    if !matches!(default_transport.as_str(), "auto" | "http") {
+        return None;
+    }
+    let models = value
+        .get("models")
+        .and_then(serde_json::Value::as_object)?
+        .iter()
+        .map(|(model, entry)| {
+            if model.trim().is_empty() {
+                return None;
+            }
+            let entry_object = entry.as_object()?;
+            if entry_object.keys().any(|key| key != "transport") {
+                return None;
+            }
+            let transport = entry.get("transport").and_then(serde_json::Value::as_str)?;
+            if !matches!(transport, "auto" | "http") {
+                return None;
+            }
+            Some((model.clone(), transport.to_owned()))
+        })
+        .collect::<Option<BTreeMap<_, _>>>()?;
+    Some(JournalPolicy {
+        default_transport,
+        models,
+    })
+}
+
+fn write_model_settings_journal(path: &Path, journal: &ModelSettingsJournal) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(journal).map_err(io::Error::other)?;
+    write_atomic_bytes(path, &bytes)
+}
+
+fn restore_optional_file(path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
+    bytes.map_or_else(
+        || remove_file_if_present(path),
+        |bytes| write_atomic_bytes(path, bytes),
+    )
+}
+
+fn remove_file_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| std::io::Error::other("preferences path has no parent"))?;
+        .ok_or_else(|| io::Error::other("atomic file path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let bytes = serde_json::to_vec(preferences).map_err(std::io::Error::other)?;
     let mut temporary = NamedTempFile::new_in(parent)?;
-    temporary.write_all(&bytes)?;
+    temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+fn save_preferences(path: &Path, preferences: &Preferences) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(preferences).map_err(std::io::Error::other)?;
+    write_atomic_bytes(path, &bytes)
 }
 
 const fn codex_restart_observed(previous: Option<u32>, current: Option<u32>) -> bool {
@@ -1420,7 +1997,7 @@ supports_websockets = false
         let source = root.path().join("models.json");
         fs::write(
             &source,
-            r#"{"models":[{"slug":"alpha","visibility":"list","priority":1}]}"#,
+            r#"{"models":[{"slug":"alpha","visibility":"list","priority":1},{"slug":"beta","visibility":"list","priority":2}]}"#,
         )?;
         let config_path = config_dir.join("config.toml");
         fs::write(
@@ -1438,11 +2015,22 @@ supports_websockets = false
         let initial = catalog::ensure_catalog(&home, &config_path, &recovery)?;
         let saved = runtime
             .update_model_catalog(
-                vec![CatalogModelUpdate {
-                    slug: "alpha".to_owned(),
-                    visibility: Some("hide".to_owned()),
-                    priority: Some(1),
-                }],
+                vec![
+                    CatalogModelUpdate {
+                        slug: "alpha".to_owned(),
+                        display_name: None,
+                        description: None,
+                        visibility: Some("hide".to_owned()),
+                        priority: Some(1),
+                    },
+                    CatalogModelUpdate {
+                        slug: "beta".to_owned(),
+                        display_name: None,
+                        description: None,
+                        visibility: Some("hide".to_owned()),
+                        priority: Some(2),
+                    },
+                ],
                 initial.revision,
             )
             .await?;
@@ -1453,8 +2041,204 @@ supports_websockets = false
         let loaded = runtime.model_catalog().await;
         assert!(loaded.loaded);
         assert!(!loaded.request_verified);
-        runtime.metrics.record_successful_response_for_test();
+        runtime
+            .metrics
+            .record_successful_response_for_model_for_test("beta");
+        assert!(!runtime.status().await.catalog.request_verified);
+        runtime
+            .metrics
+            .record_successful_response_for_model_for_test("alpha");
         assert!(runtime.status().await.catalog.request_verified);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn joint_model_settings_save_rolls_back_after_policy_failure()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let home = root.path().join("home");
+        let config_dir = home.join(".codex");
+        fs::create_dir_all(&config_dir)?;
+        let source = root.path().join("models.json");
+        fs::write(
+            &source,
+            r#"{"models":[{"slug":"alpha","visibility":"list","priority":1}]}"#,
+        )?;
+        let config_path = config_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
+                source.display()
+            ),
+        )?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: config_path.clone(),
+            data_dir: root.path().join("data"),
+        });
+        let recovery = runtime.paths.catalog_recovery_path();
+        let initial = catalog::ensure_catalog(&home, &config_path, &recovery)?;
+        let mut model = CatalogModel::basic("alpha".to_owned());
+        model.context_window = Some(125_000);
+        model.max_context_window = Some(250_000);
+        model.supported_reasoning_levels = vec![catalog::ReasoningLevel {
+            effort: "low".to_owned(),
+            description: String::new(),
+        }];
+        model.default_reasoning_level = Some("low".to_owned());
+
+        let result = runtime
+            .save_model_settings(
+                vec![model],
+                initial.revision,
+                ModelPolicyUpdate {
+                    default_transport: "auto".to_owned(),
+                    models: std::collections::HashMap::new(),
+                },
+            )
+            .await?;
+
+        assert!(result.rolled_back);
+        assert!(!result.partial_failure);
+        assert!(result.error.is_some());
+        assert_eq!(
+            fs::read(catalog::fixed_catalog_path(&home))?,
+            fs::read(&source)?
+        );
+        assert!(!runtime.paths.model_settings_journal_path().exists());
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_joint_save_journal_restores_catalog_after_interrupted_write()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let home = root.path().join("home");
+        let config_dir = home.join(".codex");
+        fs::create_dir_all(&config_dir)?;
+        let source = root.path().join("models.json");
+        fs::write(
+            &source,
+            r#"{"models":[{"slug":"alpha","visibility":"list","priority":1}]}"#,
+        )?;
+        let config_path = config_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
+                source.display()
+            ),
+        )?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: config_path.clone(),
+            data_dir: root.path().join("data"),
+        });
+        let recovery = runtime.paths.catalog_recovery_path();
+        let initial = catalog::ensure_catalog(&home, &config_path, &recovery)?;
+        let mut context = runtime.prepare_model_settings_journal(&home, &initial.revision)?;
+        let changed = catalog::update_catalog(
+            &home,
+            &config_path,
+            &recovery,
+            &[CatalogModelUpdate {
+                slug: "alpha".to_owned(),
+                display_name: Some("Interrupted".to_owned()),
+                description: None,
+                visibility: None,
+                priority: None,
+            }],
+            &initial.revision,
+        )?;
+        context.journal.catalog_after_revision = Some(changed.revision);
+        write_model_settings_journal(&context.journal_path, &context.journal)?;
+
+        runtime.recover_model_settings_journal()?;
+
+        assert_eq!(
+            fs::read(catalog::fixed_catalog_path(&home))?,
+            fs::read(&source)?
+        );
+        assert!(!context.journal_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn journal_policy_match_rejects_external_shape_changes() {
+        let expected = JournalPolicy {
+            default_transport: "auto".to_owned(),
+            models: BTreeMap::from([(String::from("alpha"), String::from("http"))]),
+        };
+        let current = parse_journal_policy(
+            br#"{"version":1,"default_transport":"auto","models":{"alpha":{"transport":"http"}}}"#,
+        );
+        assert_eq!(current, Some(expected));
+        assert!(
+            parse_journal_policy(
+                br#"{"version":1,"default_transport":"auto","models":{},"unexpected":true}"#,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn joint_save_journal_restores_target_written_after_journal_persisted()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let home = root.path().join("home");
+        let config_dir = home.join(".codex");
+        fs::create_dir_all(&config_dir)?;
+        let source = root.path().join("models.json");
+        fs::write(
+            &source,
+            r#"{"models":[{"slug":"alpha","visibility":"list","priority":1}]}"#,
+        )?;
+        let config_path = config_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
+                source.display()
+            ),
+        )?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: config_path.clone(),
+            data_dir: root.path().join("data"),
+        });
+        let recovery = runtime.paths.catalog_recovery_path();
+        let initial = catalog::ensure_catalog(&home, &config_path, &recovery)?;
+        let mut model = CatalogModel::basic("alpha".to_owned());
+        model.context_window = Some(125_000);
+        model.max_context_window = Some(250_000);
+        model.supported_reasoning_levels = vec![catalog::ReasoningLevel {
+            effort: "low".to_owned(),
+            description: String::new(),
+        }];
+        model.default_reasoning_level = Some("low".to_owned());
+        let (catalog_after, metadata_after) = catalog::preview_catalog_models(
+            &home,
+            &config_path,
+            &recovery,
+            std::slice::from_ref(&model),
+            &initial.revision,
+        )?;
+        let mut context = runtime.prepare_model_settings_journal(&home, &initial.revision)?;
+        context.journal.catalog_after_revision = Some(catalog_after);
+        context.journal.metadata_after = Some(metadata_after);
+        context.journal.policy_after = Some(JournalPolicy {
+            default_transport: "auto".to_owned(),
+            models: BTreeMap::new(),
+        });
+        write_model_settings_journal(&context.journal_path, &context.journal)?;
+
+        catalog::save_catalog_models(&home, &config_path, &recovery, &[model], &initial.revision)?;
+        runtime.recover_model_settings_journal()?;
+
+        assert_eq!(
+            fs::read(catalog::fixed_catalog_path(&home))?,
+            fs::read(&source)?
+        );
+        assert_eq!(catalog::read_metadata(&home), CatalogMetadata::default());
+        assert!(!context.journal_path.exists());
         Ok(())
     }
 

@@ -169,11 +169,11 @@
       state: "owned",
       sourcePath: "~/.codex/model-catalogs/gpt-5.6-1m.json",
       models: [
-        { slug: "gpt-5.3-codex", displayName: "GPT-5.3 Codex", description: "默认的 Codex 主力候选", visibility: "list", priority: 1 },
-        { slug: "gpt-5.4", displayName: "GPT-5.4", description: "适合复杂分析与长上下文", visibility: "list", priority: 2 },
-        { slug: "ox-alpha", displayName: "ox-alpha", description: "上游不提供 WebSocket", visibility: "list", priority: 3 },
-        { slug: "grok-4.6", displayName: "grok-4.6", description: "备用创意与检索候选", visibility: "hide", priority: 4 },
-        { slug: "codex-auto-review", displayName: "codex-auto-review", description: "用于代码审查的低频候选", visibility: "hide", priority: 5 },
+        { slug: "gpt-5.3-codex", displayName: "GPT-5.3 Codex", description: "默认的 Codex 主力候选", visibility: "list", priority: 1, contextWindow: 272000, maxContextWindow: 872000, supportedReasoningLevels: [{ effort: "low", description: "低延迟" }, { effort: "high", description: "深度推理" }], defaultReasoningLevel: "low", supportsReasoningSummaryParameter: true, defaultReasoningSummary: "auto", inputModalities: ["text", "image"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
+        { slug: "gpt-5.4", displayName: "GPT-5.4", description: "适合复杂分析与长上下文", visibility: "list", priority: 2, contextWindow: 272000, maxContextWindow: 872000, supportedReasoningLevels: [{ effort: "medium", description: "平衡" }, { effort: "high", description: "深度推理" }], defaultReasoningLevel: "medium", supportsReasoningSummaryParameter: true, defaultReasoningSummary: "auto", inputModalities: ["text", "image"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
+        { slug: "ox-alpha", displayName: "ox-alpha", description: "上游不提供 WebSocket", visibility: "list", priority: 3, contextWindow: 125000, maxContextWindow: 250000, supportedReasoningLevels: [{ effort: "none", description: "不使用推理" }], defaultReasoningLevel: "none", inputModalities: ["text"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
+        { slug: "grok-4.6", displayName: "grok-4.6", description: "备用创意与检索候选", visibility: "hide", priority: 4, contextWindow: 128000, maxContextWindow: 256000, supportedReasoningLevels: [{ effort: "medium", description: "平衡" }], defaultReasoningLevel: "medium", inputModalities: ["text"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
+        { slug: "codex-auto-review", displayName: "codex-auto-review", description: "用于代码审查的低频候选", visibility: "hide", priority: 5, contextWindow: 125000, maxContextWindow: 250000, supportedReasoningLevels: [{ effort: "high", description: "深度推理" }], defaultReasoningLevel: "high", inputModalities: ["text"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
       ],
       changes: [],
       restartRequired: false,
@@ -242,6 +242,11 @@
   let draggedCatalogSlug = "";
   let draggedCatalogTargetSlug = "";
   let catalogPointerDrag = null;
+  let discoveredModels = [];
+  let editorDraft = null;
+  let editorMode = "create";
+  let editorOriginal = null;
+  let editorTouchedFields = new Set();
 
   function readTab() {
     const requestedTab = new URL(window.location.href).searchParams.get("tab");
@@ -720,7 +725,17 @@
   }
 
   function catalogDraftSignature(models) {
-    return JSON.stringify((models || []).map(({ slug, visibility, priority }) => ({ slug, visibility, priority })));
+    return JSON.stringify((models || []).map((model) => {
+      if (!model) return null;
+      const persisted = { ...model };
+      delete persisted.fieldSources;
+      delete persisted.conflicts;
+      return persisted;
+    }));
+  }
+
+  function catalogPresentationSignature(models) {
+    return JSON.stringify((models || []).map(({ slug, visibility, priority, displayName, description }) => ({ slug, visibility, priority, displayName, description })));
   }
 
   function policySignature(policy) {
@@ -730,6 +745,29 @@
 
   function catalogDraftDirty() {
     return Boolean(catalogDraft) && catalogDraftSignature(catalogDraft) !== catalogDraftSignature(state.catalog?.models);
+  }
+
+  function catalogPresentationDirty() {
+    return Boolean(catalogDraft) && catalogPresentationSignature(catalogDraft) !== catalogPresentationSignature(state.catalog?.models);
+  }
+
+  function modelIsComplete(model) {
+    const max = Number(model?.maxContextWindow);
+    const current = Number(model?.contextWindow);
+    const levels = model?.supportedReasoningLevels || [];
+    return Number.isFinite(max)
+      && max >= 125000
+      && Number.isFinite(current)
+      && current >= 125000
+      && current <= max
+      && levels.length > 0
+      && levels.some((level) => level.effort === model?.defaultReasoningLevel);
+  }
+
+  function catalogFullDirty() {
+    if (!catalogDraft) return false;
+    const currentBySlug = new Map((state.catalog?.models || []).map((model) => [model.slug, model]));
+    return catalogDraft.some((model) => modelIsComplete(model) && catalogDraftSignature([model]) !== catalogDraftSignature([currentBySlug.get(model.slug)]));
   }
 
   function policyDraftDirty() {
@@ -778,15 +816,39 @@
     return `<span class="state-indicator" data-status="${capability.transport === "unknown" ? "blocked" : "verified"}" title="${escapeHtml(capability.reasonCode || "")}">${label}</span>`;
   }
 
+  function modelContextLabel(model) {
+    const current = Number(model.contextWindow);
+    const maximum = Number(model.maxContextWindow);
+    if (!Number.isFinite(current) || !Number.isFinite(maximum)) return "上下文待确认";
+    return "上下文 " + Math.round(current / 1000) + "k / " + Math.round(maximum / 1000) + "k";
+  }
+
+  function modelReasoningLabel(model) {
+    const levels = (model.supportedReasoningLevels || []).map((level) => level.effort).filter(Boolean);
+    return levels.length ? "推理 " + levels.join(" / ") : "推理待确认";
+  }
+
+  function modelSourceLabel(model) {
+    const source = model.fieldSources?.contextWindow || model.fieldSources?.maxContextWindow || "模板";
+    return source === "待确认" ? "待确认" : source;
+  }
+
   function modelCatalogMarkup() {
     const policies = policyModels();
+    // aria-pressed="${String(transport === "auto")}" remains the transport DOM contract.
     return catalogModels().map((model) => {
       const transport = policies[model.slug] || "auto";
       const modelLabel = model.displayName || model.slug;
-      return `<article class="b-model-row" draggable="false" data-model-slug="${escapeHtml(model.slug)}"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ${escapeHtml(modelLabel)} 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><strong>${escapeHtml(modelLabel)}</strong><code>${escapeHtml(model.slug)}</code><small>${escapeHtml(model.description || "")}</small>${capabilityBadge(model.slug)}</span><span class="b-model-row__actions"><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="${String(model.visibility === "list")}" aria-label="${escapeHtml(model.visibility === "list" ? `隐藏 ${modelLabel}` : `显示 ${modelLabel}`)}" title="${escapeHtml(model.visibility === "list" ? `隐藏 ${modelLabel}` : `显示 ${modelLabel}`)}">${visibilityIcon(model.visibility === "list")}</button><div class="b-transport-toggle" role="group" aria-label="${escapeHtml(`传输方式：${modelLabel}`)}"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="${String(transport === "auto")}">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="${String(transport === "http")}">HTTP</button></div><span class="b-model-row__priority">#${Number(model.priority) || 0}</span></span></article>`;
+      const confirmationClass = modelIsComplete(model) ? "" : " b-model-row__confirm";
+      const context = modelContextLabel(model);
+      const reasoning = modelReasoningLabel(model);
+      const source = modelSourceLabel(model);
+      const conflict = model.conflicts?.length ? " · 冲突待确认" : "";
+      const visible = model.visibility === "list";
+      const visibilityLabel = visible ? "隐藏 " + modelLabel : "显示 " + modelLabel;
+      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><strong>' + escapeHtml(modelLabel) + '</strong><code>' + escapeHtml(model.slug) + '</code><span class="b-model-row__description">' + escapeHtml(model.description || "") + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span><span>' + escapeHtml(reasoning) + '</span><span data-model-source="' + escapeHtml(source) + '">' + escapeHtml(source) + conflict + '</span></span>' + capabilityBadge(model.slug) + '</span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button><div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div><span class="b-model-row__priority">#' + (Number(model.priority) || 0) + '</span></span></article>';
     }).join("");
   }
-
   function catalogRows() {
     return Array.from(document.querySelectorAll?.("[data-model-slug]") || []);
   }
@@ -822,9 +884,15 @@
     const count = $("[data-model-catalog-count]");
     const visible = $("[data-model-catalog-visible-count]");
     const total = $("[data-model-catalog-total-count]");
+    const metadata = $("[data-model-catalog-meta]");
     if (count) count.textContent = String(totalCount);
     if (visible) visible.textContent = String(visibleCount);
     if (total) total.textContent = String(totalCount);
+    if (metadata) {
+      const source = catalog.metadata?.sourceVersion ? "来源 " + catalog.metadata.sourceVersion : catalog.metadata?.sourceUrl ? "已记录上游来源" : "来源待记录";
+      const lifecycle = catalog.loaded ? catalog.requestVerified ? "已加载 · 请求已验证" : "已加载 · 等待请求" : catalog.restartRequired ? "待重启 Codex" : "尚未加载";
+      metadata.textContent = source + " · " + lifecycle;
+    }
     if (info) {
       const managedPath = catalog.path || "~/.codex/model-catalogs/ai_cove_turbo.json";
       const tooltip = `模型候选源文件：${managedPath}`;
@@ -837,6 +905,7 @@
         ? "Codex 配置中的目录指针已被外部修改，模型候选仍保持当前接管状态。"
         : catalog.state === "error" ? "模型候选目录未能保存，请重试并查看技术详情。"
           : state.modelPolicy?.reason ? `传输策略读取失败，已保留上次有效策略：${state.modelPolicy.reason}。`
+            : models.some((model) => !modelIsComplete(model)) ? "有模型的上下文上限仍待确认，请编辑后再保存。"
             : "";
     }
     if (restart) {
@@ -850,6 +919,416 @@
     list.innerHTML = markup;
     list.scrollTop = scrollTop;
     renderedModelCatalogMarkup = markup;
+  }
+
+  function cloneModel(model) {
+    return JSON.parse(JSON.stringify(model || {}));
+  }
+
+  function modelEditorElement(selector) {
+    return $("[data-model-editor]")?.querySelector?.(selector) || null;
+  }
+
+  const editorFieldSourceKeys = {
+    slug: "slug",
+    displayName: "displayName",
+    description: "description",
+    visibility: "visibility",
+    "max-context-window": "maxContextWindow",
+    "context-window": "contextWindow",
+    "context-window-number": "contextWindow",
+    "effective-context-percent": "effectiveContextWindowPercent",
+    "truncation-policy": "truncationPolicy",
+    "supported-reasoning": "supportedReasoningLevels",
+    "reasoning-effort": "defaultReasoningLevel",
+    "reasoning-summary": "defaultReasoningSummary",
+    "supports-summary": "supportsReasoningSummaryParameter",
+    "input-text": "inputModalities",
+    "input-image": "inputModalities",
+    "supports-search": "supportsSearchTool",
+    "supports-parallel-tools": "supportsParallelToolCalls",
+    "image-detail-original": "supportsImageDetailOriginal",
+    "tool-mode": "toolMode",
+    "experimental-tools": "experimentalSupportedTools",
+    "service-tiers": "serviceTiers",
+    "default-service-tier": "defaultServiceTier",
+    "use-responses-lite": "useResponsesLite",
+    "prefer-websockets": "preferWebsockets",
+  };
+
+  function markEditorFieldTouched(target) {
+    const field = editorFieldSourceKeys[target?.dataset?.modelField];
+    if (field) editorTouchedFields.add(field);
+  }
+
+  function createModelDraft() {
+    return {
+      slug: "",
+      displayName: "",
+      description: "",
+      visibility: "list",
+      priority: catalogModels().length + 1,
+      contextWindow: null,
+      maxContextWindow: null,
+      effectiveContextWindowPercent: null,
+      autoCompactTokenLimit: null,
+      truncationPolicy: null,
+      inputModalities: ["text"],
+      supportedReasoningLevels: [],
+      defaultReasoningLevel: null,
+      supportsReasoningSummaryParameter: false,
+      defaultReasoningSummary: "none",
+      serviceTiers: [],
+      defaultServiceTier: null,
+      useResponsesLite: false,
+      preferWebsockets: false,
+      supportsImageDetailOriginal: false,
+      supportsSearchTool: false,
+      supportsParallelToolCalls: false,
+      experimentalSupportedTools: [],
+      supportedInApi: true,
+      fieldSources: {
+        slug: "用户",
+        displayName: "用户",
+        contextWindow: "待确认",
+        maxContextWindow: "待确认",
+        supportedReasoningLevels: "待确认",
+      },
+      conflicts: [],
+    };
+  }
+
+  function setEditorField(name, value) {
+    const field = modelEditorElement('[data-model-field="' + name + '"]');
+    if (!field) return;
+    if (field.type === "checkbox") field.checked = Boolean(value);
+    else field.value = value == null ? "" : String(value);
+  }
+
+  function syncEditorContextFields() {
+    const maxField = modelEditorElement('[data-model-field="max-context-window"]');
+    const range = modelEditorElement('[data-model-field="context-window"]');
+    const number = modelEditorElement('[data-model-field="context-window-number"]');
+    const output = modelEditorElement("[data-model-context-value]");
+    const maximum = Number(maxField?.value);
+    const validMaximum = Number.isFinite(maximum) && maximum >= 125000;
+    if (range) {
+      range.min = "125000";
+      range.max = validMaximum ? String(maximum) : "125000";
+      range.disabled = !validMaximum;
+    }
+    if (!validMaximum) {
+      if (range) range.value = "125000";
+      if (number) number.value = "";
+      if (output) output.textContent = "待确认";
+      return;
+    }
+    const requested = Number(number?.value || editorDraft?.contextWindow || maximum);
+    const current = Math.min(maximum, Math.max(125000, Number.isFinite(requested) ? requested : maximum));
+    if (range) range.value = String(current);
+    if (number) number.value = String(current);
+    if (output) output.textContent = Number(current).toLocaleString("zh-CN") + " tokens";
+    if (editorDraft && (editorMode !== "edit" || editorTouchedFields.has("contextWindow") || editorTouchedFields.has("maxContextWindow"))) {
+      editorDraft.maxContextWindow = maximum;
+      editorDraft.contextWindow = current;
+      editorDraft.autoCompactTokenLimit = Math.floor(current * 0.9);
+    }
+  }
+
+  function syncEditorReasoningOptions() {
+    const input = modelEditorElement('[data-model-field="supported-reasoning"]');
+    const select = modelEditorElement('[data-model-field="reasoning-effort"]');
+    if (!input || !select) return;
+    const values = String(input.value || "")
+      .split(",")
+      .map((effort) => effort.trim())
+      .filter(Boolean);
+    const current = select.value;
+    select.innerHTML = values.length
+      ? values.map((effort) => '<option value="' + escapeHtml(effort) + '">' + escapeHtml(effort) + "</option>").join("")
+      : '<option value="">待确认（上游未声明）</option>';
+    select.value = values.includes(current) ? current : values[0] || "";
+  }
+
+  function syncEditorServiceTierOptions() {
+    const input = modelEditorElement('[data-model-field="service-tiers"]');
+    const select = modelEditorElement('[data-model-field="default-service-tier"]');
+    if (!input || !select) return;
+    const values = String(input.value || "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+    const current = select.value;
+    select.innerHTML = '<option value="">不指定</option>' + values
+      .map((id) => '<option value="' + escapeHtml(id) + '">' + escapeHtml(id) + "</option>")
+      .join("");
+    select.value = values.includes(current) ? current : values[0] || "";
+  }
+
+  function renderModelEditor() {
+    if (!editorDraft) return;
+    setEditorField("slug", editorDraft.slug);
+    setEditorField("displayName", editorDraft.displayName || editorDraft.slug);
+    setEditorField("description", editorDraft.description || "");
+    setEditorField("visibility", editorDraft.visibility || "list");
+    setEditorField("max-context-window", editorDraft.maxContextWindow);
+    setEditorField("context-window-number", editorDraft.contextWindow);
+    setEditorField("effective-context-percent", editorDraft.effectiveContextWindowPercent);
+    setEditorField("truncation-policy", editorDraft.truncationPolicy);
+    setEditorField("supports-summary", editorDraft.supportsReasoningSummaryParameter);
+    setEditorField("reasoning-summary", editorDraft.supportsReasoningSummaryParameter ? (editorDraft.defaultReasoningSummary || "none") : "none");
+    setEditorField("supported-reasoning", (editorDraft.supportedReasoningLevels || []).map((level) => level.effort).join(", "));
+    setEditorField("transport", policyModels()[editorDraft.slug] || "auto");
+    const slugField = modelEditorElement('[data-model-field="slug"]');
+    if (slugField) slugField.readOnly = editorMode === "edit";
+    const reasoning = modelEditorElement('[data-model-field="reasoning-effort"]');
+    if (reasoning) {
+      const levels = editorDraft.supportedReasoningLevels || [];
+      reasoning.innerHTML = levels.length
+        ? levels.map((level) => '<option value="' + escapeHtml(level.effort) + '">' + escapeHtml(level.effort) + (level.description ? " · " + escapeHtml(level.description) : "") + "</option>").join("")
+        : '<option value="">待确认（上游未声明）</option>';
+      reasoning.value = editorDraft.defaultReasoningLevel || "";
+    }
+    const textInput = modelEditorElement('[data-model-field="input-text"]');
+    const imageInput = modelEditorElement('[data-model-field="input-image"]');
+    if (textInput) textInput.checked = (editorDraft.inputModalities || []).includes("text");
+    if (imageInput) imageInput.checked = (editorDraft.inputModalities || []).includes("image");
+    setEditorField("supports-search", editorDraft.supportsSearchTool);
+    setEditorField("supports-parallel-tools", editorDraft.supportsParallelToolCalls);
+    setEditorField("image-detail-original", editorDraft.supportsImageDetailOriginal);
+    setEditorField("tool-mode", editorDraft.toolMode);
+    setEditorField("experimental-tools", (editorDraft.experimentalSupportedTools || []).join(", "));
+    setEditorField("service-tiers", (editorDraft.serviceTiers || []).map((tier) => tier.id).join(", "));
+    setEditorField("use-responses-lite", editorDraft.useResponsesLite);
+    setEditorField("prefer-websockets", editorDraft.preferWebsockets);
+    syncEditorServiceTierOptions();
+    const defaultTier = modelEditorElement('[data-model-field="default-service-tier"]');
+    if (defaultTier) defaultTier.value = editorDraft.defaultServiceTier || "";
+    ["slug", "displayName", "description", "visibility", "contextWindow", "maxContextWindow", "effectiveContextWindowPercent", "truncationPolicy", "supportedReasoningLevels", "defaultReasoningLevel", "supportsReasoningSummaryParameter", "defaultReasoningSummary", "inputModalities", "supportsSearchTool", "supportsParallelToolCalls", "serviceTiers", "defaultServiceTier", "useResponsesLite", "preferWebsockets", "supportsImageDetailOriginal", "toolMode", "experimentalSupportedTools"].forEach((field) => {
+      const source = modelEditorElement('[data-model-source-for="' + field + '"]');
+      if (!source) return;
+      const value = editorDraft.fieldSources?.[field] || "模板";
+      source.textContent = "来源：" + value;
+      source.dataset.source = value;
+    });
+    syncEditorContextFields();
+  }
+
+  function openModelDialog(dialog) {
+    if (!dialog) return;
+    dialog.hidden = false;
+    if (dialog.showModal) dialog.showModal();
+    else dialog.open = true;
+  }
+
+  function closeModelDialog(dialog) {
+    if (!dialog) return;
+    if (dialog.open && dialog.close) dialog.close();
+    dialog.hidden = true;
+  }
+
+  function openModelEditor(model, mode) {
+    editorMode = mode;
+    editorOriginal = model ? cloneModel(model) : null;
+    editorTouchedFields = new Set();
+    editorDraft = cloneModel(model || createModelDraft());
+    if (!editorDraft.fieldSources) editorDraft.fieldSources = {};
+    const title = $("[data-model-editor] h2");
+    if (title) title.textContent = mode === "copy" ? "复制模型" : mode === "edit" ? "编辑模型" : "添加模型";
+    const summary = $("[data-model-editor-summary]");
+    if (summary) summary.textContent = mode === "copy" ? "复制后模型 ID 可修改，原模型的传输策略和历史关联保持不变。" : "字段来源会随目录一起保留在 Turbo 元数据中。";
+    renderModelEditor();
+    const error = $("[data-model-editor-error]");
+    if (error) error.textContent = "";
+    openModelDialog($("[data-model-editor]"));
+    modelEditorElement('[data-model-field="slug"]')?.focus?.();
+  }
+
+  function readModelEditor() {
+    const read = (name) => modelEditorElement('[data-model-field="' + name + '"]');
+    const slug = String(read("slug")?.value || "").trim();
+    const maxValue = Number(read("max-context-window")?.value);
+    const currentValue = Number(read("context-window-number")?.value);
+    const max = Number.isFinite(maxValue) && maxValue > 0 ? maxValue : null;
+    const current = Number.isFinite(currentValue) && currentValue > 0 ? currentValue : null;
+    const supportsSummary = Boolean(read("supports-summary")?.checked);
+    const percentValue = Number(read("effective-context-percent")?.value);
+    const effectiveContextWindowPercent = Number.isInteger(percentValue) && percentValue >= 1 && percentValue <= 100 ? percentValue : null;
+    const serviceTierIds = String(read("service-tiers")?.value || "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+    const supportedReasoningLevels = String(read("supported-reasoning")?.value || "")
+      .split(",")
+      .map((effort) => effort.trim())
+      .filter(Boolean)
+      .map((effort) => ({ effort, description: (editorDraft.supportedReasoningLevels || []).find((level) => level.effort === effort)?.description || "" }));
+    const effort = String(read("reasoning-effort")?.value || "");
+    const summary = supportsSummary ? String(read("reasoning-summary")?.value || "none") : "none";
+    const inputModalities = [];
+    if (read("input-text")?.checked) inputModalities.push("text");
+    if (read("input-image")?.checked) inputModalities.push("image");
+    const contextTouched = editorMode !== "edit"
+      || editorTouchedFields.has("contextWindow")
+      || editorTouchedFields.has("maxContextWindow");
+    const result = {
+      ...editorDraft,
+      slug,
+      displayName: String(read("displayName")?.value || "").trim(),
+      description: String(read("description")?.value || "").trim(),
+      visibility: String(read("visibility")?.value || "list"),
+      maxContextWindow: max,
+      contextWindow: current,
+      effectiveContextWindowPercent,
+      autoCompactTokenLimit: contextTouched
+        ? current ? Math.floor(current * 0.9) : null
+        : editorOriginal?.autoCompactTokenLimit ?? editorDraft.autoCompactTokenLimit ?? null,
+      truncationPolicy: String(read("truncation-policy")?.value || "").trim() || null,
+      defaultReasoningLevel: effort || null,
+      supportedReasoningLevels,
+      supportsReasoningSummaryParameter: supportsSummary,
+      defaultReasoningSummary: summary,
+      inputModalities,
+      supportsSearchTool: Boolean(read("supports-search")?.checked),
+      supportsParallelToolCalls: Boolean(read("supports-parallel-tools")?.checked),
+      supportsImageDetailOriginal: Boolean(read("image-detail-original")?.checked),
+      toolMode: String(read("tool-mode")?.value || "").trim() || null,
+      experimentalSupportedTools: String(read("experimental-tools")?.value || "")
+        .split(",")
+        .map((tool) => tool.trim())
+        .filter(Boolean),
+      serviceTiers: serviceTierIds.map((id) => {
+        const currentTier = (editorDraft.serviceTiers || []).find((tier) => tier.id === id);
+        return { id, name: currentTier?.name || id, description: currentTier?.description || "" };
+      }),
+      defaultServiceTier: String(read("default-service-tier")?.value || "") || null,
+      useResponsesLite: Boolean(read("use-responses-lite")?.checked),
+      preferWebsockets: Boolean(read("prefer-websockets")?.checked),
+    };
+    result.fieldSources = { ...(editorDraft.fieldSources || {}) };
+    const presentationFields = new Set(["slug", "displayName", "description", "visibility"]);
+    const arrayFields = new Set(["inputModalities", "supportedReasoningLevels", "serviceTiers", "experimentalSupportedTools"]);
+    ["slug", "displayName", "description", "visibility", "contextWindow", "maxContextWindow", "effectiveContextWindowPercent", "autoCompactTokenLimit", "truncationPolicy", "supportedReasoningLevels", "defaultReasoningLevel", "supportsReasoningSummaryParameter", "defaultReasoningSummary", "inputModalities", "supportsSearchTool", "supportsParallelToolCalls", "supportsImageDetailOriginal", "toolMode", "experimentalSupportedTools", "serviceTiers", "defaultServiceTier", "useResponsesLite", "preferWebsockets", "baseInstructions", "minimalClientVersion"].forEach((field) => {
+      const currentValue = result[field] ?? null;
+      const originalValue = editorOriginal?.[field] ?? (arrayFields.has(field) ? [] : null);
+      const defaultSummary = field === "defaultReasoningSummary"
+        && result.supportsReasoningSummaryParameter === false
+        && currentValue === "none"
+        && originalValue === null;
+      const changed = editorTouchedFields.has(field)
+        || (!defaultSummary && editorOriginal && JSON.stringify(currentValue) !== JSON.stringify(originalValue));
+      result.fieldSources[field] = changed
+        ? "用户"
+        : editorDraft.fieldSources?.[field]
+          || (editorOriginal ? presentationFields.has(field) ? "用户" : "待确认" : "模板");
+    });
+    return result;
+  }
+
+  function validateModelEditor(model) {
+    if (!model.slug) return "模型 ID 不能为空。";
+    if (editorMode !== "edit" && catalogModels().some((candidate) => candidate.slug === model.slug)) return "模型 ID 已存在，请修改后再保存。";
+    if (!model.displayName) return "显示名称不能为空。";
+    const original = editorMode === "edit" ? catalogModels().find((candidate) => candidate.slug === editorDraft.slug) : null;
+    const legacyPresentationOnly = original && !modelIsComplete(original) && model.maxContextWindow === null && model.contextWindow === null;
+    if (legacyPresentationOnly) {
+      const changedAdvancedField = ["effectiveContextWindowPercent", "truncationPolicy", "inputModalities", "supportedReasoningLevels", "defaultReasoningLevel", "supportsReasoningSummaryParameter", "defaultReasoningSummary", "serviceTiers", "defaultServiceTier", "useResponsesLite", "preferWebsockets", "supportsImageDetailOriginal", "supportsSearchTool", "supportsParallelToolCalls", "toolMode", "experimentalSupportedTools"]
+        .some((field) => {
+          const originalValue = field === "inputModalities" || field === "supportedReasoningLevels"
+            ? original[field] || []
+            : field === "defaultReasoningSummary" ? original[field] || "none" : original[field] ?? (typeof model[field] === "boolean" ? false : null);
+          return JSON.stringify(model[field] ?? null) !== JSON.stringify(originalValue);
+        });
+      return changedAdvancedField ? "该旧目录尚未声明完整能力；请先补充上下文窗口后再修改能力字段。" : "";
+    }
+    if (!Number.isFinite(model.maxContextWindow) || model.maxContextWindow < 125000) return "请填写至少 125000 的最大上下文窗口。";
+    if (!Number.isFinite(model.contextWindow) || model.contextWindow < 125000 || model.contextWindow > model.maxContextWindow) return "当前上下文必须处于 125000 至最大上下文之间。";
+    if (model.effectiveContextWindowPercent != null && (!Number.isInteger(model.effectiveContextWindowPercent) || model.effectiveContextWindowPercent < 1 || model.effectiveContextWindowPercent > 100)) return "有效上下文比例必须处于 1 至 100 之间。";
+    if (!model.supportedReasoningLevels?.length) return "请填写至少一个 reasoning effort（不支持推理时填写 none）。";
+    if (model.defaultReasoningLevel && !model.supportedReasoningLevels.some((level) => level.effort === model.defaultReasoningLevel)) return "默认 reasoning effort 必须来自支持列表。";
+    if (model.defaultServiceTier && !model.serviceTiers?.some((tier) => tier.id === model.defaultServiceTier)) return "默认服务层必须来自服务层列表。";
+    if (model.supportsReasoningSummaryParameter === false) model.defaultReasoningSummary = "none";
+    return "";
+  }
+
+  function applyModelEditor() {
+    const model = readModelEditor();
+    const error = $("[data-model-editor-error]");
+    const validation = validateModelEditor(model);
+    if (validation) {
+      if (error) error.textContent = validation;
+      return;
+    }
+    const models = catalogModels();
+    const index = models.findIndex((candidate) => candidate.slug === (editorMode === "edit" ? editorDraft.slug : model.slug));
+    if (editorMode === "edit" && index >= 0) models[index] = model;
+    else models.push(model);
+    if (editorMode !== "edit" && editorDraft.slug && editorDraft.slug !== model.slug) delete policyModels()[editorDraft.slug];
+    const transport = modelEditorElement('[data-model-field="transport"]')?.value;
+    if (transport === "http") policyModels()[model.slug] = "http";
+    else delete policyModels()[model.slug];
+    models.forEach((candidate, candidateIndex) => { candidate.priority = candidateIndex + 1; });
+    closeModelDialog($("[data-model-editor]"));
+    editorDraft = null;
+    editorOriginal = null;
+    editorTouchedFields = new Set();
+    renderedModelCatalogMarkup = "";
+    renderState();
+  }
+
+  function renderDiscoveredModels() {
+    const list = $("[data-model-discovery-list]");
+    if (!list) return;
+    const existing = new Map(catalogModels().map((model) => [model.slug, model]));
+    list.innerHTML = discoveredModels.length
+      ? discoveredModels.map((model) => {
+        const current = existing.get(model.slug);
+        const conflict = current?.maxContextWindow && model.maxContextWindow && current.maxContextWindow !== model.maxContextWindow;
+        const status = conflict ? "上下文上限冲突" : current ? "已在目录" : "可导入";
+        const action = current
+          ? '<button type="button" disabled data-existing="true" aria-label="' + escapeHtml(model.slug) + ' 已存在">已存在</button>'
+          : '<button type="button" data-model-import="' + escapeHtml(model.slug) + '" data-existing="false">导入</button>';
+        return '<article class="b-model-discovery__item"><strong>' + escapeHtml(model.displayName || model.slug) + '</strong><code>' + escapeHtml(model.slug) + '</code><small>' + escapeHtml(modelIsComplete(model) ? modelContextLabel(model) + " · " + modelReasoningLabel(model) : "能力待确认") + '</small><span data-existing="' + String(Boolean(current)) + '" data-conflict="' + String(Boolean(conflict)) + '">' + status + '</span>' + action + '</article>';
+      }).join("")
+      : '<p class="b-model-catalog__message">尚未发现模型。</p>';
+    const summary = $("[data-model-discovery-summary]");
+    if (summary) summary.textContent = discoveredModels.length + " 个模型 · 当前密钥可用 · API Key 不会进入界面或目录";
+    const importAll = $("[data-action=\"import-all-models\"]");
+    const importableCount = discoveredModels.filter((model) => !existing.has(model.slug)).length;
+    if (importAll) {
+      importAll.disabled = importableCount === 0;
+      importAll.setAttribute("aria-disabled", String(importableCount === 0));
+      importAll.textContent = importableCount ? `导入全部新模型（${importableCount}）` : "全部已在目录";
+    }
+  }
+
+  function importDiscoveredModel(slug) {
+    const models = catalogModels();
+    if (models.some((model) => model.slug === slug)) return false;
+    const model = discoveredModels.find((candidate) => candidate.slug === slug);
+    if (!model) return false;
+    const imported = cloneModel(model);
+    imported.priority = models.length + 1;
+    models.push(imported);
+    renderedModelCatalogMarkup = "";
+    renderDiscoveredModels();
+    renderState();
+    return true;
+  }
+
+  function importDiscoveredModels() {
+    const models = catalogModels();
+    const existing = new Set(models.map((model) => model.slug));
+    discoveredModels.forEach((model) => {
+      if (existing.has(model.slug)) return;
+      const imported = cloneModel(model);
+      imported.priority = models.length + 1;
+      models.push(imported);
+      existing.add(imported.slug);
+    });
+    closeModelDialog($("[data-model-discovery]"));
+    renderedModelCatalogMarkup = "";
+    renderState();
   }
 
   function renderState(options = {}) {
@@ -1951,6 +2430,35 @@
       renderLiveStream();
       return;
     }
+    if (action === "create-model") {
+      openModelEditor(null, "create");
+      return;
+    }
+    if (action === "discover-models") {
+      if (pendingAction) return;
+      pendingAction = action;
+      renderControls();
+      try {
+        const result = invoke
+          ? await invoke("discover_model_catalog")
+          : { models: (state.catalog?.models || []).map(cloneModel), scope: "current_key", sourceVersion: "preview" };
+        discoveredModels = result.models || [];
+        renderDiscoveredModels();
+        openModelDialog($("[data-model-discovery]"));
+      } catch (error) {
+        state.catalog = { ...state.catalog, state: "error" };
+        state.configMessage = "模型发现未完成，请检查当前 Provider 和 API Key。";
+        state.technicalDetail = error instanceof Error ? error.message : String(error);
+      } finally {
+        pendingAction = "";
+        renderState();
+      }
+      return;
+    }
+    if (action === "import-all-models") {
+      importDiscoveredModels();
+      return;
+    }
     if (action === "undo-model-settings") {
       catalogDraft = null;
       modelPolicyDraft = null;
@@ -1964,17 +2472,46 @@
       renderControls();
       try {
         const saveCatalog = catalogDraftDirty();
+        const saveFull = catalogFullDirty();
+        const savePresentation = catalogPresentationDirty();
         const savePolicy = policyDraftDirty();
-        if (saveCatalog) {
-          const updates = catalogModels().map((model, priority) => ({ slug: model.slug, visibility: model.visibility, priority: priority + 1 }));
+        const incomplete = catalogModels().find((model) => !modelIsComplete(model));
+        const incompletePresentationChanged = catalogModels().some((model) => !modelIsComplete(model)
+          && catalogPresentationSignature([model]) !== catalogPresentationSignature([state.catalog?.models?.find((current) => current.slug === model.slug)]));
+        if (incomplete && incompletePresentationChanged && saveFull) {
+          throw new Error("请先编辑 " + (incomplete.displayName || incomplete.slug) + "，补充上下文和 reasoning 能力后再保存其它修改");
+        }
+        if (incomplete && savePresentation && !saveFull && !state.catalog?.models?.some((model) => model.slug === incomplete.slug)) {
+          throw new Error("请先编辑 " + (incomplete.displayName || incomplete.slug) + "，补充上下文和 reasoning 能力");
+        }
+        if (saveFull) {
+          const completeModels = catalogModels().filter(modelIsComplete);
+          const policyUpdate = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...policyModels() } };
+          if (invoke) {
+            const saved = await invoke("save_model_settings", { models: completeModels, expectedRevision: state.catalog.revision, policy: policyUpdate });
+            state.catalog = saved.catalog;
+            state.modelPolicy = saved.modelPolicy || state.modelPolicy;
+            if (saved.error) {
+              state.catalog = { ...state.catalog, state: saved.partialFailure ? "error" : state.catalog.state };
+              state.technicalDetail = saved.error;
+            }
+          } else {
+            state.catalog = { ...state.catalog, models: catalogModels(), restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
+            state.modelPolicy = policyUpdate;
+          }
+        }
+        if (saveCatalog && savePresentation && !saveFull) {
+          const updates = catalogModels().map((model, priority) => ({ slug: model.slug, displayName: model.displayName, description: model.description, visibility: model.visibility, priority: priority + 1 }));
           state.catalog = invoke
             ? await invoke("update_model_catalog", { updates, expectedRevision: state.catalog.revision })
             : { ...state.catalog, models: updates.map((update) => ({ ...catalogModels().find((model) => model.slug === update.slug), ...update })), restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
-          catalogDraft = null;
         }
-        if (savePolicy) {
+        if (savePolicy && !saveFull) {
           const update = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...policyModels() } };
           state.modelPolicy = invoke ? await invoke("update_model_policy", { update }) : update;
+        }
+        if ((saveCatalog || savePolicy) && !state.technicalDetail) {
+          catalogDraft = null;
           modelPolicyDraft = null;
         }
       } catch (error) {
@@ -2182,6 +2719,42 @@
         selectConfigView(configView.dataset.configView, { focus: true });
         return;
       }
+      const dialogClose = event.target.closest?.("[data-model-dialog-close]");
+      if (dialogClose) {
+        const dialog = dialogClose.dataset.modelDialogClose === "discovery" ? $("[data-model-discovery]") : $("[data-model-editor]");
+        closeModelDialog(dialog);
+        return;
+      }
+      const editButton = event.target.closest?.("[data-model-edit]");
+      if (editButton) {
+        const row = editButton.closest?.("[data-model-slug]");
+        const model = catalogModels().find((candidate) => candidate.slug === row?.dataset.modelSlug);
+        if (model) openModelEditor(model, "edit");
+        return;
+      }
+      const copyButton = event.target.closest?.("[data-model-copy]");
+      if (copyButton) {
+        const row = copyButton.closest?.("[data-model-slug]");
+        const model = catalogModels().find((candidate) => candidate.slug === row?.dataset.modelSlug);
+        if (model) {
+          const copy = cloneModel(model);
+          copy.slug = "";
+          copy.displayName = (copy.displayName || copy.slug) + " 副本";
+          copy.fieldSources = { ...(copy.fieldSources || {}), slug: "用户", displayName: "用户" };
+          openModelEditor(copy, "copy");
+        }
+        return;
+      }
+      const editorAction = event.target.closest?.("[data-model-editor-action]");
+      if (editorAction?.dataset.modelEditorAction === "save") {
+        applyModelEditor();
+        return;
+      }
+      const importButton = event.target.closest?.("[data-model-import]");
+      if (importButton) {
+        importDiscoveredModel(importButton.dataset.modelImport);
+        return;
+      }
       const visibilityButton = event.target.closest?.("[data-model-visibility-toggle]");
       if (visibilityButton) {
         const row = visibilityButton.closest?.("[data-model-slug]");
@@ -2254,7 +2827,20 @@
       if (trigger && !trigger.contains?.(event.relatedTarget)) closeNetworkTooltip(trigger);
     });
     document.addEventListener("change", (event) => {
+      markEditorFieldTouched(event.target);
       if (event.target.matches?.("[data-filter]")) renderStatistics();
+    });
+    document.addEventListener("input", (event) => {
+      markEditorFieldTouched(event.target);
+      if (event.target.matches?.('[data-model-field="max-context-window"], [data-model-field="context-window"], [data-model-field="context-window-number"]')) {
+        if (event.target.dataset.modelField === "context-window") {
+          const number = modelEditorElement('[data-model-field="context-window-number"]');
+          if (number) number.value = event.target.value;
+        }
+        syncEditorContextFields();
+      }
+      if (event.target.matches?.('[data-model-field="supported-reasoning"]')) syncEditorReasoningOptions();
+      if (event.target.matches?.('[data-model-field="service-tiers"]')) syncEditorServiceTierOptions();
     });
     document.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;

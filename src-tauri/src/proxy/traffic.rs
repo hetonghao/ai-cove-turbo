@@ -111,6 +111,13 @@ impl RequestEvent {
     pub(crate) fn thread_id(&self) -> Option<&str> {
         self.thread_id.as_deref()
     }
+
+    pub(crate) fn is_successful_responses_for(&self, model: &str) -> bool {
+        self.path == "/v1/responses"
+            && self.model.as_deref() == Some(model)
+            && (200..300).contains(&self.status)
+            && self.result != TrafficResult::Error
+    }
 }
 
 #[derive(Clone, Debug, Default)]

@@ -4,6 +4,7 @@
 #![allow(clippy::redundant_pub_crate)] // Private modules expose crate-scoped test seams.
 
 pub(crate) mod catalog;
+mod catalog_discovery;
 mod codex_thread_title;
 pub(crate) mod config;
 pub(crate) mod proxy;
@@ -95,6 +96,9 @@ pub fn run() -> tauri::Result<()> {
             get_codex_thread_info,
             get_model_catalog,
             update_model_catalog,
+            save_model_catalog,
+            save_model_settings,
+            discover_model_catalog,
             restore_model_catalog,
             reclaim_model_catalog,
             open_ai_cove,
@@ -338,6 +342,40 @@ async fn update_model_catalog(
 ) -> Result<catalog::CatalogStatus, String> {
     runtime
         .update_model_catalog(updates, expected_revision)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_model_catalog(
+    runtime: State<'_, Arc<AppRuntime>>,
+    models: Vec<catalog::CatalogModel>,
+    expected_revision: String,
+) -> Result<catalog::CatalogStatus, String> {
+    runtime
+        .save_model_catalog(models, expected_revision)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_model_settings(
+    runtime: State<'_, Arc<AppRuntime>>,
+    models: Vec<catalog::CatalogModel>,
+    expected_revision: String,
+    policy: proxy::ModelPolicyUpdate,
+) -> Result<runtime::ModelSettingsSaveStatus, String> {
+    runtime
+        .save_model_settings(models, expected_revision, policy)
+        .await
+}
+
+#[tauri::command]
+async fn discover_model_catalog(
+    runtime: State<'_, Arc<AppRuntime>>,
+) -> Result<catalog_discovery::DiscoveryResult, String> {
+    runtime
+        .discover_model_catalog()
         .await
         .map_err(|error| error.to_string())
 }

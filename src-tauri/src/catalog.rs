@@ -14,17 +14,56 @@ mod catalog_types;
 
 use catalog_storage::{
     digest, parse_models, read_catalog_pointer, read_record, set_number, set_string,
-    status_from_file, write_atomic, write_catalog_pointer, write_record,
+    status_from_file, write_atomic, write_catalog_pointer, write_model_fields, write_record,
 };
 use catalog_types::OwnershipRecord;
 pub(crate) use catalog_types::{
-    CatalogChange, CatalogError, CatalogModel, CatalogModelUpdate, CatalogStatus,
+    CatalogChange, CatalogError, CatalogMetadata, CatalogModel, CatalogModelUpdate, CatalogStatus,
+    ReasoningLevel, ServiceTier,
 };
 
 pub(crate) const FIXED_CATALOG_RELATIVE_PATH: &str = ".codex/model-catalogs/ai_cove_turbo.json";
 
 pub(crate) fn fixed_catalog_path(home: &Path) -> PathBuf {
     home.join(FIXED_CATALOG_RELATIVE_PATH)
+}
+
+pub(crate) fn save_metadata(home: &Path, metadata: &CatalogMetadata) -> Result<(), CatalogError> {
+    catalog_storage::write_metadata(&fixed_catalog_path(home), metadata)
+}
+
+pub(crate) fn read_metadata(home: &Path) -> CatalogMetadata {
+    catalog_storage::read_metadata(&fixed_catalog_path(home))
+}
+
+pub(crate) fn revision(bytes: &[u8]) -> String {
+    catalog_storage::digest(bytes)
+}
+
+pub(crate) fn preview_catalog_models(
+    home: &Path,
+    config_path: &Path,
+    recovery_path: &Path,
+    models: &[CatalogModel],
+    expected_revision: &str,
+) -> Result<(String, CatalogMetadata), CatalogError> {
+    let fixed_path = fixed_catalog_path(home);
+    let _record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
+    let pointer = read_catalog_pointer(config_path)?;
+    if pointer.as_deref() != Some(fixed_path.as_path()) {
+        return Err(CatalogError::OwnershipConflict);
+    }
+    let bytes = fs::read(&fixed_path).map_err(CatalogError::Read)?;
+    if digest(&bytes) != expected_revision {
+        return Err(CatalogError::ContentChanged);
+    }
+    let previous_metadata = catalog_storage::read_metadata(&fixed_path);
+    let (next_bytes, metadata) = prepare_catalog_models(&bytes, &previous_metadata, models)?;
+    Ok((digest(&next_bytes), metadata))
+}
+
+pub(crate) fn model_from_discovery(value: &Value, slug: String) -> CatalogModel {
+    catalog_storage::model_from_value(value, slug)
 }
 
 pub(crate) fn starting_status(home: &Path) -> CatalogStatus {
@@ -38,6 +77,7 @@ pub(crate) fn starting_status(home: &Path) -> CatalogStatus {
         loaded: false,
         request_verified: false,
         revision: String::new(),
+        metadata: CatalogMetadata::default(),
     }
 }
 
@@ -177,6 +217,18 @@ pub(crate) fn update_catalog(
         else {
             return Err(CatalogError::InvalidModel(update.slug.clone()));
         };
+        if let Some(display_name) = &update.display_name {
+            if display_name.trim().is_empty() {
+                return Err(CatalogError::InvalidSchema(format!(
+                    "模型 {} 的 display_name 不能为空",
+                    update.slug
+                )));
+            }
+            set_string(model, "display_name", display_name);
+        }
+        if let Some(description) = &update.description {
+            set_string(model, "description", description);
+        }
         if let Some(visibility) = &update.visibility {
             let current_visibility = model
                 .get("visibility")
@@ -224,6 +276,128 @@ pub(crate) fn update_catalog(
     status_from_file(&fixed_path, &record, true, false, false)
 }
 
+pub(crate) fn save_catalog_models(
+    home: &Path,
+    config_path: &Path,
+    recovery_path: &Path,
+    models: &[CatalogModel],
+    expected_revision: &str,
+) -> Result<CatalogStatus, CatalogError> {
+    let fixed_path = fixed_catalog_path(home);
+    let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
+    let pointer = read_catalog_pointer(config_path)?;
+    if pointer.as_deref() != Some(fixed_path.as_path()) {
+        return Err(CatalogError::OwnershipConflict);
+    }
+    let bytes = fs::read(&fixed_path).map_err(CatalogError::Read)?;
+    if digest(&bytes) != expected_revision {
+        return Err(CatalogError::ContentChanged);
+    }
+    let previous_metadata = catalog_storage::read_metadata(&fixed_path);
+    let (next_bytes, metadata) = prepare_catalog_models(&bytes, &previous_metadata, models)?;
+    write_atomic(&fixed_path, &next_bytes)?;
+    if let Err(error) = catalog_storage::write_metadata(&fixed_path, &metadata) {
+        let _ = write_atomic(&fixed_path, &bytes);
+        let _ = catalog_storage::write_metadata(&fixed_path, &previous_metadata);
+        return Err(error);
+    }
+    status_from_file(&fixed_path, &record, true, false, false)
+}
+
+fn prepare_catalog_models(
+    bytes: &[u8],
+    previous_metadata: &CatalogMetadata,
+    models: &[CatalogModel],
+) -> Result<(Vec<u8>, CatalogMetadata), CatalogError> {
+    let normalized_models = models
+        .iter()
+        .cloned()
+        .map(CatalogModel::with_safe_defaults)
+        .collect::<Vec<_>>();
+    let mut document: Value = serde_json::from_slice(bytes).map_err(CatalogError::Json)?;
+    let entries = document
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| CatalogError::InvalidSchema("缺少 models 数组".to_owned()))?;
+    let mut seen = std::collections::HashSet::new();
+    for model in &normalized_models {
+        model
+            .validate_complete()
+            .map_err(CatalogError::InvalidSchema)?;
+        if !seen.insert(model.slug.clone()) {
+            return Err(CatalogError::InvalidModel(model.slug.clone()));
+        }
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|entry| entry.get("slug").and_then(Value::as_str) == Some(model.slug.as_str()))
+        {
+            write_model_fields(existing, model);
+        } else {
+            let mut created = Value::Object(serde_json::Map::new());
+            write_model_fields(&mut created, model);
+            entries.push(created);
+        }
+    }
+    entries.sort_by(|left, right| {
+        let left_priority = left
+            .get("priority")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let right_priority = right
+            .get("priority")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        left_priority.cmp(&right_priority).then_with(|| {
+            left.get("slug")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("slug")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+        })
+    });
+    let mut metadata = previous_metadata.clone();
+    for model in &normalized_models {
+        metadata
+            .field_sources
+            .insert(model.slug.clone(), model.field_sources.clone());
+        if model.conflicts.is_empty() {
+            metadata.conflicts.remove(&model.slug);
+        } else {
+            metadata
+                .conflicts
+                .insert(model.slug.clone(), model.conflicts.clone());
+        }
+    }
+    let next_bytes = serde_json::to_vec_pretty(&document).map_err(CatalogError::Json)?;
+    Ok((next_bytes, metadata))
+}
+
+pub(crate) fn restore_catalog_bytes(
+    home: &Path,
+    config_path: &Path,
+    recovery_path: &Path,
+    expected_revision: &str,
+    bytes: &[u8],
+) -> Result<CatalogStatus, CatalogError> {
+    let fixed_path = fixed_catalog_path(home);
+    let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
+    let pointer = read_catalog_pointer(config_path)?;
+    if pointer.as_deref() != Some(fixed_path.as_path()) {
+        return Err(CatalogError::OwnershipConflict);
+    }
+    let current = fs::read(&fixed_path).map_err(CatalogError::Read)?;
+    if digest(&current) != expected_revision {
+        return Err(CatalogError::ContentChanged);
+    }
+    let _ = parse_models(bytes)?;
+    write_atomic(&fixed_path, bytes)?;
+    status_from_file(&fixed_path, &record, true, false, false)
+}
+
 pub(crate) fn restore_catalog(
     home: &Path,
     config_path: &Path,
@@ -258,6 +432,7 @@ pub(crate) fn restore_catalog(
         loaded: false,
         request_verified: false,
         revision: String::new(),
+        metadata: CatalogMetadata::default(),
     })
 }
 
@@ -388,6 +563,8 @@ mod tests {
             &recovery,
             &[CatalogModelUpdate {
                 slug: "alpha".to_owned(),
+                display_name: None,
+                description: None,
                 visibility: Some("hide".to_owned()),
                 priority: Some(9),
             }],
@@ -411,6 +588,40 @@ mod tests {
         fs::write(fixed_catalog_path(root.path()), r#"{"models":[]}"#)?;
         let result = update_catalog(root.path(), &config, &recovery, &[], &status.revision);
         assert!(matches!(result, Err(CatalogError::ContentChanged)));
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_model_can_update_display_fields_without_claiming_capabilities()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let current = ensure_catalog(root.path(), &config, &recovery)?;
+        let status = update_catalog(
+            root.path(),
+            &config,
+            &recovery,
+            &[CatalogModelUpdate {
+                slug: "alpha".to_owned(),
+                display_name: Some("Alpha renamed".to_owned()),
+                description: Some("new description".to_owned()),
+                visibility: None,
+                priority: None,
+            }],
+            &current.revision,
+        )?;
+        let alpha = status.models.iter().find(|model| model.slug == "alpha");
+        assert_eq!(
+            alpha.map(|model| model.display_name.as_str()),
+            Some("Alpha renamed")
+        );
+        assert_eq!(
+            alpha.map(|model| model.description.as_str()),
+            Some("new description")
+        );
+        assert!(alpha.is_some_and(|model| model.max_context_window.is_none()));
         Ok(())
     }
 
@@ -439,5 +650,115 @@ mod tests {
         assert!(fields.contains(&("beta", "model")));
         assert!(fields.contains(&("gamma", "model")));
         Ok(())
+    }
+
+    fn complete_model(slug: &str) -> CatalogModel {
+        let mut model = CatalogModel::basic(slug.to_owned());
+        model.context_window = Some(125_000);
+        model.max_context_window = Some(250_000);
+        model.auto_compact_token_limit = Some(112_500);
+        model
+            .field_sources
+            .insert("contextWindow".to_owned(), "用户".to_owned());
+        model
+            .field_sources
+            .insert("maxContextWindow".to_owned(), "用户".to_owned());
+        model.supported_reasoning_levels = vec![catalog_types::ReasoningLevel {
+            effort: "low".to_owned(),
+            description: "低延迟".to_owned(),
+        }];
+        model.default_reasoning_level = Some("low".to_owned());
+        model
+    }
+
+    #[test]
+    fn complete_model_save_upserts_without_dropping_unknown_fields() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let current = ensure_catalog(root.path(), &config, &recovery)?;
+        let mut model = complete_model("alpha");
+        model.display_name = "Alpha updated".to_owned();
+        let added = complete_model("gamma");
+        let status = save_catalog_models(
+            root.path(),
+            &config,
+            &recovery,
+            &[model, added],
+            &current.revision,
+        )?;
+        assert_eq!(status.models.len(), 3);
+        assert_eq!(
+            status
+                .models
+                .iter()
+                .find(|model| model.slug == "gamma")
+                .and_then(|model| model.field_sources.get("maxContextWindow"))
+                .map(String::as_str),
+            Some("用户")
+        );
+        let written = fs::read_to_string(fixed_catalog_path(root.path()))?;
+        assert!(written.contains("unknown"));
+        assert!(written.contains("\"max_context_window\": 250000"));
+        assert!(written.contains("\"slug\": \"gamma\""));
+        assert!(
+            root.path()
+                .join(".codex/model-catalogs/ai_cove_turbo.metadata.json")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_preview_matches_the_revision_and_metadata_written_by_save()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let current = ensure_catalog(root.path(), &config, &recovery)?;
+        let model = complete_model("alpha");
+        let (preview_revision, preview_metadata) = preview_catalog_models(
+            root.path(),
+            &config,
+            &recovery,
+            std::slice::from_ref(&model),
+            &current.revision,
+        )?;
+
+        let saved =
+            save_catalog_models(root.path(), &config, &recovery, &[model], &current.revision)?;
+
+        assert_eq!(saved.revision, preview_revision);
+        assert_eq!(read_metadata(root.path()), preview_metadata);
+        Ok(())
+    }
+
+    #[test]
+    fn complete_model_validation_rejects_context_outside_bounds() {
+        let mut model = complete_model("alpha");
+        model.context_window = Some(300_000);
+        assert!(model.validate_complete().is_err());
+    }
+
+    #[test]
+    fn complete_model_validation_rejects_invalid_advanced_fields() {
+        let mut model = complete_model("alpha");
+        model.effective_context_window_percent = Some(101);
+        assert!(model.validate_complete().is_err());
+
+        model.effective_context_window_percent = Some(90);
+        model.default_service_tier = Some("priority".to_owned());
+        assert!(model.validate_complete().is_err());
+    }
+
+    #[test]
+    fn complete_model_save_generates_safe_template_fields() {
+        let model = complete_model("alpha").with_safe_defaults();
+        assert!(model.base_instructions.is_some());
+        assert_eq!(model.minimal_client_version.as_deref(), Some("0.0.0"));
+        assert_eq!(model.auto_compact_token_limit, Some(112_500));
+        assert_eq!(model.field_sources["baseInstructions"], "模板");
     }
 }
