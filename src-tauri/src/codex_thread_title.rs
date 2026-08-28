@@ -58,7 +58,6 @@ pub(crate) fn read_with_cli(
     }
     let query = format!(
         r"
-PRAGMA busy_timeout = 1500;
 SELECT
     CASE
         WHEN child.thread_source = 'subagent'
@@ -81,6 +80,8 @@ LIMIT 1;
     let output = Command::new(executable)
         .arg("-readonly")
         .arg("-json")
+        .arg("-cmd")
+        .arg(".timeout 1500")
         .arg(database)
         .arg(query)
         .output()
@@ -123,7 +124,6 @@ pub(crate) fn read_batch_with_cli(
         .join(",");
     let query = format!(
         r"
-PRAGMA busy_timeout = 1500;
 SELECT
     child.id AS thread_id,
     CASE
@@ -146,6 +146,8 @@ WHERE child.id IN ({ids});
     let output = Command::new(executable)
         .arg("-readonly")
         .arg("-json")
+        .arg("-cmd")
+        .arg(".timeout 1500")
         .arg(database)
         .arg(query)
         .output()

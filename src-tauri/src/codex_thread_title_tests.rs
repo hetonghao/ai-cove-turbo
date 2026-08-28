@@ -24,7 +24,7 @@ fn reads_subagent_name_and_parent_through_the_read_only_cli() -> io::Result<()> 
     fs::write(
         &cli,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '[{{\"name\":\"Nash\",\"parent_name\":\"Turbo 主会话\",\"is_subagent\":1}}]'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nhas_timeout=0\nfor arg in \"$@\"; do [ \"$arg\" = \".timeout 1500\" ] && has_timeout=1; done\nif [ \"$has_timeout\" -eq 0 ]; then printf '%s\\n' '[{{\"timeout\":1500}}]'; fi\nprintf '%s\\n' '[{{\"name\":\"Nash\",\"parent_name\":\"Turbo 主会话\",\"is_subagent\":1}}]'\n",
             arguments.display()
         ),
     )?;
@@ -45,6 +45,7 @@ fn reads_subagent_name_and_parent_through_the_read_only_cli() -> io::Result<()> 
     let recorded = fs::read_to_string(arguments)?;
     assert!(recorded.contains("-readonly"));
     assert!(recorded.contains("-json"));
+    assert!(recorded.contains(".timeout 1500"));
     assert!(recorded.contains(database.to_string_lossy().as_ref()));
     assert!(recorded.contains("agent_nickname"));
     assert!(recorded.contains("thread_spawn_edges"));
@@ -60,7 +61,7 @@ fn reads_multiple_thread_names_in_one_read_only_batch() -> io::Result<()> {
     let cli = root.path().join("sqlite3");
     fs::write(
         &cli,
-        "#!/bin/sh\nprintf '%s\\n' '[{\"thread_id\":\"019fc8b1-a38c-7e70-9169-d6d76a7fcedc\",\"name\":\"代码审查\",\"parent_name\":null,\"is_subagent\":0}]'\n",
+        "#!/bin/sh\nhas_timeout=0\nfor arg in \"$@\"; do [ \"$arg\" = \".timeout 1500\" ] && has_timeout=1; done\nif [ \"$has_timeout\" -eq 0 ]; then printf '%s\\n' '[{\"timeout\":1500}]'; fi\nprintf '%s\\n' '[{\"thread_id\":\"019fc8b1-a38c-7e70-9169-d6d76a7fcedc\",\"name\":\"代码审查\",\"parent_name\":null,\"is_subagent\":0}]'\n",
     )?;
     let mut permissions = fs::metadata(&cli)?.permissions();
     permissions.set_mode(0o755);
