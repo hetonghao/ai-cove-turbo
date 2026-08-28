@@ -1205,16 +1205,13 @@
     return result;
   }
 
-  function mergeSavedPolicyIntoDraft(savedPolicy, previousDraft, previousPolicy, savedSlug) {
+  function mergeSavedPolicyIntoDraft(savedPolicy, previousDraft, previousPolicy) {
     if (!previousDraft || policySignature(previousPolicy) === policySignature({ ...previousPolicy, models: previousDraft })) return null;
     const result = {};
     const slugs = new Set([...Object.keys(savedPolicy?.models || {}), ...Object.keys(previousDraft)]);
     slugs.forEach((slug) => {
-      if (slug === savedSlug) {
-        if (Object.hasOwn(savedPolicy?.models || {}, slug)) result[slug] = savedPolicy.models[slug];
-        return;
-      }
       if (Object.hasOwn(previousDraft, slug)) result[slug] = previousDraft[slug];
+      else if (Object.hasOwn(savedPolicy?.models || {}, slug)) result[slug] = savedPolicy.models[slug];
     });
     return result;
   }
@@ -1261,7 +1258,7 @@
       state.modelPolicy = { ...state.modelPolicy, models: policyModels };
     }
     catalogDraft = mergeSavedModelIntoListDraft(state.catalog.models, previousDraft, previousStateModels);
-    modelPolicyDraft = mergeSavedPolicyIntoDraft(state.modelPolicy, previousPolicyDraft, previousPolicy, persisted.slug);
+    modelPolicyDraft = mergeSavedPolicyIntoDraft(state.modelPolicy, previousPolicyDraft, previousPolicy);
   }
 
   async function saveModelEditor() {

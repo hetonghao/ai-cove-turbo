@@ -195,6 +195,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     }
     if (command === "save_model_settings") {
       if (failSave) throw new Error("save failed");
+      if (args.models.some((model) => !model.contextWindow || !model.maxContextWindow || !model.supportedReasoningLevels?.length)) throw new Error("incomplete model rejected");
       const models = status.catalog.models.map((model) => args.models.find((candidate) => candidate.slug === model.slug) || model);
       return { catalog: { ...status.catalog, models, restartRequired: true, loaded: false, revision: "revision-2" }, modelPolicy: args.policy };
     }
@@ -384,6 +385,7 @@ test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界",
 test("模型弹窗保存独立于列表草稿并保留原上下文", async () => {
   const harness = await catalogHarness();
   harness.toggleVisibility("alpha");
+  harness.change("alpha", "http");
   harness.editModel();
   assert.equal(harness.editorField("context-window").value, "200000");
   harness.editorField("displayName").value = "Alpha updated";
@@ -408,6 +410,8 @@ test("模型弹窗保存独立于列表草稿并保留原上下文", async () =>
     { slug: "alpha", visibility: "hide", priority: 1 },
     { slug: "beta", visibility: "hide", priority: 2 },
   ]);
+  const policySave = harness.calls.find((call) => call.command === "update_model_policy");
+  assert.equal(policySave.args.update.models.alpha, "http");
 });
 
 test("旧的不完整模型只改展示字段时保留兼容保存路径", async () => {
