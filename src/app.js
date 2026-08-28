@@ -1113,7 +1113,7 @@
     const maxValue = Number(read("max-context-window")?.value);
     const currentValue = Number(read("context-window")?.value);
     const max = Number.isFinite(maxValue) && maxValue > 0 ? maxValue : null;
-    const current = Number.isFinite(currentValue) && currentValue > 0 ? currentValue : null;
+    const current = max && Number.isFinite(currentValue) && currentValue > 0 ? currentValue : null;
     const selectedEfforts = Array.from(modelEditorElement("[data-model-efforts]")?.querySelectorAll?.("[data-model-effort]") || [])
       .filter((option) => option.checked)
       .map((option) => option.dataset.modelEffort)
@@ -1226,24 +1226,37 @@
     const previousPolicy = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...(state.modelPolicy?.models || {}) } };
     const source = editorMode === "edit" ? previousStateModels.find((candidate) => candidate.slug === editorOriginal?.slug) : null;
     const persisted = { ...model, visibility: source?.visibility || "list", priority: source?.priority || Math.max(0, ...previousStateModels.map((candidate) => Number(candidate.priority) || 0)) + 1 };
+    const legacyPresentationOnly = Boolean(source && !modelIsComplete(source) && !modelIsComplete(persisted));
     const policyModels = { ...(state.modelPolicy?.models || {}) };
     if (transport === "http") policyModels[persisted.slug] = "http";
     else delete policyModels[persisted.slug];
     const policyUpdate = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: policyModels };
     if (invoke) {
-      const models = previousStateModels
-        .filter((candidate) => candidate.slug !== persisted.slug && modelIsComplete(candidate))
-        .concat(persisted);
-      const saved = await invoke("save_model_settings", { models, expectedRevision: state.catalog.revision, policy: policyUpdate });
-      if (saved?.catalog) state.catalog = saved.catalog;
-      state.modelPolicy = saved.modelPolicy || state.modelPolicy;
-      if (saved?.error) {
-        state.catalog = { ...state.catalog, state: saved.partialFailure ? "error" : state.catalog.state };
-        throw new Error(saved.error);
+      if (legacyPresentationOnly) {
+        state.catalog = await invoke("update_model_catalog", {
+          updates: [{ slug: persisted.slug, displayName: persisted.displayName, description: persisted.description }],
+          expectedRevision: state.catalog.revision,
+        });
+        if (policySignature(policyUpdate) !== policySignature(state.modelPolicy)) {
+          state.modelPolicy = await invoke("update_model_policy", { update: policyUpdate });
+        }
+      } else {
+        const models = previousStateModels
+          .filter((candidate) => candidate.slug !== persisted.slug && modelIsComplete(candidate))
+          .concat(persisted);
+        const saved = await invoke("save_model_settings", { models, expectedRevision: state.catalog.revision, policy: policyUpdate });
+        if (saved?.catalog) state.catalog = saved.catalog;
+        state.modelPolicy = saved.modelPolicy || state.modelPolicy;
+        if (saved?.error) {
+          state.catalog = { ...state.catalog, state: saved.partialFailure ? "error" : state.catalog.state };
+          throw new Error(saved.error);
+        }
       }
     } else {
-      const models = [...previousStateModels.filter((candidate) => candidate.slug !== persisted.slug), persisted]
-        .sort((left, right) => (Number(left.priority) || 0) - (Number(right.priority) || 0));
+      const models = legacyPresentationOnly
+        ? previousStateModels.map((candidate) => candidate.slug === persisted.slug ? { ...candidate, displayName: persisted.displayName, description: persisted.description } : candidate)
+        : [...previousStateModels.filter((candidate) => candidate.slug !== persisted.slug), persisted]
+          .sort((left, right) => (Number(left.priority) || 0) - (Number(right.priority) || 0));
       state.catalog = { ...state.catalog, models, restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
       state.modelPolicy = { ...state.modelPolicy, models: policyModels };
     }

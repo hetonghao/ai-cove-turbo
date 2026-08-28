@@ -114,6 +114,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
   });
   const message = element({ modelCatalogMessage: "" });
   const restart = element({ modelCatalogRestart: "" });
+  const editorError = element({ modelEditorError: "" });
   const editorFields = new Map();
   const editorSources = new Map();
   const editorActions = new Map();
@@ -154,7 +155,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     editorActions.set(name, action);
   });
   const editButton = element({ modelEdit: "" });
-  editButton.closest = (selector) => selector === "[data-model-edit]" ? editButton : selector === "[data-model-slug]" ? row("alpha") : null;
+  editButton.closest = (selector) => selector === "[data-model-edit]" ? editButton : selector === "[data-model-slug]" ? row(editButton.dataset.modelSlug || "alpha") : null;
   const editorClose = element({ modelDialogClose: "editor" });
   editorClose.closest = (selector) => selector === "[data-model-dialog-close]" ? editorClose : null;
   const documentBody = element({ configView: "settings" });
@@ -180,7 +181,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     ["[data-model-editor]", editorRoot],
     ["[data-model-editor] h2", element()],
     ["[data-model-editor-summary]", element()],
-    ["[data-model-editor-error]", element()],
+    ["[data-model-editor-error]", editorError],
   ]);
   const listeners = new Map();
   const calls = [];
@@ -239,7 +240,8 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
       listeners.get("click")?.({ target: actions.find((target) => target.dataset.action === action) });
       await new Promise((resolve) => setImmediate(resolve));
     },
-    editModel() {
+    editModel(slug = "alpha") {
+      editButton.dataset.modelSlug = slug;
       listeners.get("click")?.({ target: editButton });
     },
     closeEditor() {
@@ -253,6 +255,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
       listeners.get("click")?.({ target: editorActions.get("undo") });
     },
     editorField(name) { return editorFields.get(name); },
+    editorError() { return editorError.textContent || ""; },
     selectConfigView(view) {
       listeners.get("click")?.({ target: configViewButtons.find((target) => target.dataset.configView === view) });
     },
@@ -405,6 +408,18 @@ test("模型弹窗保存独立于列表草稿并保留原上下文", async () =>
     { slug: "alpha", visibility: "hide", priority: 1 },
     { slug: "beta", visibility: "hide", priority: 2 },
   ]);
+});
+
+test("旧的不完整模型只改展示字段时保留兼容保存路径", async () => {
+  const harness = await catalogHarness();
+  harness.editModel("beta");
+  harness.editorField("displayName").value = "Beta updated";
+  await harness.saveEditor();
+
+  const presentationSave = harness.calls.find((call) => call.command === "update_model_catalog");
+  assert.ok(presentationSave, `${harness.editorError()} ${JSON.stringify(harness.calls)}`);
+  assert.equal(presentationSave.args.updates[0].displayName, "Beta updated");
+  assert.equal(harness.calls.some((call) => call.command === "save_model_settings"), false);
 });
 
 test("状态轮询不重建模型目录控件或覆盖未保存编辑", async () => {
