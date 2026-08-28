@@ -68,7 +68,9 @@
   --turbo-update-bubble-width: 310px;
   --turbo-update-bubble-radius: 13px;
   --turbo-update-bubble-bg: rgba(21, 29, 25, 0.98);
-  --turbo-update-bubble-border: rgba(112, 216, 238, 0.34);
+  --turbo-update-bubble-border: rgba(112, 216, 238, 0.56);
+  --turbo-update-bubble-tail-width: 24px;
+  --turbo-update-bubble-tail-height: 16px;
   --turbo-update-bubble-shadow: 0 20px 40px rgba(0, 0, 0, 0.32);
   --turbo-update-bubble-glare: rgba(208, 247, 255, 0.16);
   --turbo-update-bubble-glare-strong: #d0f7ff;
@@ -2412,10 +2414,10 @@ body[data-active-tab="config"] {
 .turbo-update-bubble__tail {
   position: absolute;
   z-index: 2;
-  top: -16px;
-  left: 13px;
-  width: 24px;
-  height: 16px;
+  top: calc(-1 * var(--turbo-update-bubble-tail-height));
+  left: calc((var(--turbo-icon-shell-size) - var(--turbo-update-bubble-tail-width)) / 2 - var(--turbo-hairline));
+  width: var(--turbo-update-bubble-tail-width);
+  height: var(--turbo-update-bubble-tail-height);
   overflow: visible;
   pointer-events: none;
 }
@@ -2433,11 +2435,10 @@ body[data-active-tab="config"] {
 
 .turbo-update-bubble__tail-stroke {
   fill: none;
-  stroke: var(--turbo-accent);
-  stroke-opacity: 0.74;
+  stroke: var(--turbo-update-bubble-border);
   stroke-linecap: butt;
   stroke-linejoin: round;
-  stroke-width: 1.4;
+  stroke-width: 1.2px;
 }
 
 .turbo-update-bubble > *:not(.turbo-update-bubble__glare):not(.turbo-update-bubble__tail) {
