@@ -2904,7 +2904,7 @@
     const gradient = $("#turbo-update-tail-glare-gradient");
     if (!slot || !bubble || !glare || !tail || !gradient) return;
     const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
-    const target = { x: 0, y: 0, scale: 1, glareX: 50, glareY: 50, tailX: 12, tailY: 8 };
+    const target = { x: 0, y: 0, scale: 1, glareX: 50, glareY: 50, tailX: 12, tailY: 10 };
     const current = { ...target };
     let frame = 0;
     let active = false;
@@ -2949,15 +2949,15 @@
       target.glareX = x * 100;
       target.glareY = y * 100;
       target.tailX = Math.max(0, Math.min(24, ((clientX - tailRect.left) / tailRect.width) * 24));
-      target.tailY = Math.max(0, Math.min(16, ((clientY - tailRect.top) / tailRect.height) * 16));
+      target.tailY = Math.max(0, Math.min(20, ((clientY - tailRect.top) / tailRect.height) * 20));
       schedule();
     };
     const reset = () => {
       active = false;
       target.x = 0; target.y = 0; target.scale = 1;
-      target.glareX = 50; target.glareY = 50; target.tailX = 12; target.tailY = 8;
+      target.glareX = 50; target.glareY = 50; target.tailX = 12; target.tailY = 10;
       bubble.style.setProperty("--turbo-update-tail-glare-opacity", "0");
-      gradient.setAttribute("cx", "12"); gradient.setAttribute("cy", "8"); glare.style.opacity = "0"; schedule();
+      gradient.setAttribute("cx", "12"); gradient.setAttribute("cy", "10"); glare.style.opacity = "0"; schedule();
     };
     const handleMove = (event) => {
       if (event.pointerType === "touch" || reducedMotion?.matches) return;

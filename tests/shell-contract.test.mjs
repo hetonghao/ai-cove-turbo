@@ -71,6 +71,9 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.match(app, /setUpdateBubbleOpen\(false\);[\s\S]*?data-ai-cove-trigger.*?focus/);
   assert.match(app, /install-update-bubble'[\s\S]*?setUpdateBubbleOpen\(false\);[\s\S]*?selectTab\("config", \{ focus: true \}\)/);
   assert.match(css, /\.turbo-update-bubble__tail\s*\{[\s\S]*?left:\s*calc\(\(var\(--turbo-icon-shell-size\)\s*-\s*var\(--turbo-update-bubble-tail-width\)\)\s*\/\s*2\s*-\s*var\(--turbo-hairline\)\);/);
+  assert.match(html, /class="turbo-update-bubble__tail" viewBox="0 0 24 20"/);
+  assert.match(css, /--turbo-update-bubble-anchor-gap:\s*16px/);
+  assert.match(css, /--turbo-update-bubble-tail-height:\s*20px/);
   assert.match(css, /\.turbo-update-bubble__tail-stroke\s*\{[\s\S]*?stroke:\s*var\(--turbo-update-bubble-border\);[\s\S]*?stroke-width:\s*1\.2px;/);
   assert.match(css, /\.turbo-update-bubble__tail-highlight\s*\{[\s\S]*?mix-blend-mode:\s*screen;/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.turbo-update-bubble\s*\{[\s\S]*?transform:\s*none !important;[\s\S]*?\}/);
