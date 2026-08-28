@@ -182,7 +182,7 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
     "check_for_updates",
     "install_update",
     "update_model_catalog",
-    "save_model_settings",
+    "save_model_catalog",
     "discover_model_catalog",
   ];
 
@@ -290,8 +290,31 @@ test("模型目录支持上游发现、编辑向导与完整能力字段", async
   assert.match(html, /data-model-field="context-window"/);
   assert.match(html, /data-model-field="max-context-window"/);
   assert.match(html, /data-model-field="reasoning-effort"/);
-  assert.match(html, /data-model-field="reasoning-summary"/);
+  assert.match(html, /<legend>思考<\/legend>/);
+  assert.match(html, /data-model-efforts/);
+  assert.match(html, /data-model-editor-action="save">保存/);
+  assert.match(html, /data-model-editor-action="undo">撤销修改/);
+  assert.match(html, /class="b-model-editor__identity"/);
+  assert.match(html, /class="b-model-editor__advanced"/);
+  assert.doesNotMatch(html, /data-model-field="visibility"|data-model-field="effective-context-percent"|data-model-field="truncation-policy"|data-model-field="reasoning-summary"|data-model-field="supports-summary"/);
+  assert.doesNotMatch(html, /data-model-field="context-window-number"/);
+  assert.doesNotMatch(html, /<legend>输入与工具<\/legend>|<legend>服务与协议<\/legend>/);
   assert.match(app, /discover_model_catalog/);
+  assert.match(app, /save_model_catalog/);
+  assert.match(app, /MODEL_REASONING_OPTIONS/);
+  assert.match(app, /supportedReasoningLevels: \["low", "medium", "high", "xhigh"\]/);
+  assert.match(app, /defaultReasoningLevel: "high"/);
+  assert.match(app, /effectiveContextWindowPercent: 95/);
+  assert.match(app, /truncationPolicy: "auto"/);
+  assert.match(app, /inputModalities: \["text", "image"\]/);
+  assert.match(app, /supportsSearchTool: true/);
+  assert.match(app, /supportsParallelToolCalls: true/);
+  assert.match(app, /useResponsesLite: true/);
+  assert.match(app, /sourceMarkup = source \?/);
+  assert.match(app, /updates = catalogModels\(\)\.map\(\(model, priority\) => \(\{ slug: model\.slug, visibility: model\.visibility, priority: priority \+ 1 \}\)\)/);
+  assert.doesNotMatch(app, /save-model-settings[\s\S]{0,500}save_model_settings/);
+  const catalogMarkup = app.slice(app.indexOf("function modelCatalogMarkup"), app.indexOf("function catalogRows"));
+  assert.doesNotMatch(catalogMarkup, /model\.description|modelReasoningLabel|模板/);
   assert.match(app, /data-model-source/);
   assert.match(rust, /discover_model_catalog/);
   assert.match(rust, /CatalogModelUpdate/);
@@ -311,32 +334,16 @@ test("模型发现支持单项导入并保护已存在模型", async () => {
   assert.match(app, /result\.fieldSources\[field\] = changed/);
 });
 
-test("模型编辑器暴露完整的调用能力字段", async () => {
+test("模型编辑器收敛为必需字段与高级配置", async () => {
   const html = await readFile(new URL("index.html", sourceUrl), "utf8");
-  const app = await readFile(new URL("app.js", sourceUrl), "utf8");
-
-  for (const field of [
-    "effective-context-percent",
-    "truncation-policy",
-    "service-tiers",
-    "default-service-tier",
-    "use-responses-lite",
-    "prefer-websockets",
-    "image-detail-original",
-    "tool-mode",
-    "experimental-tools",
-  ]) assert.match(html, new RegExp(`data-model-field=\\"${field}\\"`));
-  for (const field of [
-    "effective-context-percent",
-    "truncation-policy",
-    "service-tiers",
-    "default-service-tier",
-    "use-responses-lite",
-    "prefer-websockets",
-    "image-detail-original",
-    "tool-mode",
-    "experimental-tools",
-  ]) assert.match(html, new RegExp(`data-model-field=\\"${field}\\"`));
+  assert.match(html, /data-model-field="slug"/);
+  assert.match(html, /data-model-field="displayName"/);
+  assert.match(html, /data-model-field="max-context-window"/);
+  assert.match(html, /data-model-field="context-window" type="range"/);
+  assert.doesNotMatch(html, /data-model-field="context-window-number"/);
+  assert.match(html, /data-model-efforts/);
+  assert.match(html, /data-model-field="description"/);
+  assert.match(html, /data-model-field="transport"/);
 });
 
 test("模型请求验证必须命中重启后的目标模型", async () => {

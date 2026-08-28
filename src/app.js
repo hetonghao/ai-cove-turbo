@@ -20,6 +20,20 @@
   const HTTP_DEGRADATION_WINDOW_MS = 5 * 60_000;
   const HTTP_DEGRADATION_MIN_SPAN_MS = 30_000;
   const HTTP_DEGRADATION_MIN_REQUESTS = 5;
+  const MODEL_CONTEXT_MIN = 125_000;
+  const MODEL_REASONING_OPTIONS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+  const DEFAULT_MODEL_CAPABILITIES = Object.freeze({
+    inputModalities: ["text", "image"],
+    supportsSearchTool: true,
+    supportsParallelToolCalls: true,
+    supportsImageDetailOriginal: true,
+    toolMode: "code_mode_only",
+    experimentalSupportedTools: [],
+    serviceTiers: [{ id: "priority", name: "Fast", description: "1.5x speed, increased usage" }],
+    defaultServiceTier: null,
+    useResponsesLite: true,
+    preferWebsockets: false,
+  });
   const NETWORK_ERROR_MESSAGE = "请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。\n请尝试切换手机热点排查，如果无法定位请联管理员。";
   const REQUEST_FAILURE_LABELS = Object.freeze({
     499: "请求已取消",
@@ -724,18 +738,8 @@
     });
   }
 
-  function catalogDraftSignature(models) {
-    return JSON.stringify((models || []).map((model) => {
-      if (!model) return null;
-      const persisted = { ...model };
-      delete persisted.fieldSources;
-      delete persisted.conflicts;
-      return persisted;
-    }));
-  }
-
-  function catalogPresentationSignature(models) {
-    return JSON.stringify((models || []).map(({ slug, visibility, priority, displayName, description }) => ({ slug, visibility, priority, displayName, description })));
+  function catalogListSignature(models) {
+    return JSON.stringify((models || []).map(({ slug, visibility, priority }) => ({ slug, visibility, priority })));
   }
 
   function policySignature(policy) {
@@ -743,12 +747,8 @@
     return JSON.stringify({ defaultTransport: policy?.defaultTransport || "auto", models });
   }
 
-  function catalogDraftDirty() {
-    return Boolean(catalogDraft) && catalogDraftSignature(catalogDraft) !== catalogDraftSignature(state.catalog?.models);
-  }
-
-  function catalogPresentationDirty() {
-    return Boolean(catalogDraft) && catalogPresentationSignature(catalogDraft) !== catalogPresentationSignature(state.catalog?.models);
+  function catalogListDirty() {
+    return Boolean(catalogDraft) && catalogListSignature(catalogDraft) !== catalogListSignature(state.catalog?.models);
   }
 
   function modelIsComplete(model) {
@@ -756,18 +756,12 @@
     const current = Number(model?.contextWindow);
     const levels = model?.supportedReasoningLevels || [];
     return Number.isFinite(max)
-      && max >= 125000
+      && max >= MODEL_CONTEXT_MIN
       && Number.isFinite(current)
-      && current >= 125000
+      && current >= MODEL_CONTEXT_MIN
       && current <= max
       && levels.length > 0
       && levels.some((level) => level.effort === model?.defaultReasoningLevel);
-  }
-
-  function catalogFullDirty() {
-    if (!catalogDraft) return false;
-    const currentBySlug = new Map((state.catalog?.models || []).map((model) => [model.slug, model]));
-    return catalogDraft.some((model) => modelIsComplete(model) && catalogDraftSignature([model]) !== catalogDraftSignature([currentBySlug.get(model.slug)]));
   }
 
   function policyDraftDirty() {
@@ -775,7 +769,7 @@
   }
 
   function modelSettingsDirty() {
-    return catalogDraftDirty() || policyDraftDirty();
+    return catalogListDirty() || policyDraftDirty();
   }
 
   function visibilityIcon(visible) {
@@ -825,12 +819,12 @@
 
   function modelReasoningLabel(model) {
     const levels = (model.supportedReasoningLevels || []).map((level) => level.effort).filter(Boolean);
-    return levels.length ? "推理 " + levels.join(" / ") : "推理待确认";
+    return levels.length ? "思考 " + levels.join(" / ") : "思考待确认";
   }
 
   function modelSourceLabel(model) {
-    const source = model.fieldSources?.contextWindow || model.fieldSources?.maxContextWindow || "模板";
-    return source === "待确认" ? "待确认" : source;
+    const source = model.fieldSources?.contextWindow || model.fieldSources?.maxContextWindow || "";
+    return source === "模板" ? "" : source;
   }
 
   function modelCatalogMarkup() {
@@ -841,12 +835,12 @@
       const modelLabel = model.displayName || model.slug;
       const confirmationClass = modelIsComplete(model) ? "" : " b-model-row__confirm";
       const context = modelContextLabel(model);
-      const reasoning = modelReasoningLabel(model);
       const source = modelSourceLabel(model);
       const conflict = model.conflicts?.length ? " · 冲突待确认" : "";
       const visible = model.visibility === "list";
       const visibilityLabel = visible ? "隐藏 " + modelLabel : "显示 " + modelLabel;
-      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><strong>' + escapeHtml(modelLabel) + '</strong><code>' + escapeHtml(model.slug) + '</code><span class="b-model-row__description">' + escapeHtml(model.description || "") + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span><span>' + escapeHtml(reasoning) + '</span><span data-model-source="' + escapeHtml(source) + '">' + escapeHtml(source) + conflict + '</span></span>' + capabilityBadge(model.slug) + '</span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button><div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div><span class="b-model-row__priority">#' + (Number(model.priority) || 0) + '</span></span></article>';
+      const sourceMarkup = source ? '<span data-model-source="' + escapeHtml(source) + '">' + escapeHtml(source) + conflict + '</span>' : conflict ? '<span class="b-model-row__confirm">' + escapeHtml(conflict.slice(3)) + '</span>' : '';
+      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><strong>' + escapeHtml(modelLabel) + '</strong><code>' + escapeHtml(model.slug) + '</code><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '</span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button><div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div><span class="b-model-row__priority">#' + (Number(model.priority) || 0) + '</span></span></article>';
     }).join("");
   }
   function catalogRows() {
@@ -936,29 +930,22 @@
     visibility: "visibility",
     "max-context-window": "maxContextWindow",
     "context-window": "contextWindow",
-    "context-window-number": "contextWindow",
-    "effective-context-percent": "effectiveContextWindowPercent",
-    "truncation-policy": "truncationPolicy",
-    "supported-reasoning": "supportedReasoningLevels",
     "reasoning-effort": "defaultReasoningLevel",
-    "reasoning-summary": "defaultReasoningSummary",
-    "supports-summary": "supportsReasoningSummaryParameter",
-    "input-text": "inputModalities",
-    "input-image": "inputModalities",
-    "supports-search": "supportsSearchTool",
-    "supports-parallel-tools": "supportsParallelToolCalls",
-    "image-detail-original": "supportsImageDetailOriginal",
-    "tool-mode": "toolMode",
-    "experimental-tools": "experimentalSupportedTools",
-    "service-tiers": "serviceTiers",
-    "default-service-tier": "defaultServiceTier",
-    "use-responses-lite": "useResponsesLite",
-    "prefer-websockets": "preferWebsockets",
+    "model-effort": "supportedReasoningLevels",
   };
 
   function markEditorFieldTouched(target) {
     const field = editorFieldSourceKeys[target?.dataset?.modelField];
     if (field) editorTouchedFields.add(field);
+  }
+
+  function defaultModelCapabilities() {
+    return {
+      ...DEFAULT_MODEL_CAPABILITIES,
+      inputModalities: [...DEFAULT_MODEL_CAPABILITIES.inputModalities],
+      experimentalSupportedTools: [...DEFAULT_MODEL_CAPABILITIES.experimentalSupportedTools],
+      serviceTiers: DEFAULT_MODEL_CAPABILITIES.serviceTiers.map((tier) => ({ ...tier })),
+    };
   }
 
   function createModelDraft() {
@@ -970,22 +957,15 @@
       priority: catalogModels().length + 1,
       contextWindow: null,
       maxContextWindow: null,
-      effectiveContextWindowPercent: null,
+      effectiveContextWindowPercent: 95,
       autoCompactTokenLimit: null,
-      truncationPolicy: null,
-      inputModalities: ["text"],
-      supportedReasoningLevels: [],
-      defaultReasoningLevel: null,
+      truncationPolicy: "auto",
+      inputModalities: [...DEFAULT_MODEL_CAPABILITIES.inputModalities],
+      supportedReasoningLevels: ["low", "medium", "high", "xhigh"].map((effort) => ({ effort, description: "" })),
+      defaultReasoningLevel: "high",
       supportsReasoningSummaryParameter: false,
       defaultReasoningSummary: "none",
-      serviceTiers: [],
-      defaultServiceTier: null,
-      useResponsesLite: false,
-      preferWebsockets: false,
-      supportsImageDetailOriginal: false,
-      supportsSearchTool: false,
-      supportsParallelToolCalls: false,
-      experimentalSupportedTools: [],
+      ...defaultModelCapabilities(),
       supportedInApi: true,
       fieldSources: {
         slug: "用户",
@@ -1008,25 +988,22 @@
   function syncEditorContextFields() {
     const maxField = modelEditorElement('[data-model-field="max-context-window"]');
     const range = modelEditorElement('[data-model-field="context-window"]');
-    const number = modelEditorElement('[data-model-field="context-window-number"]');
     const output = modelEditorElement("[data-model-context-value]");
     const maximum = Number(maxField?.value);
-    const validMaximum = Number.isFinite(maximum) && maximum >= 125000;
+    const validMaximum = Number.isFinite(maximum) && maximum >= MODEL_CONTEXT_MIN;
     if (range) {
-      range.min = "125000";
-      range.max = validMaximum ? String(maximum) : "125000";
+      range.min = String(MODEL_CONTEXT_MIN);
+      range.max = validMaximum ? String(maximum) : String(MODEL_CONTEXT_MIN);
       range.disabled = !validMaximum;
     }
     if (!validMaximum) {
       if (range) range.value = "125000";
-      if (number) number.value = "";
       if (output) output.textContent = "待确认";
       return;
     }
-    const requested = Number(number?.value || editorDraft?.contextWindow || maximum);
-    const current = Math.min(maximum, Math.max(125000, Number.isFinite(requested) ? requested : maximum));
+    const requested = Number(range?.value || editorDraft?.contextWindow || maximum);
+    const current = Math.min(maximum, Math.max(MODEL_CONTEXT_MIN, Number.isFinite(requested) ? requested : maximum));
     if (range) range.value = String(current);
-    if (number) number.value = String(current);
     if (output) output.textContent = Number(current).toLocaleString("zh-CN") + " tokens";
     if (editorDraft && (editorMode !== "edit" || editorTouchedFields.has("contextWindow") || editorTouchedFields.has("maxContextWindow"))) {
       editorDraft.maxContextWindow = maximum;
@@ -1036,33 +1013,26 @@
   }
 
   function syncEditorReasoningOptions() {
-    const input = modelEditorElement('[data-model-field="supported-reasoning"]');
+    const options = modelEditorElement("[data-model-efforts]");
     const select = modelEditorElement('[data-model-field="reasoning-effort"]');
-    if (!input || !select) return;
-    const values = String(input.value || "")
-      .split(",")
-      .map((effort) => effort.trim())
-      .filter(Boolean);
+    if (!options || !select) return;
+    const values = Array.from(options.querySelectorAll?.("[data-model-effort]") || [])
+      .filter((option) => option.checked)
+      .map((option) => option.dataset.modelEffort);
     const current = select.value;
     select.innerHTML = values.length
       ? values.map((effort) => '<option value="' + escapeHtml(effort) + '">' + escapeHtml(effort) + "</option>").join("")
-      : '<option value="">待确认（上游未声明）</option>';
+      : '<option value="">待确认</option>';
     select.value = values.includes(current) ? current : values[0] || "";
   }
 
-  function syncEditorServiceTierOptions() {
-    const input = modelEditorElement('[data-model-field="service-tiers"]');
-    const select = modelEditorElement('[data-model-field="default-service-tier"]');
-    if (!input || !select) return;
-    const values = String(input.value || "")
-      .split(",")
-      .map((id) => id.trim())
-      .filter(Boolean);
-    const current = select.value;
-    select.innerHTML = '<option value="">不指定</option>' + values
-      .map((id) => '<option value="' + escapeHtml(id) + '">' + escapeHtml(id) + "</option>")
-      .join("");
-    select.value = values.includes(current) ? current : values[0] || "";
+  function renderEditorEffortOptions() {
+    const container = modelEditorElement("[data-model-efforts]");
+    if (!container) return;
+    const selected = new Set((editorDraft?.supportedReasoningLevels || []).map((level) => level.effort));
+    const custom = [...selected].filter((effort) => !MODEL_REASONING_OPTIONS.includes(effort));
+    const values = [...MODEL_REASONING_OPTIONS, ...custom];
+    container.innerHTML = values.map((effort) => '<label><input type="checkbox" data-model-field="model-effort" data-model-effort="' + escapeHtml(effort) + '"' + (selected.has(effort) ? " checked" : "") + ' /> <span>' + escapeHtml(effort) + "</span></label>").join("");
   }
 
   function renderModelEditor() {
@@ -1070,41 +1040,20 @@
     setEditorField("slug", editorDraft.slug);
     setEditorField("displayName", editorDraft.displayName || editorDraft.slug);
     setEditorField("description", editorDraft.description || "");
-    setEditorField("visibility", editorDraft.visibility || "list");
     setEditorField("max-context-window", editorDraft.maxContextWindow);
-    setEditorField("context-window-number", editorDraft.contextWindow);
-    setEditorField("effective-context-percent", editorDraft.effectiveContextWindowPercent);
-    setEditorField("truncation-policy", editorDraft.truncationPolicy);
-    setEditorField("supports-summary", editorDraft.supportsReasoningSummaryParameter);
-    setEditorField("reasoning-summary", editorDraft.supportsReasoningSummaryParameter ? (editorDraft.defaultReasoningSummary || "none") : "none");
-    setEditorField("supported-reasoning", (editorDraft.supportedReasoningLevels || []).map((level) => level.effort).join(", "));
     setEditorField("transport", policyModels()[editorDraft.slug] || "auto");
+    renderEditorEffortOptions();
+    syncEditorReasoningOptions();
     const slugField = modelEditorElement('[data-model-field="slug"]');
     if (slugField) slugField.readOnly = editorMode === "edit";
     const reasoning = modelEditorElement('[data-model-field="reasoning-effort"]');
     if (reasoning) {
       const levels = editorDraft.supportedReasoningLevels || [];
-      reasoning.innerHTML = levels.length
-        ? levels.map((level) => '<option value="' + escapeHtml(level.effort) + '">' + escapeHtml(level.effort) + (level.description ? " · " + escapeHtml(level.description) : "") + "</option>").join("")
-        : '<option value="">待确认（上游未声明）</option>';
-      reasoning.value = editorDraft.defaultReasoningLevel || "";
+      reasoning.value = levels.some((level) => level.effort === editorDraft.defaultReasoningLevel)
+        ? editorDraft.defaultReasoningLevel
+        : reasoning.value;
     }
-    const textInput = modelEditorElement('[data-model-field="input-text"]');
-    const imageInput = modelEditorElement('[data-model-field="input-image"]');
-    if (textInput) textInput.checked = (editorDraft.inputModalities || []).includes("text");
-    if (imageInput) imageInput.checked = (editorDraft.inputModalities || []).includes("image");
-    setEditorField("supports-search", editorDraft.supportsSearchTool);
-    setEditorField("supports-parallel-tools", editorDraft.supportsParallelToolCalls);
-    setEditorField("image-detail-original", editorDraft.supportsImageDetailOriginal);
-    setEditorField("tool-mode", editorDraft.toolMode);
-    setEditorField("experimental-tools", (editorDraft.experimentalSupportedTools || []).join(", "));
-    setEditorField("service-tiers", (editorDraft.serviceTiers || []).map((tier) => tier.id).join(", "));
-    setEditorField("use-responses-lite", editorDraft.useResponsesLite);
-    setEditorField("prefer-websockets", editorDraft.preferWebsockets);
-    syncEditorServiceTierOptions();
-    const defaultTier = modelEditorElement('[data-model-field="default-service-tier"]');
-    if (defaultTier) defaultTier.value = editorDraft.defaultServiceTier || "";
-    ["slug", "displayName", "description", "visibility", "contextWindow", "maxContextWindow", "effectiveContextWindowPercent", "truncationPolicy", "supportedReasoningLevels", "defaultReasoningLevel", "supportsReasoningSummaryParameter", "defaultReasoningSummary", "inputModalities", "supportsSearchTool", "supportsParallelToolCalls", "serviceTiers", "defaultServiceTier", "useResponsesLite", "preferWebsockets", "supportsImageDetailOriginal", "toolMode", "experimentalSupportedTools"].forEach((field) => {
+    ["slug", "displayName", "description", "contextWindow", "maxContextWindow", "supportedReasoningLevels", "defaultReasoningLevel"].forEach((field) => {
       const source = modelEditorElement('[data-model-source-for="' + field + '"]');
       if (!source) return;
       const value = editorDraft.fieldSources?.[field] || "模板";
@@ -1148,26 +1097,15 @@
     const read = (name) => modelEditorElement('[data-model-field="' + name + '"]');
     const slug = String(read("slug")?.value || "").trim();
     const maxValue = Number(read("max-context-window")?.value);
-    const currentValue = Number(read("context-window-number")?.value);
+    const currentValue = Number(read("context-window")?.value);
     const max = Number.isFinite(maxValue) && maxValue > 0 ? maxValue : null;
     const current = Number.isFinite(currentValue) && currentValue > 0 ? currentValue : null;
-    const supportsSummary = Boolean(read("supports-summary")?.checked);
-    const percentValue = Number(read("effective-context-percent")?.value);
-    const effectiveContextWindowPercent = Number.isInteger(percentValue) && percentValue >= 1 && percentValue <= 100 ? percentValue : null;
-    const serviceTierIds = String(read("service-tiers")?.value || "")
-      .split(",")
-      .map((id) => id.trim())
-      .filter(Boolean);
-    const supportedReasoningLevels = String(read("supported-reasoning")?.value || "")
-      .split(",")
-      .map((effort) => effort.trim())
+    const supportedReasoningLevels = Array.from(modelEditorElement("[data-model-efforts]")?.querySelectorAll?.("[data-model-effort]") || [])
+      .filter((option) => option.checked)
+      .map((option) => option.dataset.modelEffort)
       .filter(Boolean)
       .map((effort) => ({ effort, description: (editorDraft.supportedReasoningLevels || []).find((level) => level.effort === effort)?.description || "" }));
     const effort = String(read("reasoning-effort")?.value || "");
-    const summary = supportsSummary ? String(read("reasoning-summary")?.value || "none") : "none";
-    const inputModalities = [];
-    if (read("input-text")?.checked) inputModalities.push("text");
-    if (read("input-image")?.checked) inputModalities.push("image");
     const contextTouched = editorMode !== "edit"
       || editorTouchedFields.has("contextWindow")
       || editorTouchedFields.has("maxContextWindow");
@@ -1175,48 +1113,38 @@
       ...editorDraft,
       slug,
       displayName: String(read("displayName")?.value || "").trim(),
-      description: String(read("description")?.value || "").trim(),
-      visibility: String(read("visibility")?.value || "list"),
+      description: String(read("description")?.value || "").trim() || `Codex 模型 ${slug}`,
+      visibility: editorMode === "edit" ? editorOriginal?.visibility || "list" : "list",
       maxContextWindow: max,
       contextWindow: current,
-      effectiveContextWindowPercent,
+      effectiveContextWindowPercent: editorDraft.effectiveContextWindowPercent ?? 95,
       autoCompactTokenLimit: contextTouched
         ? current ? Math.floor(current * 0.9) : null
         : editorOriginal?.autoCompactTokenLimit ?? editorDraft.autoCompactTokenLimit ?? null,
-      truncationPolicy: String(read("truncation-policy")?.value || "").trim() || null,
+      truncationPolicy: editorDraft.truncationPolicy || "auto",
       defaultReasoningLevel: effort || null,
       supportedReasoningLevels,
-      supportsReasoningSummaryParameter: supportsSummary,
-      defaultReasoningSummary: summary,
-      inputModalities,
-      supportsSearchTool: Boolean(read("supports-search")?.checked),
-      supportsParallelToolCalls: Boolean(read("supports-parallel-tools")?.checked),
-      supportsImageDetailOriginal: Boolean(read("image-detail-original")?.checked),
-      toolMode: String(read("tool-mode")?.value || "").trim() || null,
-      experimentalSupportedTools: String(read("experimental-tools")?.value || "")
-        .split(",")
-        .map((tool) => tool.trim())
-        .filter(Boolean),
-      serviceTiers: serviceTierIds.map((id) => {
-        const currentTier = (editorDraft.serviceTiers || []).find((tier) => tier.id === id);
-        return { id, name: currentTier?.name || id, description: currentTier?.description || "" };
-      }),
-      defaultServiceTier: String(read("default-service-tier")?.value || "") || null,
-      useResponsesLite: Boolean(read("use-responses-lite")?.checked),
-      preferWebsockets: Boolean(read("prefer-websockets")?.checked),
+      supportsReasoningSummaryParameter: editorDraft.supportsReasoningSummaryParameter ?? false,
+      defaultReasoningSummary: editorDraft.defaultReasoningSummary || "none",
+      inputModalities: editorDraft.inputModalities?.length ? [...editorDraft.inputModalities] : defaultModelCapabilities().inputModalities,
+      supportsSearchTool: editorDraft.supportsSearchTool ?? DEFAULT_MODEL_CAPABILITIES.supportsSearchTool,
+      supportsParallelToolCalls: editorDraft.supportsParallelToolCalls ?? DEFAULT_MODEL_CAPABILITIES.supportsParallelToolCalls,
+      supportsImageDetailOriginal: editorDraft.supportsImageDetailOriginal ?? DEFAULT_MODEL_CAPABILITIES.supportsImageDetailOriginal,
+      toolMode: editorDraft.toolMode || DEFAULT_MODEL_CAPABILITIES.toolMode,
+      experimentalSupportedTools: editorDraft.experimentalSupportedTools?.length ? [...editorDraft.experimentalSupportedTools] : [],
+      serviceTiers: editorDraft.serviceTiers?.length ? editorDraft.serviceTiers.map((tier) => ({ ...tier })) : defaultModelCapabilities().serviceTiers,
+      defaultServiceTier: editorDraft.defaultServiceTier ?? DEFAULT_MODEL_CAPABILITIES.defaultServiceTier,
+      useResponsesLite: editorDraft.useResponsesLite ?? DEFAULT_MODEL_CAPABILITIES.useResponsesLite,
+      preferWebsockets: editorDraft.preferWebsockets ?? DEFAULT_MODEL_CAPABILITIES.preferWebsockets,
     };
     result.fieldSources = { ...(editorDraft.fieldSources || {}) };
     const presentationFields = new Set(["slug", "displayName", "description", "visibility"]);
     const arrayFields = new Set(["inputModalities", "supportedReasoningLevels", "serviceTiers", "experimentalSupportedTools"]);
-    ["slug", "displayName", "description", "visibility", "contextWindow", "maxContextWindow", "effectiveContextWindowPercent", "autoCompactTokenLimit", "truncationPolicy", "supportedReasoningLevels", "defaultReasoningLevel", "supportsReasoningSummaryParameter", "defaultReasoningSummary", "inputModalities", "supportsSearchTool", "supportsParallelToolCalls", "supportsImageDetailOriginal", "toolMode", "experimentalSupportedTools", "serviceTiers", "defaultServiceTier", "useResponsesLite", "preferWebsockets", "baseInstructions", "minimalClientVersion"].forEach((field) => {
+    ["slug", "displayName", "description", "contextWindow", "maxContextWindow", "supportedReasoningLevels", "defaultReasoningLevel", "inputModalities", "supportsSearchTool", "supportsParallelToolCalls", "supportsImageDetailOriginal", "toolMode", "experimentalSupportedTools", "serviceTiers", "defaultServiceTier", "useResponsesLite", "preferWebsockets", "baseInstructions", "minimalClientVersion"].forEach((field) => {
       const currentValue = result[field] ?? null;
       const originalValue = editorOriginal?.[field] ?? (arrayFields.has(field) ? [] : null);
-      const defaultSummary = field === "defaultReasoningSummary"
-        && result.supportsReasoningSummaryParameter === false
-        && currentValue === "none"
-        && originalValue === null;
       const changed = editorTouchedFields.has(field)
-        || (!defaultSummary && editorOriginal && JSON.stringify(currentValue) !== JSON.stringify(originalValue));
+        || (editorOriginal && JSON.stringify(currentValue) !== JSON.stringify(originalValue));
       result.fieldSources[field] = changed
         ? "用户"
         : editorDraft.fieldSources?.[field]
@@ -1232,18 +1160,12 @@
     const original = editorMode === "edit" ? catalogModels().find((candidate) => candidate.slug === editorDraft.slug) : null;
     const legacyPresentationOnly = original && !modelIsComplete(original) && model.maxContextWindow === null && model.contextWindow === null;
     if (legacyPresentationOnly) {
-      const changedAdvancedField = ["effectiveContextWindowPercent", "truncationPolicy", "inputModalities", "supportedReasoningLevels", "defaultReasoningLevel", "supportsReasoningSummaryParameter", "defaultReasoningSummary", "serviceTiers", "defaultServiceTier", "useResponsesLite", "preferWebsockets", "supportsImageDetailOriginal", "supportsSearchTool", "supportsParallelToolCalls", "toolMode", "experimentalSupportedTools"]
-        .some((field) => {
-          const originalValue = field === "inputModalities" || field === "supportedReasoningLevels"
-            ? original[field] || []
-            : field === "defaultReasoningSummary" ? original[field] || "none" : original[field] ?? (typeof model[field] === "boolean" ? false : null);
-          return JSON.stringify(model[field] ?? null) !== JSON.stringify(originalValue);
-        });
+      const changedAdvancedField = ["contextWindow", "maxContextWindow", "supportedReasoningLevels", "defaultReasoningLevel"]
+        .some((field) => editorTouchedFields.has(field));
       return changedAdvancedField ? "该旧目录尚未声明完整能力；请先补充上下文窗口后再修改能力字段。" : "";
     }
-    if (!Number.isFinite(model.maxContextWindow) || model.maxContextWindow < 125000) return "请填写至少 125000 的最大上下文窗口。";
-    if (!Number.isFinite(model.contextWindow) || model.contextWindow < 125000 || model.contextWindow > model.maxContextWindow) return "当前上下文必须处于 125000 至最大上下文之间。";
-    if (model.effectiveContextWindowPercent != null && (!Number.isInteger(model.effectiveContextWindowPercent) || model.effectiveContextWindowPercent < 1 || model.effectiveContextWindowPercent > 100)) return "有效上下文比例必须处于 1 至 100 之间。";
+    if (!Number.isFinite(model.maxContextWindow) || model.maxContextWindow < MODEL_CONTEXT_MIN) return "请填写至少 125000 的最大上下文窗口。";
+    if (!Number.isFinite(model.contextWindow) || model.contextWindow < MODEL_CONTEXT_MIN || model.contextWindow > model.maxContextWindow) return "当前上下文必须处于 125000 至最大上下文之间。";
     if (!model.supportedReasoningLevels?.length) return "请填写至少一个 reasoning effort（不支持推理时填写 none）。";
     if (model.defaultReasoningLevel && !model.supportedReasoningLevels.some((level) => level.effort === model.defaultReasoningLevel)) return "默认 reasoning effort 必须来自支持列表。";
     if (model.defaultServiceTier && !model.serviceTiers?.some((tier) => tier.id === model.defaultServiceTier)) return "默认服务层必须来自服务层列表。";
@@ -1251,7 +1173,60 @@
     return "";
   }
 
-  function applyModelEditor() {
+  function mergeSavedModelIntoListDraft(savedModels, previousDraft, previousStateModels) {
+    if (catalogListSignature(previousDraft) === catalogListSignature(previousStateModels)) return null;
+    const pending = new Map(previousDraft.map((model) => [model.slug, model]));
+    const saved = new Map(savedModels.map((model) => [model.slug, model]));
+    const result = previousDraft.map((model) => {
+      const next = saved.get(model.slug);
+      return next ? { ...next, displayName: model.displayName, description: model.description, visibility: model.visibility, priority: model.priority } : null;
+    }).filter(Boolean);
+    savedModels.forEach((model) => {
+      if (!pending.has(model.slug)) result.push(model);
+    });
+    return result;
+  }
+
+  function mergeSavedPolicyIntoDraft(savedPolicy, previousDraft, previousPolicy, savedSlug) {
+    if (!previousDraft || policySignature(previousPolicy) === policySignature({ ...previousPolicy, models: previousDraft })) return null;
+    const result = {};
+    const slugs = new Set([...Object.keys(savedPolicy?.models || {}), ...Object.keys(previousDraft)]);
+    slugs.forEach((slug) => {
+      if (slug === savedSlug) {
+        if (Object.hasOwn(savedPolicy?.models || {}, slug)) result[slug] = savedPolicy.models[slug];
+        return;
+      }
+      if (Object.hasOwn(previousDraft, slug)) result[slug] = previousDraft[slug];
+    });
+    return result;
+  }
+
+  async function persistModelEntry(model, transport) {
+    const previousDraft = catalogDraft || [];
+    const previousStateModels = state.catalog?.models || [];
+    const previousPolicyDraft = modelPolicyDraft;
+    const previousPolicy = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...(state.modelPolicy?.models || {}) } };
+    const source = editorMode === "edit" ? previousStateModels.find((candidate) => candidate.slug === editorOriginal?.slug) : null;
+    const persisted = { ...model, visibility: source?.visibility || "list", priority: source?.priority || Math.max(0, ...previousStateModels.map((candidate) => Number(candidate.priority) || 0)) + 1 };
+    const policyModels = { ...(state.modelPolicy?.models || {}) };
+    if (transport === "http") policyModels[persisted.slug] = "http";
+    else delete policyModels[persisted.slug];
+    const policyUpdate = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: policyModels };
+    if (invoke) {
+      state.catalog = await invoke("save_model_catalog", { models: [persisted], expectedRevision: state.catalog.revision });
+      const policyChanged = policySignature(policyUpdate) !== policySignature(state.modelPolicy);
+      if (policyChanged) state.modelPolicy = await invoke("update_model_policy", { update: policyUpdate });
+    } else {
+      const models = [...previousStateModels.filter((candidate) => candidate.slug !== persisted.slug), persisted]
+        .sort((left, right) => (Number(left.priority) || 0) - (Number(right.priority) || 0));
+      state.catalog = { ...state.catalog, models, restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
+      state.modelPolicy = { ...state.modelPolicy, models: policyModels };
+    }
+    catalogDraft = mergeSavedModelIntoListDraft(state.catalog.models, previousDraft, previousStateModels);
+    modelPolicyDraft = mergeSavedPolicyIntoDraft(state.modelPolicy, previousPolicyDraft, previousPolicy, persisted.slug);
+  }
+
+  async function saveModelEditor() {
     const model = readModelEditor();
     const error = $("[data-model-editor-error]");
     const validation = validateModelEditor(model);
@@ -1259,21 +1234,37 @@
       if (error) error.textContent = validation;
       return;
     }
-    const models = catalogModels();
-    const index = models.findIndex((candidate) => candidate.slug === (editorMode === "edit" ? editorDraft.slug : model.slug));
-    if (editorMode === "edit" && index >= 0) models[index] = model;
-    else models.push(model);
-    if (editorMode !== "edit" && editorDraft.slug && editorDraft.slug !== model.slug) delete policyModels()[editorDraft.slug];
     const transport = modelEditorElement('[data-model-field="transport"]')?.value;
-    if (transport === "http") policyModels()[model.slug] = "http";
-    else delete policyModels()[model.slug];
-    models.forEach((candidate, candidateIndex) => { candidate.priority = candidateIndex + 1; });
+    pendingAction = "save-model-editor";
+    renderControls();
+    const saveButton = modelEditorElement('[data-model-editor-action="save"]');
+    const undoButton = modelEditorElement('[data-model-editor-action="undo"]');
+    if (saveButton) saveButton.disabled = true;
+    if (undoButton) undoButton.disabled = true;
+    try {
+      await persistModelEntry(model, transport);
+    } catch (saveError) {
+      if (error) error.textContent = saveError instanceof Error ? saveError.message : String(saveError);
+      state.technicalDetail = saveError instanceof Error ? saveError.message : String(saveError);
+      return;
+    } finally {
+      pendingAction = "";
+      renderControls();
+    }
     closeModelDialog($("[data-model-editor]"));
     editorDraft = null;
     editorOriginal = null;
     editorTouchedFields = new Set();
     renderedModelCatalogMarkup = "";
     renderState();
+  }
+
+  function undoModelEditor() {
+    editorDraft = cloneModel(editorOriginal || createModelDraft());
+    editorTouchedFields = new Set();
+    renderModelEditor();
+    const error = $("[data-model-editor-error]");
+    if (error) error.textContent = "";
   }
 
   function renderDiscoveredModels() {
@@ -1302,33 +1293,88 @@
     }
   }
 
-  function importDiscoveredModel(slug) {
+  async function importDiscoveredModel(slug) {
     const models = catalogModels();
     if (models.some((model) => model.slug === slug)) return false;
     const model = discoveredModels.find((candidate) => candidate.slug === slug);
     if (!model) return false;
-    const imported = cloneModel(model);
-    imported.priority = models.length + 1;
-    models.push(imported);
-    renderedModelCatalogMarkup = "";
-    renderDiscoveredModels();
-    renderState();
+    if (!modelIsComplete(model)) {
+      const defaults = createModelDraft();
+      const draft = { ...defaults, ...cloneModel(model), slug: model.slug, displayName: model.displayName || model.slug };
+      Object.assign(draft, {
+        effectiveContextWindowPercent: defaults.effectiveContextWindowPercent,
+        truncationPolicy: defaults.truncationPolicy,
+        inputModalities: defaults.inputModalities,
+        supportedReasoningLevels: defaults.supportedReasoningLevels,
+        defaultReasoningLevel: defaults.defaultReasoningLevel,
+        supportsReasoningSummaryParameter: defaults.supportsReasoningSummaryParameter,
+        defaultReasoningSummary: defaults.defaultReasoningSummary,
+        serviceTiers: defaults.serviceTiers,
+        defaultServiceTier: defaults.defaultServiceTier,
+        useResponsesLite: defaults.useResponsesLite,
+        preferWebsockets: defaults.preferWebsockets,
+        supportsImageDetailOriginal: defaults.supportsImageDetailOriginal,
+        supportsSearchTool: defaults.supportsSearchTool,
+        supportsParallelToolCalls: defaults.supportsParallelToolCalls,
+        toolMode: defaults.toolMode,
+        experimentalSupportedTools: defaults.experimentalSupportedTools,
+      });
+      openModelEditor(draft, "create");
+      return true;
+    }
+    pendingAction = "import-model";
+    renderControls();
+    try {
+      await persistDiscoveredModel(model);
+      closeModelDialog($("[data-model-discovery]"));
+    } catch (error) {
+      state.catalog = { ...state.catalog, state: "error" };
+      state.configMessage = "模型导入未完成，请重试。";
+      state.technicalDetail = error instanceof Error ? error.message : String(error);
+    } finally {
+      pendingAction = "";
+      renderedModelCatalogMarkup = "";
+      renderState();
+    }
     return true;
   }
 
-  function importDiscoveredModels() {
+  async function persistDiscoveredModel(model) {
+    const previousDraft = catalogDraft || [];
+    const previousStateModels = state.catalog?.models || [];
+    const persisted = { ...cloneModel(model), visibility: "list", priority: Math.max(0, ...previousStateModels.map((candidate) => Number(candidate.priority) || 0)) + 1 };
+    if (invoke) {
+      state.catalog = await invoke("save_model_catalog", { models: [persisted], expectedRevision: state.catalog.revision });
+    } else {
+      state.catalog = { ...state.catalog, models: [...previousStateModels, persisted], restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
+    }
+    catalogDraft = mergeSavedModelIntoListDraft(state.catalog.models, previousDraft, previousStateModels);
+  }
+
+  async function importDiscoveredModels() {
     const models = catalogModels();
     const existing = new Set(models.map((model) => model.slug));
-    discoveredModels.forEach((model) => {
-      if (existing.has(model.slug)) return;
-      const imported = cloneModel(model);
-      imported.priority = models.length + 1;
-      models.push(imported);
-      existing.add(imported.slug);
-    });
-    closeModelDialog($("[data-model-discovery]"));
-    renderedModelCatalogMarkup = "";
-    renderState();
+    const importable = discoveredModels.filter((model) => !existing.has(model.slug));
+    const incomplete = importable.filter((model) => !modelIsComplete(model));
+    pendingAction = "import-all-models";
+    renderControls();
+    try {
+      for (const model of importable) {
+        if (modelIsComplete(model)) await persistDiscoveredModel(model);
+      }
+      if (incomplete.length) {
+        const summary = $("[data-model-discovery-summary]");
+        if (summary) summary.textContent = `${incomplete.length} 个模型缺少上下文或思考能力，请逐个配置后保存`;
+      } else closeModelDialog($("[data-model-discovery]"));
+    } catch (error) {
+      state.catalog = { ...state.catalog, state: "error" };
+      state.configMessage = "批量导入未完成，请重试。";
+      state.technicalDetail = error instanceof Error ? error.message : String(error);
+    } finally {
+      pendingAction = "";
+      renderedModelCatalogMarkup = "";
+      renderState();
+    }
   }
 
   function renderState(options = {}) {
@@ -2456,7 +2502,7 @@
       return;
     }
     if (action === "import-all-models") {
-      importDiscoveredModels();
+      void importDiscoveredModels();
       return;
     }
     if (action === "undo-model-settings") {
@@ -2471,42 +2517,15 @@
       pendingAction = action;
       renderControls();
       try {
-        const saveCatalog = catalogDraftDirty();
-        const saveFull = catalogFullDirty();
-        const savePresentation = catalogPresentationDirty();
+        const saveCatalog = catalogListDirty();
         const savePolicy = policyDraftDirty();
-        const incomplete = catalogModels().find((model) => !modelIsComplete(model));
-        const incompletePresentationChanged = catalogModels().some((model) => !modelIsComplete(model)
-          && catalogPresentationSignature([model]) !== catalogPresentationSignature([state.catalog?.models?.find((current) => current.slug === model.slug)]));
-        if (incomplete && incompletePresentationChanged && saveFull) {
-          throw new Error("请先编辑 " + (incomplete.displayName || incomplete.slug) + "，补充上下文和 reasoning 能力后再保存其它修改");
-        }
-        if (incomplete && savePresentation && !saveFull && !state.catalog?.models?.some((model) => model.slug === incomplete.slug)) {
-          throw new Error("请先编辑 " + (incomplete.displayName || incomplete.slug) + "，补充上下文和 reasoning 能力");
-        }
-        if (saveFull) {
-          const completeModels = catalogModels().filter(modelIsComplete);
-          const policyUpdate = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...policyModels() } };
-          if (invoke) {
-            const saved = await invoke("save_model_settings", { models: completeModels, expectedRevision: state.catalog.revision, policy: policyUpdate });
-            state.catalog = saved.catalog;
-            state.modelPolicy = saved.modelPolicy || state.modelPolicy;
-            if (saved.error) {
-              state.catalog = { ...state.catalog, state: saved.partialFailure ? "error" : state.catalog.state };
-              state.technicalDetail = saved.error;
-            }
-          } else {
-            state.catalog = { ...state.catalog, models: catalogModels(), restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
-            state.modelPolicy = policyUpdate;
-          }
-        }
-        if (saveCatalog && savePresentation && !saveFull) {
-          const updates = catalogModels().map((model, priority) => ({ slug: model.slug, displayName: model.displayName, description: model.description, visibility: model.visibility, priority: priority + 1 }));
+        if (saveCatalog) {
+          const updates = catalogModels().map((model, priority) => ({ slug: model.slug, visibility: model.visibility, priority: priority + 1 }));
           state.catalog = invoke
             ? await invoke("update_model_catalog", { updates, expectedRevision: state.catalog.revision })
             : { ...state.catalog, models: updates.map((update) => ({ ...catalogModels().find((model) => model.slug === update.slug), ...update })), restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
         }
-        if (savePolicy && !saveFull) {
+        if (savePolicy) {
           const update = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...policyModels() } };
           state.modelPolicy = invoke ? await invoke("update_model_policy", { update }) : update;
         }
@@ -2747,12 +2766,16 @@
       }
       const editorAction = event.target.closest?.("[data-model-editor-action]");
       if (editorAction?.dataset.modelEditorAction === "save") {
-        applyModelEditor();
+        void saveModelEditor();
+        return;
+      }
+      if (editorAction?.dataset.modelEditorAction === "undo") {
+        undoModelEditor();
         return;
       }
       const importButton = event.target.closest?.("[data-model-import]");
       if (importButton) {
-        importDiscoveredModel(importButton.dataset.modelImport);
+        void importDiscoveredModel(importButton.dataset.modelImport);
         return;
       }
       const visibilityButton = event.target.closest?.("[data-model-visibility-toggle]");
@@ -2829,18 +2852,13 @@
     document.addEventListener("change", (event) => {
       markEditorFieldTouched(event.target);
       if (event.target.matches?.("[data-filter]")) renderStatistics();
+      if (event.target.matches?.("[data-model-effort]")) syncEditorReasoningOptions();
     });
     document.addEventListener("input", (event) => {
       markEditorFieldTouched(event.target);
-      if (event.target.matches?.('[data-model-field="max-context-window"], [data-model-field="context-window"], [data-model-field="context-window-number"]')) {
-        if (event.target.dataset.modelField === "context-window") {
-          const number = modelEditorElement('[data-model-field="context-window-number"]');
-          if (number) number.value = event.target.value;
-        }
+      if (event.target.matches?.('[data-model-field="max-context-window"], [data-model-field="context-window"]')) {
         syncEditorContextFields();
       }
-      if (event.target.matches?.('[data-model-field="supported-reasoning"]')) syncEditorReasoningOptions();
-      if (event.target.matches?.('[data-model-field="service-tiers"]')) syncEditorServiceTierOptions();
     });
     document.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;

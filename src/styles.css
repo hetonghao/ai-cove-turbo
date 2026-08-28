@@ -4837,3 +4837,86 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
     max-block-size: calc(97px * 8 + 7px * 7 + 22px);
   }
 }
+
+.b-model-row__copy {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "name capability"
+    "slug slug"
+    "details details";
+  align-items: center;
+  gap: 3px 8px;
+}
+
+.b-model-row__copy strong {
+  grid-area: name;
+}
+
+.b-model-row__copy code {
+  grid-area: slug;
+}
+
+.b-model-row__copy .state-indicator {
+  grid-area: capability;
+}
+
+.b-model-editor__identity {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.b-model-editor__efforts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.b-model-editor__efforts label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 6px 8px;
+  border: 1px solid var(--b-line);
+  border-radius: 6px;
+  color: var(--b-ink);
+  background: rgba(11, 16, 16, 0.62);
+  cursor: pointer;
+}
+
+.b-model-editor__advanced {
+  border: 1px solid var(--b-line);
+  border-radius: 9px;
+  background: rgba(21, 30, 26, 0.42);
+}
+
+.b-model-editor__advanced summary {
+  padding: 12px;
+  color: var(--b-accent);
+  cursor: pointer;
+  font: 0.68rem/1 var(--font-mono);
+}
+
+.b-model-editor__advanced-body {
+  display: grid;
+  gap: 12px;
+  padding: 0 12px 12px;
+}
+
+.b-model-editor__advanced-body fieldset {
+  border-color: rgba(214, 236, 221, 0.12);
+}
+
+.b-model-dialog__surface > footer button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+@media (max-width: 500px) {
+  .b-model-editor__identity,
+  .b-model-editor__efforts {
+    grid-template-columns: 1fr 1fr;
+  }
+}
