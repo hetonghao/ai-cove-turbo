@@ -65,6 +65,14 @@
   --turbo-connection-summary-open-height: 28px;
   --turbo-connection-viewport-gap: 12px;
   --turbo-update-progress-height: 3px;
+  --turbo-update-bubble-width: 310px;
+  --turbo-update-bubble-radius: 13px;
+  --turbo-update-bubble-bg: rgba(21, 29, 25, 0.98);
+  --turbo-update-bubble-border: rgba(112, 216, 238, 0.34);
+  --turbo-update-bubble-shadow: 0 20px 40px rgba(0, 0, 0, 0.32);
+  --turbo-update-bubble-glare: rgba(208, 247, 255, 0.16);
+  --turbo-update-bubble-glare-strong: #d0f7ff;
+  --turbo-update-bubble-install-hover: #a4ecf9;
   --turbo-strands-orange: #f97316;
   --turbo-strands-violet: #7c3aed;
   --turbo-strands-cyan: #06b6d4;
@@ -2291,6 +2299,7 @@ body[data-active-tab="config"] {
 }
 
 .turbo-shell__brand {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: var(--turbo-brand-gap);
@@ -2360,6 +2369,150 @@ body[data-active-tab="config"] {
 .turbo-shell__brand-bubble:hover {
   color: var(--turbo-accent);
   background: rgba(16, 27, 25, 0.99);
+}
+
+.turbo-update-bubble-slot {
+  position: absolute;
+  top: calc(100% + 14px);
+  left: 0;
+  z-index: calc(var(--turbo-focus-layer) + 1);
+  width: min(var(--turbo-update-bubble-width), calc(100vw - 48px));
+  pointer-events: auto;
+  animation: turbo-update-bubble-in var(--speed-fast) var(--ease-out) both;
+}
+
+.turbo-update-bubble {
+  position: relative;
+  width: 100%;
+  padding: 18px;
+  border: 1px solid var(--turbo-update-bubble-border);
+  border-radius: var(--turbo-update-bubble-radius);
+  color: var(--turbo-ink);
+  background: var(--turbo-update-bubble-bg);
+  box-shadow: var(--turbo-update-bubble-shadow);
+  isolation: isolate;
+  transform-origin: center;
+  transform-style: flat;
+  will-change: transform;
+}
+
+.turbo-update-bubble__glare {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: inherit;
+  clip-path: inset(0 round var(--turbo-update-bubble-radius));
+  pointer-events: none;
+  background: radial-gradient(circle at var(--turbo-update-glare-x, 50%) var(--turbo-update-glare-y, 50%), var(--turbo-update-bubble-glare), rgba(112, 216, 238, 0.06) 16%, transparent 38%);
+  opacity: 0;
+  mix-blend-mode: screen;
+  transition: opacity var(--speed-fast) var(--ease-out);
+}
+
+.turbo-update-bubble__tail {
+  position: absolute;
+  z-index: 2;
+  top: -16px;
+  left: 13px;
+  width: 24px;
+  height: 16px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.turbo-update-bubble__tail-fill {
+  fill: var(--turbo-update-bubble-bg);
+}
+
+.turbo-update-bubble__tail-highlight {
+  fill: url(#turbo-update-tail-glare-gradient);
+  opacity: var(--turbo-update-tail-glare-opacity, 0);
+  mix-blend-mode: screen;
+  transition: opacity var(--speed-fast) var(--ease-out);
+}
+
+.turbo-update-bubble__tail-stroke {
+  fill: none;
+  stroke: var(--turbo-accent);
+  stroke-opacity: 0.74;
+  stroke-linecap: butt;
+  stroke-linejoin: round;
+  stroke-width: 1.4;
+}
+
+.turbo-update-bubble > *:not(.turbo-update-bubble__glare):not(.turbo-update-bubble__tail) {
+  position: relative;
+  z-index: 1;
+}
+
+.turbo-update-bubble__label {
+  display: block;
+  color: var(--turbo-accent);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.turbo-update-bubble h2 {
+  margin-top: 9px;
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+}
+
+.turbo-update-bubble p {
+  margin-top: 8px;
+  color: var(--turbo-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.turbo-update-bubble__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 17px;
+}
+
+.turbo-update-bubble__actions button {
+  min-height: 34px;
+  padding-inline: 12px;
+  border-radius: var(--turbo-radius-sm);
+  font-size: 0.72rem;
+  font-weight: 700;
+  transition: transform var(--speed-fast) var(--ease-out), border-color var(--speed-fast) var(--ease-out), background var(--speed-fast) var(--ease-out), color var(--speed-fast) var(--ease-out);
+}
+
+.turbo-update-bubble__install {
+  color: var(--turbo-on-accent);
+  background: var(--turbo-accent);
+}
+
+.turbo-update-bubble__install:hover:not(:disabled) {
+  background: var(--turbo-update-bubble-install-hover);
+  transform: translateY(-2px);
+}
+
+.turbo-update-bubble__ignore {
+  border: 1px solid var(--turbo-update-bubble-border);
+  color: var(--turbo-ink);
+  background: transparent;
+}
+
+.turbo-update-bubble__ignore:hover:not(:disabled) {
+  border-color: var(--turbo-accent);
+  color: var(--turbo-accent);
+  transform: translateY(-2px);
+}
+
+.turbo-update-bubble__actions button:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+
+@keyframes turbo-update-bubble-in {
+  from { opacity: 0; transform: translateY(-5px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes turbo-brand-bubble-in {
@@ -3755,6 +3908,15 @@ body[data-active-tab="statistics"] {
   .c-transport__tooltip,
   .c-transport__tooltip.is-visible {
     transform: none;
+  }
+
+  .turbo-update-bubble {
+    transform: none !important;
+  }
+
+  .turbo-update-bubble__glare,
+  .turbo-update-bubble__tail-highlight {
+    opacity: 0 !important;
   }
 }
 

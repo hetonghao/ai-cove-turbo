@@ -52,6 +52,7 @@
   const connectionDom = window.TurboConnectionDOM;
   const numberFormatter = new Intl.NumberFormat("zh-CN");
   const motion = { pageMs: 180, revealMs: 140, shiftPx: 10, blurPx: 3, easing: "cubic-bezier(0.16, 1, 0.3, 1)" };
+  const UPDATE_PREFERENCE_KEY = "ai-cove-turbo.update-check.v1";
   const $ = (selector) => document.querySelector?.(selector) ?? null;
   const all = (selector) => document.querySelectorAll?.(selector) ?? [];
 
@@ -169,7 +170,8 @@
     rawBytes: 1_840_000,
     sentBytes: 1_060_000,
     compressionRatio: 42.4,
-    updateMessage: "Preview：尚未检查更新",
+    updateState: "available",
+    updateMessage: "Preview：发现可安装的新版本",
     modelPolicy: { defaultTransport: "auto", models: { "ox-alpha": "http" }, reason: null },
     transportCapabilities: {
       "gpt-5.3-codex": { transport: "websocket", reasonCode: "ok" },
@@ -226,6 +228,14 @@
   let connectionPanelTrigger = null;
   let connectionDockOffset = 0;
   let aiCoveBubbleOpen = false;
+  let updateBubbleOpen = !invoke;
+  let updateCheckInFlight = false;
+  let updatePreference = readUpdatePreference();
+  if (invoke && updatePreference.checkedDay === updateDayKey() && updatePreference.lastState) {
+    state.updateState = updatePreference.lastState;
+    state.updateMessage = updatePreference.lastMessage || state.updateMessage;
+    state.updateProgress = Number(updatePreference.lastProgress) || 0;
+  }
   let connectionSnapshot = invoke
     ? { currentConnections: 0, prewarm: 0, boundThreads: [], transitions: [], recentClosed: [] }
     : previewConnectionSnapshot;
@@ -282,6 +292,76 @@
     url.searchParams.set("tab", state.tab);
     url.searchParams.set("view", state.configView);
     window.history.replaceState({}, "", url);
+  }
+
+  function updateDayKey() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  }
+
+  function readUpdatePreference() {
+    if (!invoke) return {};
+    try {
+      const value = JSON.parse(window.localStorage?.getItem(UPDATE_PREFERENCE_KEY) || "{}");
+      return value && typeof value === "object" ? value : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeUpdatePreference(next) {
+    updatePreference = next;
+    if (!invoke) return;
+    try {
+      window.localStorage?.setItem(UPDATE_PREFERENCE_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore unavailable webview storage; the current session still works.
+    }
+  }
+
+  function renderUpdateBubble() {
+    const slot = $("[data-update-bubble-slot]");
+    const bubble = $("[data-update-bubble]");
+    if (!slot || !bubble) return;
+    const updateState = String(state.updateState).toLowerCase();
+    const available = ["available", "downloaded"].includes(updateState);
+    const visible = updateBubbleOpen && available;
+    slot.hidden = !visible;
+    if (!visible) return;
+    const message = $("[data-update-bubble-message]");
+    const cleanMessage = String(state.updateMessage || "发现可安装的新版本").replace(/^Preview：/, "");
+    if (message) message.textContent = cleanMessage;
+    [$("[data-action='install-update-bubble']"), $("[data-action='ignore-update-bubble']")].forEach((control) => {
+      if (control) control.disabled = false;
+    });
+  }
+
+  function setUpdateBubbleOpen(open) {
+    updateBubbleOpen = Boolean(open);
+    renderUpdateBubble();
+  }
+
+  function markUpdateCheckedToday() {
+    if (!invoke) return;
+    writeUpdatePreference({ ...updatePreference, checkedDay: updateDayKey() });
+  }
+
+  async function checkUpdatesOncePerDay() {
+    if (!invoke || updateCheckInFlight || document.hidden || document.visibilityState !== "visible") return;
+    const today = updateDayKey();
+    if (updatePreference.checkedDay === today) return;
+    markUpdateCheckedToday();
+    updateCheckInFlight = true;
+    try {
+      applyStatus(await invoke("check_for_updates"));
+    } catch (error) {
+      state.updateState = "error";
+      state.updateMessage = "检查更新失败，可稍后重试";
+      state.technicalDetail = error instanceof Error ? error.message : String(error);
+      renderState();
+    } finally {
+      updateCheckInFlight = false;
+    }
   }
 
   function setAiCoveBubbleOpen(open, { restoreFocus = false } = {}) {
@@ -1457,6 +1537,7 @@
     renderVisibility();
     renderLiveRecovery();
     renderControls();
+    renderUpdateBubble();
     renderConfigView();
     renderModelCatalog();
     if (state.tab === "live" && statusHydrated) renderLiveStream(options);
@@ -2431,10 +2512,28 @@
     if (status && typeof status === "object") {
       const previousModels = JSON.stringify(state.catalog?.models || []);
       const previousPolicy = policySignature(state.modelPolicy);
-      state = { ...state, ...status, technicalDetail: "" };
+      const preserveStoredUpdate = String(status.updateState).toLowerCase() === "idle"
+        && updatePreference.checkedDay === updateDayKey()
+        && updatePreference.lastState;
+      state = {
+        ...state,
+        ...status,
+        ...(preserveStoredUpdate ? {
+          updateState: updatePreference.lastState,
+          updateMessage: updatePreference.lastMessage || state.updateMessage,
+          updateProgress: Number(updatePreference.lastProgress) || 0,
+        } : {}),
+        technicalDetail: "",
+      };
       if (status.catalog && JSON.stringify(status.catalog.models || []) !== previousModels) catalogDraft = null;
       if (status.modelPolicy && policySignature(status.modelPolicy) !== previousPolicy) modelPolicyDraft = null;
       applySessionNames(state.sessionNames);
+      if (["available", "downloaded"].includes(String(state.updateState).toLowerCase()) && updatePreference.dismissedDay !== updateDayKey()) {
+        updateBubbleOpen = true;
+      }
+      if (["available", "downloaded", "current", "error"].includes(String(state.updateState).toLowerCase())) {
+        writeUpdatePreference({ ...updatePreference, lastState: state.updateState, lastMessage: state.updateMessage, lastProgress: state.updateProgress });
+      }
     }
     syncLiveRequests();
     renderState(options);
@@ -2484,6 +2583,20 @@
   }
 
   async function handleAction(action, control) {
+    if (action === "ignore-update-bubble") {
+      writeUpdatePreference({ ...updatePreference, dismissedDay: updateDayKey() });
+      setUpdateBubbleOpen(false);
+      $(`[data-ai-cove-trigger]`)?.focus?.();
+      return;
+    }
+    if (action === "install-update-bubble") {
+      setUpdateBubbleOpen(false);
+      selectTab("config", { focus: true });
+      const installControl = $("[data-action='install-update']");
+      if (typeof installControl?.click === "function") installControl.click();
+      else void handleAction("install-update", installControl);
+      return;
+    }
     if (action === "toggle-ai-cove-bubble") {
       setAiCoveBubbleOpen(!aiCoveBubbleOpen);
       return;
@@ -2609,6 +2722,7 @@
     renderControls();
     try {
       if (invoke) {
+        if (command === "check_for_updates") markUpdateCheckedToday();
         const status = await (args ? invoke(command, args) : invoke(command));
         if (command === "confirm_non_ai_cove") state.nonAiCoveConfirmed = true;
         applyStatus(status);
@@ -2780,6 +2894,83 @@
       canvas.dataset.dotState = "rest";
     });
     resize();
+  }
+
+  function bindUpdateBubble() {
+    const slot = $("[data-update-bubble-slot]");
+    const bubble = $("[data-update-bubble]");
+    const glare = $("[data-update-glare]");
+    const tail = $(".turbo-update-bubble__tail");
+    const gradient = $("#turbo-update-tail-glare-gradient");
+    if (!slot || !bubble || !glare || !tail || !gradient) return;
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    const target = { x: 0, y: 0, scale: 1, glareX: 50, glareY: 50, tailX: 12, tailY: 8 };
+    const current = { ...target };
+    let frame = 0;
+    let active = false;
+    let lastPointer = null;
+    const inside = (clientX, clientY) => {
+      const rect = slot.getBoundingClientRect();
+      return rect.width > 0 && clientX >= rect.left && clientX <= rect.right && clientY >= rect.top - 16 && clientY <= rect.bottom;
+    };
+    const schedule = () => {
+      if (!frame) frame = window.requestAnimationFrame(tick);
+    };
+    function tick() {
+      frame = 0;
+      current.x += (target.x - current.x) * 0.16;
+      current.y += (target.y - current.y) * 0.16;
+      current.scale += (target.scale - current.scale) * 0.16;
+      current.glareX += (target.glareX - current.glareX) * 0.16;
+      current.glareY += (target.glareY - current.glareY) * 0.16;
+      current.tailX += (target.tailX - current.tailX) * 0.16;
+      current.tailY += (target.tailY - current.tailY) * 0.16;
+      if (!reducedMotion?.matches) {
+        bubble.style.transform = `perspective(800px) rotateX(${current.y}deg) rotateY(${current.x}deg) scale(${current.scale})`;
+        bubble.style.setProperty("--turbo-update-glare-x", `${current.glareX}%`);
+        bubble.style.setProperty("--turbo-update-glare-y", `${current.glareY}%`);
+        bubble.style.setProperty("--turbo-update-tail-glare-opacity", active ? "1" : "0");
+        gradient.setAttribute("cx", String(current.tailX));
+        gradient.setAttribute("cy", String(current.tailY));
+        glare.style.opacity = active ? "1" : "0";
+      }
+      if (active || Math.abs(target.x - current.x) > 0.05 || Math.abs(target.y - current.y) > 0.05 || Math.abs(target.scale - current.scale) > 0.001) schedule();
+    }
+    const applyPointer = (clientX, clientY) => {
+      if (slot.hidden || reducedMotion?.matches) return;
+      const cardRect = bubble.getBoundingClientRect();
+      const tailRect = tail.getBoundingClientRect();
+      const x = Math.max(0, Math.min(1, (clientX - cardRect.left) / cardRect.width));
+      const y = Math.max(0, Math.min(1, (clientY - cardRect.top) / cardRect.height));
+      active = true;
+      target.scale = 1.025;
+      target.x = (x - 0.5) * 14;
+      target.y = (0.5 - y) * 14;
+      target.glareX = x * 100;
+      target.glareY = y * 100;
+      target.tailX = Math.max(0, Math.min(24, ((clientX - tailRect.left) / tailRect.width) * 24));
+      target.tailY = Math.max(0, Math.min(16, ((clientY - tailRect.top) / tailRect.height) * 16));
+      schedule();
+    };
+    const reset = () => {
+      active = false;
+      target.x = 0; target.y = 0; target.scale = 1;
+      target.glareX = 50; target.glareY = 50; target.tailX = 12; target.tailY = 8;
+      bubble.style.setProperty("--turbo-update-tail-glare-opacity", "0");
+      gradient.setAttribute("cx", "12"); gradient.setAttribute("cy", "8"); glare.style.opacity = "0"; schedule();
+    };
+    const handleMove = (event) => {
+      if (event.pointerType === "touch" || reducedMotion?.matches) return;
+      lastPointer = { x: event.clientX, y: event.clientY };
+      if (inside(event.clientX, event.clientY)) applyPointer(event.clientX, event.clientY);
+      else reset();
+    };
+    document.addEventListener("pointermove", handleMove, { passive: true });
+    document.addEventListener("pointerleave", reset, { passive: true });
+    reducedMotion?.addEventListener?.("change", () => {
+      if (reducedMotion.matches) { reset(); bubble.style.transform = "none"; }
+      else if (lastPointer && inside(lastPointer.x, lastPointer.y)) applyPointer(lastPointer.x, lastPointer.y);
+    });
   }
 
   function init() {
@@ -3020,16 +3211,23 @@
       renderConfigView();
     });
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden && invoke) void refreshStatus();
+      if (!document.hidden && invoke) {
+        void refreshStatus();
+        void checkUpdatesOncePerDay();
+      }
     });
     bindConnectionDock();
     bindDotField();
+    bindUpdateBubble();
     renderTab();
     renderState();
     renderConnectionInspector();
     updateUrl();
     if (invoke) {
-      void refreshStatus();
+      void (async () => {
+        await refreshStatus();
+        await checkUpdatesOncePerDay();
+      })();
       window.setInterval(refreshStatus, 1_000);
     }
   }
