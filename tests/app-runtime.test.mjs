@@ -61,7 +61,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     state: "owned",
     sourcePath: "/home/test/models.json",
     models: [
-      { slug: "alpha", displayName: "Alpha", description: "a", visibility: "list", priority: 1 },
+      { slug: "alpha", displayName: "Alpha", description: "a", visibility: "list", priority: 1, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }, { effort: "high", description: "" }], defaultReasoningLevel: "high", inputModalities: ["text", "image"], supportsSearchTool: true, supportsParallelToolCalls: true, supportsImageDetailOriginal: true, useResponsesLite: true, serviceTiers: [{ id: "priority", name: "Fast", description: "" }] },
       { slug: "beta", displayName: "Beta", description: "b", visibility: "hide", priority: 2 },
     ],
     changes: [],
@@ -114,6 +114,47 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
   });
   const message = element({ modelCatalogMessage: "" });
   const restart = element({ modelCatalogRestart: "" });
+  const editorFields = new Map();
+  const editorSources = new Map();
+  const editorActions = new Map();
+  const editorEfforts = element({ modelEfforts: "" });
+  let editorEffortOptions = [];
+  Object.defineProperty(editorEfforts, "innerHTML", {
+    set(value) {
+      editorEffortOptions = [...value.matchAll(/data-model-effort="([^"]+)"([^>]*)/g)].map(([, effort, attributes]) => ({ ...element({ modelField: "model-effort", modelEffort: effort }), type: "checkbox", checked: attributes.includes(" checked") }));
+    },
+    get() { return ""; },
+  });
+  editorEfforts.querySelectorAll = (selector) => selector === "[data-model-effort]" ? editorEffortOptions : [];
+  const editorRoot = element({ modelEditor: "" });
+  editorRoot.hidden = true;
+  editorRoot.querySelector = (selector) => {
+    const field = selector.match(/^\[data-model-field="([^"]+)"\]$/)?.[1];
+    if (field) return editorFields.get(field) || null;
+    const source = selector.match(/^\[data-model-source-for="([^"]+)"\]$/)?.[1];
+    if (source) return editorSources.get(source) || null;
+    if (selector === "[data-model-efforts]") return editorEfforts;
+    if (selector === "[data-model-context-value]") return editorFields.get("context-value") || null;
+    const action = selector.match(/^\[data-model-editor-action="([^"]+)"\]$/)?.[1];
+    if (action) return editorActions.get(action) || null;
+    return null;
+  };
+  editorRoot.showModal = () => { editorRoot.open = true; };
+  editorRoot.close = () => { editorRoot.open = false; };
+  ["slug", "displayName", "description", "max-context-window", "context-window", "reasoning-effort", "transport"].forEach((name) => {
+    const field = element({ modelField: name });
+    field.type = name === "context-window" ? "range" : "text";
+    editorFields.set(name, field);
+  });
+  editorFields.set("context-value", element({ modelContextValue: "" }));
+  ["slug", "displayName", "description", "contextWindow", "maxContextWindow", "supportedReasoningLevels", "defaultReasoningLevel"].forEach((name) => editorSources.set(name, element({ modelSourceFor: name })));
+  ["save", "undo"].forEach((name) => {
+    const action = element({ modelEditorAction: name });
+    action.closest = (selector) => selector === "[data-model-editor-action]" ? action : null;
+    editorActions.set(name, action);
+  });
+  const editButton = element({ modelEdit: "" });
+  editButton.closest = (selector) => selector === "[data-model-edit]" ? editButton : selector === "[data-model-slug]" ? row("alpha") : null;
   const documentBody = element({ configView: "settings" });
   const restartControl = element({ action: "restart-codex", catalogRestart: "", restartHint: "" });
   const configViewButtons = ["settings", "catalog"].map((configView) => {
@@ -134,6 +175,10 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     ["[data-model-catalog-list]", list],
     ["[data-model-catalog-message]", message],
     ["[data-model-catalog-restart]", restart],
+    ["[data-model-editor]", editorRoot],
+    ["[data-model-editor] h2", element()],
+    ["[data-model-editor-summary]", element()],
+    ["[data-model-editor-error]", element()],
   ]);
   const listeners = new Map();
   const calls = [];
@@ -144,6 +189,11 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     if (command === "update_model_catalog") {
       if (failSave) throw new Error("save failed");
       return { ...catalog, models: args.updates, restartRequired: true, loaded: false, revision: "revision-2" };
+    }
+    if (command === "save_model_settings") {
+      if (failSave) throw new Error("save failed");
+      const models = status.catalog.models.map((model) => args.models.find((candidate) => candidate.slug === model.slug) || model);
+      return { catalog: { ...status.catalog, models, restartRequired: true, loaded: false, revision: "revision-2" }, modelPolicy: args.policy };
     }
     if (command === "update_model_policy") {
       if (failSave) throw new Error("policy save failed");
@@ -187,6 +237,14 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
       listeners.get("click")?.({ target: actions.find((target) => target.dataset.action === action) });
       await new Promise((resolve) => setImmediate(resolve));
     },
+    editModel() {
+      listeners.get("click")?.({ target: editButton });
+    },
+    async saveEditor() {
+      listeners.get("click")?.({ target: editorActions.get("save") });
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+    editorField(name) { return editorFields.get(name); },
     selectConfigView(view) {
       listeners.get("click")?.({ target: configViewButtons.find((target) => target.dataset.configView === view) });
     },
@@ -310,6 +368,28 @@ test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界",
   assert.match(failed.list.innerHTML, /data-model-visibility-toggle/);
   await failed.tick();
   assert.equal(failed.disabled("save-model-settings"), false);
+});
+
+test("模型弹窗保存独立于列表草稿并保留原上下文", async () => {
+  const harness = await catalogHarness();
+  harness.toggleVisibility("alpha");
+  harness.editModel();
+  assert.equal(harness.editorField("context-window").value, "200000");
+  harness.editorField("displayName").value = "Alpha updated";
+  await harness.saveEditor();
+
+  const save = harness.calls.find((call) => call.command === "save_model_settings");
+  const savedAlpha = save.args.models.find((model) => model.slug === "alpha");
+  assert.equal(savedAlpha.displayName, "Alpha updated");
+  assert.equal(savedAlpha.contextWindow, 200000);
+  assert.equal(savedAlpha.visibility, "list");
+  assert.equal(harness.disabled("save-model-settings"), false);
+  await harness.click("save-model-settings");
+  const listSave = harness.calls.find((call) => call.command === "update_model_catalog");
+  assert.deepEqual(JSON.parse(JSON.stringify(listSave.args.updates)), [
+    { slug: "alpha", visibility: "hide", priority: 1 },
+    { slug: "beta", visibility: "hide", priority: 2 },
+  ]);
 });
 
 test("状态轮询不重建模型目录控件或覆盖未保存编辑", async () => {

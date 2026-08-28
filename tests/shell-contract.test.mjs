@@ -182,7 +182,7 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
     "check_for_updates",
     "install_update",
     "update_model_catalog",
-    "save_model_catalog",
+    "save_model_settings",
     "discover_model_catalog",
   ];
 
@@ -300,9 +300,8 @@ test("模型目录支持上游发现、编辑向导与完整能力字段", async
   assert.doesNotMatch(html, /data-model-field="context-window-number"/);
   assert.doesNotMatch(html, /<legend>输入与工具<\/legend>|<legend>服务与协议<\/legend>/);
   assert.match(app, /discover_model_catalog/);
-  assert.match(app, /save_model_catalog/);
   assert.match(app, /MODEL_REASONING_OPTIONS/);
-  assert.match(app, /supportedReasoningLevels: \["low", "medium", "high", "xhigh"\]/);
+  assert.match(app, /\["low", "medium", "high", "xhigh"\]\.map/);
   assert.match(app, /defaultReasoningLevel: "high"/);
   assert.match(app, /effectiveContextWindowPercent: 95/);
   assert.match(app, /truncationPolicy: "auto"/);
@@ -312,7 +311,8 @@ test("模型目录支持上游发现、编辑向导与完整能力字段", async
   assert.match(app, /useResponsesLite: true/);
   assert.match(app, /sourceMarkup = source \?/);
   assert.match(app, /updates = catalogModels\(\)\.map\(\(model, priority\) => \(\{ slug: model\.slug, visibility: model\.visibility, priority: priority \+ 1 \}\)\)/);
-  assert.doesNotMatch(app, /save-model-settings[\s\S]{0,500}save_model_settings/);
+  assert.match(app, /persistModelEntry[\s\S]*save_model_settings/);
+  assert.doesNotMatch(app, /catalogFullDirty|const saveFull/);
   const catalogMarkup = app.slice(app.indexOf("function modelCatalogMarkup"), app.indexOf("function catalogRows"));
   assert.doesNotMatch(catalogMarkup, /model\.description|modelReasoningLabel|模板/);
   assert.match(app, /data-model-source/);
