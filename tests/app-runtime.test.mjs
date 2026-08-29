@@ -1298,7 +1298,7 @@ test("请求详情在监控快照到达后使用已建立的会话和连接序�
       route: "hybridWs",
       result: "success",
       threadId: "thread-child",
-      connectionId: "S007",
+      connectionId: "7",
     }],
     connectionSnapshot: {
       currentConnections: 1,

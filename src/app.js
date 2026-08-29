@@ -489,7 +489,7 @@
 
   function observedConnectionKey(value) {
     const text = String(value ?? "").trim();
-    const match = text.match(/^(?:S|连接|connection)?[-_\\s]*0*(\\d+)$/i);
+    const match = text.match(/^(?:S|连接|connection)?[-_\s]*0*(\d+)$/i);
     return match ? String(Number(match[1])) : text.toLowerCase();
   }
 
