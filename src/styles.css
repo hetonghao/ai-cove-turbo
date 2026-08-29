@@ -3327,7 +3327,7 @@ body[data-active-tab="statistics"] {
   padding: 12px 14px 13px;
   border: 1px solid rgba(112, 216, 238, 0.34);
   border-radius: 9px;
-  color: var(--c-ink);
+  color: var(--c-ink, var(--turbo-ink));
   background: var(--turbo-tooltip-bg);
   box-shadow: inset 0 1px 0 rgba(230, 240, 232, 0.08), 0 18px 42px rgba(0, 0, 0, 0.56);
   font-family: var(--font-sans);
@@ -3350,22 +3350,24 @@ body[data-active-tab="statistics"] {
   position: relative;
   display: block;
   margin-bottom: 9px;
-  padding-left: 13px;
-  color: var(--c-accent);
+  padding-left: 16px;
+  color: var(--c-accent, var(--turbo-accent));
   font: 700 0.6875rem/1.2 var(--font-sans);
   letter-spacing: 0.04em;
 }
 
 .c-transport__tooltip > strong::before {
   position: absolute;
-  top: 0.28em;
-  left: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--c-accent);
-  box-shadow: 0 0 0 3px rgba(112, 216, 238, 0.12);
+  top: 0.18em;
+  left: 1px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--c-accent, var(--turbo-accent));
+  border-radius: 2px;
+  background: var(--turbo-accent-soft);
+  box-shadow: 0 0 0 2px var(--turbo-accent-soft);
   content: "";
+  transform: rotate(45deg) scale(0.82);
 }
 
 .c-transport__tooltip dl {
@@ -3384,7 +3386,7 @@ body[data-active-tab="statistics"] {
 }
 
 .c-transport__tooltip dt {
-  color: var(--c-muted);
+  color: var(--c-muted, var(--turbo-muted));
   font-size: 0.6875rem;
   white-space: nowrap;
 }
@@ -3392,7 +3394,7 @@ body[data-active-tab="statistics"] {
 .c-transport__tooltip dd {
   min-width: 0;
   margin: 0;
-  color: var(--c-ink);
+  color: var(--c-ink, var(--turbo-ink));
   font-family: var(--font-mono);
   font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
@@ -3405,11 +3407,11 @@ body[data-active-tab="statistics"] {
 }
 
 .c-transport__tooltip-row--exception dt {
-  color: var(--c-warn);
+  color: var(--c-warn, #e6b98b);
 }
 
 .c-transport__tooltip-row--exception dd {
-  color: var(--c-warn);
+  color: var(--c-warn, #e6b98b);
 }
 
 .c-transport__tooltip dl div:first-child {

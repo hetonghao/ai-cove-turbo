@@ -1209,13 +1209,13 @@ test("认证失败列表只显示短标签，hover 保留上游原因且不归�
   });
   assert.match(requestStream.innerHTML, /Hybrid WS.*认证失败/);
   assert.match(requestStream.innerHTML, /<dt>模型<\/dt><dd>gpt-5\.3-codex<\/dd>/);
-  assert.match(requestStream.innerHTML, /<dt>会话\/连接 ID<\/dt><dd>01 · 02<\/dd>/);
+  assert.match(requestStream.innerHTML, /<dt>会话\/连接<\/dt><dd>— · —<\/dd>/);
   assert.match(requestStream.innerHTML, /<dt>会话名称<\/dt><dd>代码审查<\/dd>/);
   assert.match(requestStream.innerHTML, /<dt>异常<\/dt><dd>上游返回状态码 401。<br>上游原因：token_invalidated: Your authentication token has been invalidated\. Please try signing in again\.<\/dd>/);
   assert.doesNotMatch(requestStream.innerHTML, /检查 API 密钥/);
 });
 
-test("请求详情显示真实首帧/首字/耗时并诚实保留缺失占位符", async () => {
+test("请求详情显示真实首帧/耗时并移除首字指标", async () => {
   const { requestStream } = await liveTailHarness({
     recentRequests: [{
       id: 1,
@@ -1244,8 +1244,40 @@ test("请求详情显示真实首帧/首字/耗时并诚实保留缺失占位符
     }] ,
   });
   const rows = requestStream.innerHTML.match(/<tr\b.*?<\/tr>/g) ?? [];
-  assert.match(rows[0] ?? "", /<dt>首帧\/首字\/耗时<\/dt><dd>120 ms \/ 420 ms \/ 1\.8 s<\/dd>/);
-  assert.match(rows[1] ?? "", /<dt>首帧\/首字\/耗时<\/dt><dd>— \/ — \/ 1\.8 s<\/dd>/);
+  assert.match(rows[0] ?? "", /<dt>首帧\/耗时<\/dt><dd>120 ms \/ 1\.8 s<\/dd>/);
+  assert.match(rows[1] ?? "", /<dt>首帧\/耗时<\/dt><dd>— \/ 1\.8 s<\/dd>/);
+  assert.doesNotMatch(rows[0] ?? "", /首字/);
+});
+
+test("子会话请求详情先显示父会话和会话名称，再显示监控序号", async () => {
+  const { requestStream } = await liveTailHarness({
+    recentRequests: [{
+      id: 1,
+      timestampMs: 1_000,
+      status: 200,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "WS",
+      route: "hybridWs",
+      result: "success",
+      threadId: "thread-child",
+      sessionId: "会话 04",
+      connectionId: "连接 07",
+    }],
+    sessionNames: {
+      "thread-child": { name: "子任务", parentName: "主任务", isSubagent: true },
+    },
+  });
+  const detail = requestStream.innerHTML;
+  const parentIndex = detail.indexOf("<dt>所属父会话</dt>");
+  const nameIndex = detail.indexOf("<dt>会话名称</dt>");
+  const sequenceIndex = detail.indexOf("<dt>会话/连接</dt>");
+  assert.ok(parentIndex >= 0 && parentIndex < nameIndex && nameIndex < sequenceIndex);
+  assert.match(detail, /<dt>所属父会话<\/dt><dd>主任务<\/dd>/);
+  assert.match(detail, /<dt>会话名称<\/dt><dd>子任务<\/dd>/);
+  assert.match(detail, /<dt>会话\/连接<\/dt><dd>— · —<\/dd>/);
+  assert.doesNotMatch(detail, /04 · 07/);
 });
 
 test("网络异常 Hover 和键盘聚焦会把提示定位在视口内", async () => {
@@ -1728,7 +1760,7 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.match(bound.innerHTML, /c-connection-session__summary"[^>]*aria-label="会话 01，子会话，2 条连接，发送 0，接收 1，空闲 1"[^>]*>\s*<svg class="c-session-icon"/);
   assert.match(bound.innerHTML, /<span class="c-hover-card" aria-hidden="true"><strong>会话 01<\/strong><dl><div><dt>会话名称<\/dt><dd>Nash<\/dd><\/div><div><dt>会话类型<\/dt><dd>子会话<\/dd><\/div><div><dt>所属父会话<\/dt><dd>Turbo 主会话<\/dd>/);
   const boundSessionHover = bound.innerHTML.match(/<span class="c-hover-card"[^>]*><strong>会话 01<\/strong>[\s\S]*?<\/span>/)?.[0] ?? "";
-  assert.doesNotMatch(boundSessionHover, /会话 ID|线程 ID|thread-12345678-alpha/);
+  assert.match(boundSessionHover, /<dt>会话 ID<\/dt><dd>thread-12345678-alpha<\/dd>/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?<svg class="c-session-icon" data-connection-state="active" data-session-kind="subagent"[\s\S]*?c-session-icon__branch/);
   assert.match(bound.innerHTML, /<svg class="c-session-icon"[^>]*><path d="M3 1\.75h8[^>]*\/><\/svg>/);
   assert.doesNotMatch(bound.innerHTML, /<svg class="c-session-icon"[^>]*>[\s\S]*?<rect/);
@@ -1756,7 +1788,7 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.match(closed.innerHTML, /data-thread-id="thread-released"[^>]*>[\s\S]*?c-session-icon" data-connection-state="closed"[\s\S]*?<dt>会话状态<\/dt><dd>已释放<\/dd>/);
   const closedSessionHover = closed.innerHTML.match(/<span class="c-hover-card"[^>]*><strong>会话 01<\/strong>[\s\S]*?<\/span>/)?.[0] ?? "";
   assert.match(closedSessionHover, /会话名称|会话类型|所属父会话|Turbo 主会话/);
-  assert.doesNotMatch(closedSessionHover, /会话 ID|线程 ID|thread-12345678-alpha/);
+  assert.match(closedSessionHover, /<dt>会话 ID<\/dt><dd>thread-12345678-alpha<\/dd>/);
   assert.match(closed.innerHTML, /data-connection-id="S003"[\s\S]*?连接 05/);
   assert.match(closed.innerHTML, /data-connection-id="S006"[\s\S]*?连接 06/);
   assert.match(closed.innerHTML, /data-connection-event-id="C001"/);
@@ -2409,7 +2441,7 @@ test("实时终端只增量追加新请求并同步触发传输脉冲", async ()
   assert.match(appends[0], /data-request-id="2"/);
   assert.match(appends[0], /<span class="c-transport__detail"[^>]*aria-describedby="request-detail-2"/);
   assert.match(appends[0], /<dt>模型<\/dt><dd>gpt-5\.3-codex<\/dd>/);
-  assert.match(appends[0], /<dt>会话\/连接 ID<\/dt><dd>session-123 · —<\/dd>/);
+  assert.match(appends[0], /<dt>会话\/连接<\/dt><dd>— · —<\/dd>/);
   assert.equal(pulses.length, 1);
   assert.equal(pulses[0], 0.5);
 });

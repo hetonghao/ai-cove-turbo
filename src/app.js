@@ -482,26 +482,49 @@
     return reason ? `${statusText}\n上游原因：${reason}` : `${statusText}\n上游未提供更具体原因。`;
   }
 
-  function compactRequestId(value, prefix) {
+  function sequenceNumber(value) {
+    const number = Number(value);
+    return Number.isInteger(number) && number > 0 ? String(number).padStart(2, "0") : "—";
+  }
+
+  function observedConnectionKey(value) {
     const text = String(value ?? "").trim();
-    if (!text) return "—";
-    const alternate = prefix === "会话" ? "session" : "connection";
-    return text.replace(new RegExp(`^(?:${prefix}\\s*|${alternate}\\s+)`, "i"), "") || text;
+    const match = text.match(/^(?:S|连接|connection)?[-_\\s]*0*(\\d+)$/i);
+    return match ? String(Number(match[1])) : text.toLowerCase();
+  }
+
+  function requestSessionSequence(threadId) {
+    const mapped = sessionNumbers.get(String(threadId ?? "").trim());
+    return sequenceNumber(mapped);
+  }
+
+  function requestConnectionSequence(request, threadId) {
+    const value = request?.connectionId ?? request?.connection_id;
+    const numbers = connectionNumbers.get(String(threadId ?? "").trim())?.byId;
+    if (numbers && value) {
+      const text = String(value).trim();
+      const mapped = numbers.get(text)
+        ?? Array.from(numbers.entries()).find(([id]) => observedConnectionKey(id) === observedConnectionKey(text))?.[1];
+      if (mapped) return sequenceNumber(mapped);
+    }
+    return "—";
   }
 
   function requestDetailRows(request, exception) {
-    const threadId = request?.threadId || request?.thread_id;
+    const threadId = String(request?.threadId || request?.thread_id || "").trim();
+    const info = threadId ? sessionInfos.get(String(threadId)) : null;
     const suppliedSessionName = request?.sessionName || request?.session_name;
     const sessionName = suppliedSessionName && suppliedSessionName !== "—"
       ? suppliedSessionName
-      : threadId
-        ? sessionTitle(String(threadId))
-        : "—";
+      : info?.name || (threadId ? sessionTitle(threadId) : "—");
+    const isSubagent = Boolean(info?.isSubagent || request?.isSubagent || request?.is_subagent || request?.parentName || request?.parent_name);
+    const parentName = info?.parentName || request?.parentName || request?.parent_name || "-";
     const rows = [
-      ["模型", request?.model || request?.modelSlug || "—"],
-      ["会话/连接 ID", `${compactRequestId(request?.sessionId || request?.session_id || threadId, "会话")} · ${compactRequestId(request?.connectionId || request?.connection_id, "连接")}`],
+      ...(isSubagent ? [["所属父会话", parentName]] : []),
       ["会话名称", sessionName],
-      ["首帧/首字/耗时", `${telemetry.formatDuration(request?.firstFrameMs ?? request?.first_frame_ms)} / ${telemetry.formatDuration(request?.firstTokenMs ?? request?.first_token_ms)} / ${telemetry.formatDuration(request?.durationMs ?? request?.duration_ms)}`],
+      ["模型", request?.model || request?.modelSlug || "—"],
+      ["会话/连接", `${requestSessionSequence(threadId)} · ${requestConnectionSequence(request, threadId)}`],
+      ["首帧/耗时", `${telemetry.formatDuration(request?.firstFrameMs ?? request?.first_frame_ms)} / ${telemetry.formatDuration(request?.durationMs ?? request?.duration_ms)}`],
     ];
     if (exception) rows.push(["异常", exception]);
     return rows;
@@ -1698,6 +1721,7 @@
   }
 
   function reconcileConnectionNumbers(snapshot, recentClosed) {
+    let changed = false;
     const items = [...snapshot.boundThreads, ...snapshot.transitions, ...recentClosed];
     const visibleThreadIds = [];
     const visibleThreads = new Set();
@@ -1712,6 +1736,7 @@
       if (visibleThreads.has(threadId)) return;
       sessionNumbers.delete(threadId);
       connectionNumbers.delete(threadId);
+      changed = true;
     });
 
     const usedSessionNumbers = new Set(sessionNumbers.values());
@@ -1721,6 +1746,7 @@
       while (usedSessionNumbers.has(number)) number += 1;
       sessionNumbers.set(threadId, number);
       usedSessionNumbers.add(number);
+      changed = true;
     });
 
     items.forEach((item) => {
@@ -1731,12 +1757,15 @@
       if (!numbers) {
         numbers = { next: 1, byId: new Map() };
         connectionNumbers.set(threadId, numbers);
+        changed = true;
       }
       if (!numbers.byId.has(connectionId)) {
         numbers.byId.set(connectionId, numbers.next);
         numbers.next += 1;
+        changed = true;
       }
     });
+    return changed;
   }
 
   function sessionName(threadId) {
@@ -1754,6 +1783,7 @@
     if (info?.isSubagent) {
       details.push(["会话类型", "子会话"], ["所属父会话", info.parentName || "-"]);
     }
+    details.push(["会话 ID", threadId]);
     return details;
   }
 
@@ -1985,7 +2015,11 @@
     if (!panel) return;
     const snapshot = normalizeConnectionSnapshot(connectionSnapshot);
     const recentClosed = snapshot.recentClosed.slice(0, RECENT_CLOSED_LIMIT);
-    reconcileConnectionNumbers(snapshot, recentClosed);
+    const connectionNumbersChanged = reconcileConnectionNumbers(snapshot, recentClosed);
+    if (connectionNumbersChanged && state.tab === "live") {
+      new Set(displayedRequests.map((request) => String(request?.threadId || request?.thread_id || "").trim()).filter(Boolean))
+        .forEach(refreshRequestDetailRows);
+    }
     const activityCounts = snapshot.boundThreads.reduce((counts, item) => {
       const activity = ["up", "down"].includes(item.activity) ? item.activity : "idle";
       counts[activity] += 1;
