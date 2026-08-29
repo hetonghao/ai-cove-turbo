@@ -66,6 +66,8 @@
   --turbo-connection-viewport-gap: 12px;
   --turbo-update-progress-height: 3px;
   --turbo-update-bubble-width: 310px;
+  --turbo-update-bubble-offset-block: 19px;
+  --turbo-update-bubble-offset-inline: 5px;
   --turbo-update-bubble-radius: 13px;
   --turbo-update-bubble-bg: rgba(21, 29, 25, 0.98);
   --turbo-update-bubble-border: rgba(112, 216, 238, 0.56);
@@ -2373,8 +2375,8 @@ body[data-active-tab="config"] {
 
 .turbo-update-bubble-slot {
   position: absolute;
-  top: calc(100% + 14px);
-  left: 0;
+  top: calc(100% + var(--turbo-update-bubble-offset-block));
+  left: var(--turbo-update-bubble-offset-inline);
   z-index: calc(var(--turbo-focus-layer) + 1);
   width: min(var(--turbo-update-bubble-width), calc(100vw - 48px));
   pointer-events: auto;

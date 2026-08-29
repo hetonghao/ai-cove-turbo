@@ -65,6 +65,7 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.match(html, /data-action="install-update-bubble"/);
   assert.match(html, /data-action="ignore-update-bubble"/);
   assert.match(html, /更新已准备好🎉/);
+  assert.match(css, /\.turbo-update-bubble-slot\s*\{[\s\S]*?top:\s*calc\(100% \+ var\(--turbo-update-bubble-offset-block\)\);[\s\S]*?left:\s*var\(--turbo-update-bubble-offset-inline\);/);
   assert.match(app, /checkUpdatesOncePerDay/);
   assert.match(app, /UPDATE_PREFERENCE_KEY/);
   assert.match(app, /setUpdateBubbleOpen\(false\)/);
