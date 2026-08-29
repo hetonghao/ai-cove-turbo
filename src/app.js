@@ -106,10 +106,10 @@
   function buildPreviewTelemetry() {
     const now = Date.now();
     const samples = [
-      { id: 1, ageSeconds: 3, status: 200, path: "/v1/responses", rawBytes: 186_420, sentBytes: 82_110, transport: "WS", result: "success", route: "hybridWs", model: "gpt-5.3-codex", sessionId: "会话 01", connectionId: "连接 02", sessionName: "代码审查", firstFrameMs: 120, firstTokenMs: 420, durationMs: 1_800 },
+      { id: 1, ageSeconds: 3, status: 200, path: "/v1/responses", rawBytes: 186_420, sentBytes: 82_110, transport: "WS", result: "success", route: "hybridWs", model: "gpt-5.3-codex", threadId: "thread-7c2a91df", connectionId: "S002", sessionName: "代码审查", firstFrameMs: 120, firstTokenMs: 420, durationMs: 1_800 },
       { id: 2, ageSeconds: 11, status: 200, path: "/v1/responses", rawBytes: 94_280, sentBytes: 51_360, transport: "HTTP", result: "success", route: "hybridColdStartHttp", model: "gpt-5.4", sessionId: "会话 02", sessionName: "—", durationMs: 2_400 },
       { id: 3, ageSeconds: 48, status: 201, path: "/v1/files", rawBytes: 128_610, sentBytes: 67_240, transport: "HTTP", result: "success", route: "directHttp", model: "—", sessionId: "—", connectionId: "—", sessionName: "—", durationMs: 310 },
-      { id: 4, ageSeconds: 210, status: 200, path: "/v1/responses", rawBytes: 121_000, sentBytes: 116_000, transport: "HTTP", result: "fallback", route: "hybridRecoveryHttp", model: "gpt-5.3-codex", sessionId: "会话 01", connectionId: "—", sessionName: "代码审查", durationMs: 3_100 },
+      { id: 4, ageSeconds: 210, status: 200, path: "/v1/responses", rawBytes: 121_000, sentBytes: 116_000, transport: "HTTP", result: "fallback", route: "hybridRecoveryHttp", model: "gpt-5.3-codex", threadId: "thread-7c2a91df", connectionId: "S003", sessionName: "代码审查", durationMs: 3_100 },
       { id: 5, ageSeconds: 1_080, status: 200, path: "/v1/responses", rawBytes: 212_000, sentBytes: 104_000, transport: "WS", result: "success", route: "hybridWs" },
       { id: 6, ageSeconds: 10_800, status: 200, path: "/v1/responses", rawBytes: 246_000, sentBytes: 119_000, transport: "HTTP", result: "success" },
       { id: 7, ageSeconds: 43_200, status: 200, path: "/v1/responses", rawBytes: 152_000, sentBytes: 143_000, transport: "HTTP", result: "fallback" },
@@ -1779,10 +1779,9 @@
 
   function sessionIdentityDetails(threadId) {
     const info = sessionInfos.get(threadId);
-    const details = [["会话名称", sessionTitle(threadId)]];
-    if (info?.isSubagent) {
-      details.push(["会话类型", "子会话"], ["所属父会话", info.parentName || "-"]);
-    }
+    const details = info?.isSubagent
+      ? [["所属父会话", info.parentName || "-"], ["会话名称", sessionTitle(threadId)], ["会话类型", "子会话"]]
+      : [["会话名称", sessionTitle(threadId)]];
     details.push(["会话 ID", threadId]);
     return details;
   }

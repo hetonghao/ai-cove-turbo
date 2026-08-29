@@ -667,6 +667,7 @@ async function liveTailHarness(overrides = {}) {
   const requestStream = element();
   requestStream.innerHTML = "";
   requestStream.insertAdjacentHTML = (_position, value) => { requestStream.innerHTML += value; };
+  const connectionSnapshot = overrides.connectionSnapshot;
   const tooltipById = new Map();
   let requestStreamMarkup = "";
   let requestRow;
@@ -720,6 +721,7 @@ async function liveTailHarness(overrides = {}) {
     ["[data-live-follow]", follow],
     ["[data-live-follow-label]", followLabel],
   ]);
+  if (connectionSnapshot) selectors.set("[data-connection-panel]", element());
   const elementsById = new Map();
   const body = element();
   body.tagName = "BODY";
@@ -742,7 +744,9 @@ async function liveTailHarness(overrides = {}) {
     querySelectorAll() { return []; },
   };
   const window = {
-    __TAURI__: { core: { invoke: async (command) => command === "get_codex_thread_info" ? (overrides.threadInfoPromise ?? status) : status } },
+    __TAURI__: { core: { invoke: async (command) => command === "get_codex_thread_info"
+      ? (overrides.threadInfoPromise ?? status)
+      : command === "get_connection_snapshot" ? (connectionSnapshot ?? status) : status } },
     location: { href: "tauri://localhost/?tab=live" },
     innerWidth: 1_280,
     innerHeight: 720,
@@ -1280,6 +1284,36 @@ test("子会话请求详情先显示父会话和会话名称，再显示监控�
   assert.doesNotMatch(detail, /04 · 07/);
 });
 
+test("请求详情在监控快照到达后使用已建立的会话和连接序号", async () => {
+  const live = await liveTailHarness({
+    enableTooltipRefresh: true,
+    recentRequests: [{
+      id: 1,
+      timestampMs: 1_000,
+      status: 200,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "WS",
+      route: "hybridWs",
+      result: "success",
+      threadId: "thread-child",
+      connectionId: "S007",
+    }],
+    connectionSnapshot: {
+      currentConnections: 1,
+      prewarm: 0,
+      boundThreads: [{ id: "S007", threadId: "thread-child", activity: "down", idleSeconds: 0, reclaimPolicy: "threadEnd" }],
+      transitions: [],
+      recentClosed: [],
+    },
+    sessionNames: { "thread-child": { name: "子任务", parentName: "主任务", isSubagent: true } },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(live.tooltipHtml(), /<dt>会话\/连接<\/dt><dd>01 · 01<\/dd>/);
+});
+
 test("网络异常 Hover 和键盘聚焦会把提示定位在视口内", async () => {
   const { positionNetworkTooltip } = await liveTailHarness();
 
@@ -1758,8 +1792,12 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?会话 01[\s\S]*?×2[\s\S]*?c-connection-session__separator[\s\S]*?连接 01[\s\S]*?连接 02/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-beta"[^>]*>[\s\S]*?会话 02/);
   assert.match(bound.innerHTML, /c-connection-session__summary"[^>]*aria-label="会话 01，子会话，2 条连接，发送 0，接收 1，空闲 1"[^>]*>\s*<svg class="c-session-icon"/);
-  assert.match(bound.innerHTML, /<span class="c-hover-card" aria-hidden="true"><strong>会话 01<\/strong><dl><div><dt>会话名称<\/dt><dd>Nash<\/dd><\/div><div><dt>会话类型<\/dt><dd>子会话<\/dd><\/div><div><dt>所属父会话<\/dt><dd>Turbo 主会话<\/dd>/);
-  const boundSessionHover = bound.innerHTML.match(/<span class="c-hover-card"[^>]*><strong>会话 01<\/strong>[\s\S]*?<\/span>/)?.[0] ?? "";
+  const boundSessionHoverMarkup = bound.innerHTML.match(/<span class="c-hover-card" aria-hidden="true"><strong>会话 01<\/strong>[\s\S]*?<\/span>/)?.[0] ?? "";
+  const parentIndex = boundSessionHoverMarkup.indexOf("<dt>所属父会话</dt>");
+  const nameIndex = boundSessionHoverMarkup.indexOf("<dt>会话名称</dt>");
+  assert.ok(parentIndex >= 0 && parentIndex < nameIndex);
+  assert.match(boundSessionHoverMarkup, /<dt>所属父会话<\/dt><dd>Turbo 主会话<\/dd><\/div><div><dt>会话名称<\/dt><dd>Nash<\/dd><\/div><div><dt>会话类型<\/dt><dd>子会话<\/dd>/);
+  const boundSessionHover = boundSessionHoverMarkup;
   assert.match(boundSessionHover, /<dt>会话 ID<\/dt><dd>thread-12345678-alpha<\/dd>/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?<svg class="c-session-icon" data-connection-state="active" data-session-kind="subagent"[\s\S]*?c-session-icon__branch/);
   assert.match(bound.innerHTML, /<svg class="c-session-icon"[^>]*><path d="M3 1\.75h8[^>]*\/><\/svg>/);
