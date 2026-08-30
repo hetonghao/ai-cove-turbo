@@ -4,6 +4,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const DEFAULT_BASE_INSTRUCTIONS: &str = "You are Codex, an expert coding agent. Follow the user's instructions and work carefully in the current repository.";
+const DEFAULT_SHELL_TYPE: &str = "shell_command";
+
+fn default_shell_type() -> String {
+    DEFAULT_SHELL_TYPE.to_owned()
+}
+
+const fn default_support_verbosity() -> bool {
+    true
+}
+
+fn default_truncation_policy() -> Value {
+    serde_json::json!({"mode": "tokens", "limit": 10_000})
+}
 
 // CLIPPY-ALLOW: Codex 的模型能力协议使用独立布尔字段，合并会改变 JSON 契约。
 #[allow(clippy::struct_excessive_bools)]
@@ -23,8 +36,12 @@ pub(crate) struct CatalogModel {
     pub(crate) effective_context_window_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) auto_compact_token_limit: Option<u64>,
-    #[serde(default)]
-    pub(crate) truncation_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) truncation_policy: Option<Value>,
+    #[serde(default = "default_shell_type")]
+    pub(crate) shell_type: String,
+    #[serde(default = "default_support_verbosity")]
+    pub(crate) support_verbosity: bool,
     #[serde(default)]
     pub(crate) input_modalities: Vec<String>,
     #[serde(default)]
@@ -83,6 +100,21 @@ impl CatalogModel {
             self.field_sources
                 .insert("inputModalities".to_owned(), "模板".to_owned());
         }
+        if self.truncation_policy.is_none()
+            || self
+                .truncation_policy
+                .as_ref()
+                .is_some_and(|policy| policy.as_str() == Some("auto"))
+        {
+            self.truncation_policy = Some(default_truncation_policy());
+            self.field_sources
+                .insert("truncationPolicy".to_owned(), "模板".to_owned());
+        }
+        if self.shell_type.trim().is_empty() {
+            self.shell_type = default_shell_type();
+            self.field_sources
+                .insert("shellType".to_owned(), "模板".to_owned());
+        }
         if self.auto_compact_token_limit.is_none() {
             self.auto_compact_token_limit = self
                 .context_window
@@ -126,6 +158,16 @@ impl CatalogModel {
         }
         if !matches!(self.visibility.as_str(), "list" | "hide" | "none") {
             return Err(format!("模型 {} 的 visibility 无效", self.slug));
+        }
+        if !self
+            .truncation_policy
+            .as_ref()
+            .is_some_and(Value::is_object)
+        {
+            return Err(format!("模型 {} 缺少有效 truncation_policy", self.slug));
+        }
+        if self.shell_type.trim().is_empty() {
+            return Err(format!("模型 {} 缺少 shell_type", self.slug));
         }
         let Some(maximum) = self.max_context_window else {
             return Err(format!("模型 {} 缺少最大上下文窗口", self.slug));
@@ -209,7 +251,9 @@ impl CatalogModel {
             max_context_window: None,
             effective_context_window_percent: None,
             auto_compact_token_limit: None,
-            truncation_policy: None,
+            truncation_policy: Some(default_truncation_policy()),
+            shell_type: default_shell_type(),
+            support_verbosity: true,
             input_modalities: vec!["text".to_owned()],
             supported_reasoning_levels: Vec::new(),
             default_reasoning_level: None,

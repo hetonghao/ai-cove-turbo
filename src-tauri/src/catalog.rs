@@ -23,6 +23,7 @@ pub(crate) use catalog_types::{
 };
 
 pub(crate) const FIXED_CATALOG_RELATIVE_PATH: &str = ".codex/model-catalogs/ai_cove_turbo.json";
+const CODEX_TEMPLATE_SLUG: &str = "gpt-5.6-sol";
 
 pub(crate) fn fixed_catalog_path(home: &Path) -> PathBuf {
     home.join(FIXED_CATALOG_RELATIVE_PATH)
@@ -102,14 +103,14 @@ pub(crate) fn ensure_catalog(
     let source_path = match current_pointer.as_ref() {
         Some(source) if source != &fixed_path => {
             let bytes = fs::read(source).map_err(CatalogError::Read)?;
-            let _ = parse_models(&bytes)?;
+            parse_models(&bytes)?;
             write_atomic(&fixed_path, &bytes)?;
             Some(source.clone())
         }
         Some(_) | None if fixed_path.exists() => None,
         Some(source) => {
             let bytes = fs::read(source).map_err(CatalogError::Read)?;
-            let _ = parse_models(&bytes)?;
+            parse_models(&bytes)?;
             write_atomic(&fixed_path, &bytes)?;
             Some(source.clone())
         }
@@ -269,6 +270,9 @@ pub(crate) fn update_catalog(
                 )
         })
     });
+    // ponytail: legacy catalogs get a one-time safe-field migration before validation.
+    migrate_legacy_models(models);
+    validate_codex_document(&document)?;
     write_atomic(
         &fixed_path,
         &serde_json::to_vec_pretty(&document).map_err(CatalogError::Json)?,
@@ -319,6 +323,27 @@ fn prepare_catalog_models(
         .get_mut("models")
         .and_then(Value::as_array_mut)
         .ok_or_else(|| CatalogError::InvalidSchema("缺少 models 数组".to_owned()))?;
+    migrate_legacy_models(entries);
+    let needs_template = models.iter().any(|model| {
+        !entries
+            .iter()
+            .any(|entry| entry.get("slug").and_then(Value::as_str) == Some(model.slug.as_str()))
+    });
+    let template = needs_template
+        .then(|| {
+            entries
+                .iter()
+                .find(|entry| {
+                    entry.get("slug").and_then(Value::as_str) == Some(CODEX_TEMPLATE_SLUG)
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    CatalogError::InvalidSchema(format!(
+                        "新增模型缺少 {CODEX_TEMPLATE_SLUG} 基准模板"
+                    ))
+                })
+        })
+        .transpose()?;
     let mut seen = std::collections::HashSet::new();
     for model in &normalized_models {
         model
@@ -333,7 +358,11 @@ fn prepare_catalog_models(
         {
             write_model_fields(existing, model);
         } else {
-            let mut created = Value::Object(serde_json::Map::new());
+            let Some(mut created) = template.clone() else {
+                return Err(CatalogError::InvalidSchema(format!(
+                    "新增模型缺少 {CODEX_TEMPLATE_SLUG} 基准模板"
+                )));
+            };
             write_model_fields(&mut created, model);
             entries.push(created);
         }
@@ -359,6 +388,7 @@ fn prepare_catalog_models(
                 )
         })
     });
+    validate_codex_document(&document)?;
     let mut metadata = previous_metadata.clone();
     for model in &normalized_models {
         metadata
@@ -374,6 +404,88 @@ fn prepare_catalog_models(
     }
     let next_bytes = serde_json::to_vec_pretty(&document).map_err(CatalogError::Json)?;
     Ok((next_bytes, metadata))
+}
+
+fn validate_codex_document(document: &Value) -> Result<(), CatalogError> {
+    let models = document
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CatalogError::InvalidSchema("缺少 models 数组".to_owned()))?;
+    let mut seen = std::collections::HashSet::new();
+    for model in models {
+        let slug = model
+            .get("slug")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CatalogError::InvalidSchema("模型缺少 slug".to_owned()))?;
+        if !seen.insert(slug.to_owned()) {
+            return Err(CatalogError::InvalidSchema(format!(
+                "模型 slug 重复：{slug}"
+            )));
+        }
+        if !model.get("truncation_policy").is_some_and(|policy| {
+            let Some(object) = policy.as_object() else {
+                return false;
+            };
+            object
+                .get("mode")
+                .and_then(Value::as_str)
+                .is_some_and(|mode| matches!(mode, "tokens" | "bytes"))
+                && object
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|limit| limit > 0)
+        }) {
+            return Err(CatalogError::InvalidSchema(format!(
+                "模型 {slug} 缺少有效 truncation_policy"
+            )));
+        }
+        if model
+            .get("shell_type")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(CatalogError::InvalidSchema(format!(
+                "模型 {slug} 缺少 shell_type"
+            )));
+        }
+        if !model
+            .get("support_verbosity")
+            .is_some_and(Value::is_boolean)
+        {
+            return Err(CatalogError::InvalidSchema(format!(
+                "模型 {slug} 缺少 support_verbosity"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn migrate_legacy_models(models: &mut [Value]) {
+    let legacy = models.iter().all(|model| {
+        model.as_object().is_some_and(|object| {
+            !object.contains_key("truncation_policy")
+                && !object.contains_key("shell_type")
+                && !object.contains_key("support_verbosity")
+        })
+    });
+    if !legacy {
+        return;
+    }
+    for model in models {
+        let Some(object) = model.as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            "truncation_policy".to_owned(),
+            serde_json::json!({"mode": "tokens", "limit": 10_000}),
+        );
+        object.insert(
+            "shell_type".to_owned(),
+            Value::String("shell_command".to_owned()),
+        );
+        object.insert("support_verbosity".to_owned(), Value::Bool(true));
+    }
 }
 
 pub(crate) fn restore_catalog_bytes(
@@ -393,7 +505,6 @@ pub(crate) fn restore_catalog_bytes(
     if digest(&current) != expected_revision {
         return Err(CatalogError::ContentChanged);
     }
-    let _ = parse_models(bytes)?;
     write_atomic(&fixed_path, bytes)?;
     status_from_file(&fixed_path, &record, true, false, false)
 }
@@ -462,7 +573,7 @@ mod tests {
         .expect("config fixture");
         fs::write(
             &source,
-            r#"{"models":[{"slug":"alpha","display_name":"Alpha","description":"a","visibility":"list","priority":2,"unknown":"kept"},{"slug":"beta","display_name":"Beta","description":"b","visibility":"hide","priority":1}]}"#,
+            r#"{"models":[{"slug":"alpha","display_name":"Alpha","description":"a","visibility":"list","priority":2,"unknown":"kept","truncation_policy":{"mode":"bytes","limit":10000},"shell_type":"shell_command","support_verbosity":true},{"slug":"beta","display_name":"Beta","description":"b","visibility":"hide","priority":1,"truncation_policy":{"mode":"bytes","limit":10000},"shell_type":"shell_command","support_verbosity":true},{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","description":"Codex template","visibility":"list","priority":0,"template_only":"kept","truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true}]}"#,
         )
         .expect("catalog fixture");
         (config, source)
@@ -622,6 +733,10 @@ mod tests {
             Some("new description")
         );
         assert!(alpha.is_some_and(|model| model.max_context_window.is_none()));
+        let written = fs::read_to_string(fixed_catalog_path(root.path()))?;
+        assert!(written.contains("truncation_policy"));
+        assert!(written.contains("shell_type"));
+        assert!(written.contains("support_verbosity"));
         Ok(())
     }
 
@@ -635,7 +750,7 @@ mod tests {
         ensure_catalog(root.path(), &config, &recovery)?;
         fs::write(
             fixed_catalog_path(root.path()),
-            r#"{"models":[{"slug":"alpha","display_name":"Alpha v2","description":"a2","visibility":"list","priority":2,"unknown":"changed"},{"slug":"gamma","display_name":"Gamma","description":"g","visibility":"list","priority":3,"new_field":{"nested":true}}]}"#,
+            r#"{"models":[{"slug":"alpha","display_name":"Alpha v2","description":"a2","visibility":"list","priority":2,"unknown":"changed","truncation_policy":{"mode":"bytes","limit":10000},"shell_type":"shell_command","support_verbosity":true},{"slug":"gamma","display_name":"Gamma","description":"g","visibility":"list","priority":3,"new_field":{"nested":true},"truncation_policy":{"mode":"bytes","limit":10000},"shell_type":"shell_command","support_verbosity":true}]}"#,
         )?;
 
         let status = read_catalog(root.path(), &config, &recovery, true, false, false)?;
@@ -680,6 +795,7 @@ mod tests {
         let current = ensure_catalog(root.path(), &config, &recovery)?;
         let mut model = complete_model("alpha");
         model.display_name = "Alpha updated".to_owned();
+        model.truncation_policy = Some(serde_json::json!({"mode": "bytes", "limit": 10000}));
         let added = complete_model("gamma");
         let status = save_catalog_models(
             root.path(),
@@ -688,7 +804,7 @@ mod tests {
             &[model, added],
             &current.revision,
         )?;
-        assert_eq!(status.models.len(), 3);
+        assert_eq!(status.models.len(), 4);
         assert_eq!(
             status
                 .models
@@ -702,11 +818,167 @@ mod tests {
         assert!(written.contains("unknown"));
         assert!(written.contains("\"max_context_window\": 250000"));
         assert!(written.contains("\"slug\": \"gamma\""));
+        let document: Value = serde_json::from_str(&written)?;
+        let gamma = document
+            .get("models")
+            .and_then(Value::as_array)
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|model| model.get("slug") == Some(&Value::String("gamma".to_owned())))
+            })
+            .ok_or("gamma missing")?;
+        assert_eq!(
+            gamma.get("truncation_policy"),
+            Some(&serde_json::json!({"mode": "tokens", "limit": 10000}))
+        );
+        assert_eq!(
+            gamma.get("shell_type").and_then(Value::as_str),
+            Some("shell_command")
+        );
+        assert_eq!(
+            gamma.get("support_verbosity").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            gamma.get("template_only").and_then(Value::as_str),
+            Some("kept")
+        );
+        let alpha = document
+            .get("models")
+            .and_then(Value::as_array)
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|model| model.get("slug") == Some(&Value::String("alpha".to_owned())))
+            })
+            .ok_or("alpha missing")?;
+        assert_eq!(
+            alpha.get("truncation_policy"),
+            Some(&serde_json::json!({"mode": "bytes", "limit": 10000}))
+        );
         assert!(
             root.path()
                 .join(".codex/model-catalogs/ai_cove_turbo.metadata.json")
                 .exists()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn save_rejects_catalog_missing_codex_fields_before_replacing_file()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        ensure_catalog(root.path(), &config, &recovery)?;
+
+        let fixed = fixed_catalog_path(root.path());
+        let mut document: Value = serde_json::from_slice(&fs::read(&fixed)?)?;
+        document["models"][1]
+            .as_object_mut()
+            .expect("beta object")
+            .remove("truncation_policy");
+        fs::write(&fixed, serde_json::to_vec_pretty(&document)?)?;
+        let broken = fs::read(&fixed)?;
+        let result = save_catalog_models(
+            root.path(),
+            &config,
+            &recovery,
+            &[complete_model("alpha")],
+            &revision(&broken),
+        );
+
+        assert!(
+            matches!(result, Err(CatalogError::InvalidSchema(message)) if message.contains("beta") && message.contains("truncation_policy"))
+        );
+        assert_eq!(fs::read(fixed)?, broken);
+        Ok(())
+    }
+
+    #[test]
+    fn saving_a_legacy_catalog_migrates_missing_codex_fields_once() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config = root.path().join("config.toml");
+        let source = root.path().join("source.json");
+        fs::write(
+            &config,
+            format!(
+                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
+                source.display()
+            ),
+        )?;
+        fs::write(
+            &source,
+            r#"{"models":[{"slug":"alpha","visibility":"list","priority":1}]}"#,
+        )?;
+        let recovery = root.path().join("recovery.json");
+        let initial = ensure_catalog(root.path(), &config, &recovery)?;
+        let status = save_catalog_models(
+            root.path(),
+            &config,
+            &recovery,
+            &[complete_model("alpha")],
+            &initial.revision,
+        )?;
+        assert_eq!(status.models.len(), 1);
+        let written = fs::read_to_string(fixed_catalog_path(root.path()))?;
+        assert!(written.contains("truncation_policy"));
+        assert!(written.contains("shell_type"));
+        assert!(written.contains("support_verbosity"));
+        Ok(())
+    }
+
+    #[test]
+    fn update_rejects_catalog_missing_codex_fields_before_replacing_file()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        ensure_catalog(root.path(), &config, &recovery)?;
+
+        let fixed = fixed_catalog_path(root.path());
+        let mut document: Value = serde_json::from_slice(&fs::read(&fixed)?)?;
+        document["models"][1]
+            .as_object_mut()
+            .expect("beta object")
+            .remove("shell_type");
+        fs::write(&fixed, serde_json::to_vec_pretty(&document)?)?;
+        let broken = fs::read(&fixed)?;
+        let result = update_catalog(
+            root.path(),
+            &config,
+            &recovery,
+            &[CatalogModelUpdate {
+                slug: "alpha".to_owned(),
+                display_name: Some("Alpha updated".to_owned()),
+                description: None,
+                visibility: None,
+                priority: None,
+            }],
+            &revision(&broken),
+        );
+
+        assert!(
+            matches!(result, Err(CatalogError::InvalidSchema(message)) if message.contains("beta") && message.contains("shell_type"))
+        );
+        assert_eq!(fs::read(fixed)?, broken);
+        Ok(())
+    }
+
+    #[test]
+    fn new_model_uses_the_gpt_5_6_sol_entry_as_template() -> Result<(), Box<dyn Error>> {
+        let bytes = br#"{"models":[{"slug":"gpt-5.6-sol","display_name":"Sol","description":"template","visibility":"list","priority":1,"context_window":125000,"max_context_window":250000,"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low","truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true,"template_only":"kept"}]}"#;
+        let model = complete_model("gamma");
+        let (next, _) = prepare_catalog_models(bytes, &CatalogMetadata::default(), &[model])?;
+        let document: Value = serde_json::from_slice(&next)?;
+        let gamma = document["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|model| model["slug"] == "gamma"))
+            .ok_or("gamma missing")?;
+        assert_eq!(gamma["template_only"], "kept");
         Ok(())
     }
 

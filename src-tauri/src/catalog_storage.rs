@@ -100,7 +100,9 @@ pub(super) fn model_from_value(model: &Value, slug: String) -> CatalogModel {
             .and_then(Value::as_u64)
             .and_then(|value| u8::try_from(value).ok()),
         auto_compact_token_limit: number_field(model, "auto_compact_token_limit"),
-        truncation_policy: optional_string(model, "truncation_policy"),
+        truncation_policy: model.get("truncation_policy").cloned(),
+        shell_type: string_field_or(model, "shell_type", "shell_command"),
+        support_verbosity: bool_field_or(model, "support_verbosity", true),
         input_modalities: string_array(model, "input_modalities"),
         supported_reasoning_levels: reasoning_levels(model),
         default_reasoning_level: optional_string(model, "default_reasoning_level"),
@@ -143,6 +145,10 @@ fn optional_string(model: &Value, key: &str) -> Option<String> {
 
 fn bool_field(model: &Value, key: &str) -> bool {
     model.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn bool_field_or(model: &Value, key: &str, fallback: bool) -> bool {
+    model.get(key).and_then(Value::as_bool).unwrap_or(fallback)
 }
 
 fn string_array(model: &Value, key: &str) -> Vec<String> {
@@ -297,10 +303,13 @@ pub(super) fn write_model_fields(target: &mut Value, model: &CatalogModel) {
         "auto_compact_token_limit",
         model.auto_compact_token_limit,
     );
-    insert_optional_string(
-        object,
-        "truncation_policy",
-        model.truncation_policy.as_deref(),
+    if let Some(policy) = &model.truncation_policy {
+        object.insert("truncation_policy".to_owned(), policy.clone());
+    }
+    object.insert("shell_type".to_owned(), json!(model.shell_type));
+    object.insert(
+        "support_verbosity".to_owned(),
+        json!(model.support_verbosity),
     );
     object.insert("input_modalities".to_owned(), json!(model.input_modalities));
     object.insert(
