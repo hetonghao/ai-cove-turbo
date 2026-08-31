@@ -35,6 +35,17 @@
     preferWebsockets: false,
   });
   const NETWORK_ERROR_MESSAGE = "请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。\n请尝试切换手机热点排查，如果无法定位请联管理员。";
+  const NETWORK_FAILURE_STAGE_LABELS = Object.freeze({
+    dns: "DNS 解析",
+    tls: "TLS 握手",
+    connect: "TCP 建连",
+    write: "请求写入",
+    read: "响应读取",
+    timeout: "请求超时",
+    reset: "连接重置",
+    upstreamHttp: "上游 HTTP",
+    unknown: "未知网络阶段",
+  });
   const REQUEST_FAILURE_LABELS = Object.freeze({
     499: "请求已取消",
     401: "认证失败",
@@ -466,7 +477,10 @@
   }
 
   function requestFailureDetail(request, { releaseRebuild = false, recovering = false } = {}) {
-    if (isNetworkIssue(request)) return NETWORK_ERROR_MESSAGE;
+    if (isNetworkIssue(request)) {
+      const stage = NETWORK_FAILURE_STAGE_LABELS[String(request?.failureStage ?? "").trim()];
+      return stage ? `${NETWORK_ERROR_MESSAGE}\n诊断阶段：${stage}` : NETWORK_ERROR_MESSAGE;
+    }
     const reason = String(request?.failureReason ?? "").trim();
     if (recovering) {
       const prefix = releaseRebuild

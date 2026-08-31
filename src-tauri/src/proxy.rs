@@ -37,6 +37,7 @@ mod hybrid_pool;
 mod model_policy;
 pub(crate) use model_policy::{ModelPolicyStatus, ModelPolicyUpdate};
 pub(crate) use transport_capability::CapabilityModelStatus;
+mod network_diagnostics;
 mod private_websocket;
 #[cfg(test)]
 #[path = "proxy/private_websocket_benchmark.rs"]
@@ -1164,7 +1165,7 @@ async fn proxy_http_with_control(
         (raw_body, false)
     };
     let target = resolve_target(&state.upstream, &parts.uri);
-    let mut upstream_request = state.client.request(parts.method.clone(), target);
+    let mut upstream_request = state.client.request(parts.method.clone(), target.clone());
     let hop_by_hop = hop_by_hop_headers(&parts.headers);
     for (name, value) in &parts.headers {
         if !hop_by_hop.contains(name) && *name != header::HOST && *name != header::CONTENT_LENGTH {
@@ -1175,23 +1176,27 @@ async fn proxy_http_with_control(
         upstream_request = upstream_request.header(header::CONTENT_ENCODING, "zstd");
     }
     let sent_len = outbound_body.len();
-    let Ok(upstream_response) = upstream_request.body(outbound_body).send().await else {
-        record_http_without_stream(
-            &state.metrics,
-            started_at,
-            HttpRequestMetric {
-                path: &path,
-                status: StatusCode::BAD_GATEWAY.as_u16(),
-                raw_bytes: raw_len,
-                sent_bytes: sent_len,
-                compressed: false,
-                result: traffic.result,
-                route: traffic.route,
-                failure_reason: None,
-            },
-            Some(metadata.clone()),
-        );
-        return json_error(StatusCode::BAD_GATEWAY, "upstream request failed");
+    let upstream_response = match upstream_request.body(outbound_body).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            let failure_stage = network_diagnostics::classify_request_error(&error, &target).await;
+            record_http_without_stream(
+                &state.metrics,
+                started_at,
+                HttpRequestMetric {
+                    path: &path,
+                    status: StatusCode::BAD_GATEWAY.as_u16(),
+                    raw_bytes: raw_len,
+                    sent_bytes: sent_len,
+                    compressed: false,
+                    result: traffic.result,
+                    route: traffic.route,
+                    failure_reason: Some(network_diagnostics::failure_reason(failure_stage)),
+                },
+                Some(metadata.clone()),
+            );
+            return json_error(StatusCode::BAD_GATEWAY, "upstream request failed");
+        }
     };
     let status = upstream_response.status();
     let mut timing = HttpTiming::new(HttpTimingInput {
@@ -1203,8 +1208,13 @@ async fn proxy_http_with_control(
         sent_bytes: u64::try_from(sent_len).unwrap_or(u64::MAX),
         compressed,
         traffic,
-        failure_reason: is_context_length_exceeded(status.as_u16())
-            .then_some("HTTP upstream returned status 413".to_owned()),
+        failure_reason: if is_context_length_exceeded(status.as_u16()) {
+            Some("HTTP upstream returned status 413".to_owned())
+        } else if status >= StatusCode::BAD_REQUEST {
+            Some(format!("HTTP upstream returned status {status}"))
+        } else {
+            None
+        },
         control,
     });
     timing.set_metadata(metadata);
@@ -1604,6 +1614,7 @@ data: {"type":"response.output_text.delta","delta":"hi"}
         )?;
         assert_eq!(event.get("status"), Some(&serde_json::json!(502)));
         assert_eq!(event.get("result"), Some(&serde_json::json!("error")));
+        assert_eq!(event.get("failureStage"), Some(&serde_json::json!("read")));
         assert!(event.get("durationMs").is_some());
         Ok(())
     }
@@ -1679,6 +1690,7 @@ data: {"type":"response.output_text.delta","delta":"hi"}
             event.get("failureReason"),
             Some(&serde_json::json!("HTTP response stream failed"))
         );
+        assert_eq!(event.get("failureStage"), Some(&serde_json::json!("read")));
         Ok(())
     }
 
@@ -2601,6 +2613,8 @@ data: {"type":"response.completed"}
         let response = reqwest::Client::new()
             .post(format!("{}/responses", proxy.endpoint()))
             .header("content-type", "application/json")
+            .header("authorization", "Bearer secret-token")
+            .header("cookie", "session=secret-cookie")
             .body(input.clone())
             .send()
             .await?;
@@ -2624,6 +2638,22 @@ data: {"type":"response.completed"}
             event.get("result").and_then(serde_json::Value::as_str),
             Some("error")
         );
+        assert_eq!(
+            event
+                .get("failureReason")
+                .and_then(serde_json::Value::as_str),
+            Some("upstream request failed (stage=connect)")
+        );
+        assert_eq!(
+            event
+                .get("failureStage")
+                .and_then(serde_json::Value::as_str),
+            Some("connect")
+        );
+        let serialized = event.to_string();
+        assert!(!serialized.contains("secret-token"));
+        assert!(!serialized.contains("secret-cookie"));
+        assert!(!serialized.contains(&input));
         assert_eq!(
             event.get("rawBytes").and_then(serde_json::Value::as_u64),
             Some(input.len() as u64)

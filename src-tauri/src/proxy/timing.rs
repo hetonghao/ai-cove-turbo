@@ -8,9 +8,11 @@ use std::{
 };
 
 use axum::body::Bytes;
-use futures_util::{Stream, StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt};
 
-use super::{HttpRequestMetric, HttpTraffic, Metrics, is_first_output_event_type};
+use super::{
+    HttpRequestMetric, HttpTraffic, Metrics, is_first_output_event_type, network_diagnostics,
+};
 
 const REQUEST_CANCELLED_STATUS: u16 = 499;
 
@@ -199,6 +201,7 @@ impl HttpTiming {
         self.finish_with(self.input.status, failure_reason.as_deref());
     }
 
+    #[cfg(test)]
     pub(super) fn finish_stream_error(&mut self) {
         if let Some(control) = &self.input.control {
             control.fail_stream_error();
@@ -206,6 +209,14 @@ impl HttpTiming {
         } else {
             self.finish_with(502, Some("HTTP response stream failed"));
         }
+    }
+
+    pub(super) fn finish_stream_error_from_reqwest(&mut self, error: &reqwest::Error) {
+        if let Some(control) = &self.input.control {
+            control.fail_stream_error();
+        }
+        let stage = network_diagnostics::classify_stream_error(error);
+        self.finish_with(502, Some(network_diagnostics::failure_reason(stage)));
     }
 
     pub(super) fn finish_stream_end(&mut self) {
@@ -278,7 +289,6 @@ pub(super) fn instrument_http_stream<S>(
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
 {
-    let stream = stream.map_err(std::io::Error::other);
     futures_util::stream::unfold(
         (Box::pin(stream), timing),
         |(mut stream, mut timing)| async move {
@@ -288,8 +298,14 @@ where
                     Some((Ok(chunk), (stream, timing)))
                 }
                 Some(Err(error)) => {
-                    timing.finish_stream_error();
-                    Some((Err(error), (stream, timing)))
+                    let failure_stage = network_diagnostics::classify_stream_error(&error);
+                    timing.finish_stream_error_from_reqwest(&error);
+                    Some((
+                        Err(std::io::Error::other(network_diagnostics::failure_reason(
+                            failure_stage,
+                        ))),
+                        (stream, timing),
+                    ))
                 }
                 None => {
                     timing.finish_stream_end();

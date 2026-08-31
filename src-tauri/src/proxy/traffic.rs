@@ -10,6 +10,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
+use super::network_diagnostics::FailureStage;
+
 mod window;
 
 const BASE_BUCKET_MS: u64 = 10_000;
@@ -91,6 +93,8 @@ pub(crate) struct RequestEvent {
     failure_phase: Option<FailurePhase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure_stage: Option<FailureStage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     first_frame_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -430,6 +434,9 @@ impl TrafficStore {
             route: record.route,
             failure_phase: record.failure_phase,
             failure_reason: record.failure_reason.map(str::to_owned),
+            failure_stage: super::network_diagnostics::failure_stage_from_reason(
+                record.failure_reason,
+            ),
             first_frame_ms,
             first_token_ms,
             duration_ms,

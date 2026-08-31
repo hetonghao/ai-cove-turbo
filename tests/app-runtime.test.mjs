@@ -1135,6 +1135,7 @@ test("HTTP 502 记录显示协议、网络异常和可访问排查提示", async
     sentBytes: 227_400,
     transport: "HTTP",
     result: "error",
+    failureStage: "connect",
   });
   const networkErrors = [60, 50, 40, 30, 20, 10].map((ageSeconds, index) => networkError(index + 1, ageSeconds));
 
@@ -1155,7 +1156,7 @@ test("HTTP 502 记录显示协议、网络异常和可访问排查提示", async
   assert.match(requestStream.innerHTML, /aria-describedby="request-detail-6"/);
   assert.match(requestStream.innerHTML, /id="request-detail-6" role="tooltip"><strong>请求详情<\/strong>/);
   assert.match(requestStream.innerHTML, /<dt>模型<\/dt><dd>—<\/dd>/);
-  assert.match(requestStream.innerHTML, /<dt>异常<\/dt><dd>请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。<br>请尝试切换手机热点排查，如果无法定位请联管理员。<\/dd>/);
+  assert.match(requestStream.innerHTML, /<dt>异常<\/dt><dd>请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。<br>请尝试切换手机热点排查，如果无法定位请联管理员。<br>诊断阶段：TCP 建连<\/dd>/);
   assert.doesNotMatch(requestStream.innerHTML, /压缩 HTTP · 失败/);
 });
 
