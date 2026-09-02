@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="AI Cove Turbo 模型候选列表布局原型" />
+    <meta name="theme-color" content="#080c0b" />
+    <title>模型候选列表 · AI Cove Turbo 原型</title>
+    <link rel="icon" type="image/png" href="../assets/turbo-icon.png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- Prototype question: three compact one-model-per-row catalog layouts, switchable via ?variant=A|B|C. -->
+    <a class="sr-only" href="#main-content">跳到主要内容</a>
+
+    <div class="prototype-badge" aria-label="这是一次性 UI 原型">THROWAWAY PROTOTYPE <span>模型候选列表</span></div>
+
+    <div class="turbo-shell">
+      <header class="turbo-shell__header">
+        <a class="turbo-shell__brand" href="?variant=A" aria-label="AI Cove Turbo 模型候选列表原型">
+          <img src="../assets/turbo-icon.png" width="30" height="30" alt="" />
+          <span><strong>Turbo</strong><small>AI Cove</small></span>
+        </a>
+        <nav class="turbo-tabs" aria-label="Turbo 页面">
+          <a href="#" aria-current="false">实时</a>
+          <a href="#" aria-current="false">统计</a>
+          <a href="?variant=A" aria-current="page">配置</a>
+        </nav>
+        <span class="turbo-shell__meta">本地配置预览</span>
+      </header>
+
+      <main id="main-content" class="workspace">
+        <section class="catalog-panel" aria-labelledby="page-title">
+          <header class="catalog-heading">
+            <div>
+              <p class="eyebrow">MODEL CATALOG / PROTOTYPE</p>
+              <h1 id="page-title">模型候选</h1>
+              <p>一行展示优先级、能力与操作。</p>
+            </div>
+            <button class="info-button" type="button" aria-label="查看模型候选源文件" title="模型候选源文件：~/.codex/model-catalogs/ai_cove_turbo.json">!</button>
+          </header>
+
+          <div class="catalog-toolbar">
+            <div class="catalog-count"><strong data-visible-count>4</strong><span>/</span><span data-total-count>5</span><span>个候选显示给 Codex</span></div>
+            <div class="toolbar-actions"><button type="button" data-action="discover">从上游发现</button><button class="primary-action" type="button" data-action="create">添加模型</button></div>
+          </div>
+
+          <div class="variant-mount" data-variant-mount></div>
+          <p class="catalog-status" data-catalog-status role="status" aria-live="polite">原型状态：可切换 A / B / C，对比一行密度。</p>
+        </section>
+      </main>
+    </div>
+
+    <div class="prototype-switcher" aria-label="原型变体切换">
+      <button type="button" data-switch="prev" aria-label="上一个变体">←</button>
+      <span><small>VARIANT</small><strong data-current-variant>A · 紧凑列表</strong></span>
+      <button type="button" data-switch="next" aria-label="下一个变体">→</button>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

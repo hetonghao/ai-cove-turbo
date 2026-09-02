@@ -10,6 +10,7 @@
     "prototype:update-progress": "node prototype/server.mjs 41734",
     "prototype:update-check": "node prototype/server.mjs 41736",
     "prototype:ws-panel": "node prototype/server.mjs 41732",
+    "prototype:model-catalog": "node prototype/server.mjs 41738",
     "check": "node --check src/telemetry.js && node --check src/app.js && cargo check --manifest-path src-tauri/Cargo.toml",
     "test": "node --test tests/*.test.mjs && cargo test --manifest-path src-tauri/Cargo.toml",
     "benchmark:smoke": "cargo test --manifest-path src-tauri/Cargo.toml live_hybrid_persistent_lifecycle_smoke -- --ignored --nocapture",
