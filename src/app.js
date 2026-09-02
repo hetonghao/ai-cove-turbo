@@ -274,6 +274,8 @@
   let catalogDraft = null;
   let modelPolicyDraft = null;
   let renderedModelCatalogMarkup = "";
+  let modelCatalogActionMessage = "";
+  let pendingDeleteSlug = "";
   let draggedCatalogSlug = "";
   let draggedCatalogTargetSlug = "";
   let catalogPointerDrag = null;
@@ -823,6 +825,10 @@
         control.dataset.status = actionPending ? "pending" : dirty ? "ready" : "idle";
         control.setAttribute("aria-busy", String(actionPending));
       }
+      if (action === "delete-model") {
+        control.disabled = Boolean(pendingAction);
+        control.setAttribute("aria-busy", String(pendingAction === action));
+      }
       if (managed) {
         const actionPending = pendingAction === action || (action === "install-update" && updateBusy);
         control.disabled = Boolean(pendingAction) || actionPending;
@@ -945,6 +951,15 @@
     return source === "模板" ? "" : source;
   }
 
+  function modelSlugMarkup(model, modelLabel) {
+    const normalize = (value) => String(value).toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+    return normalize(model.slug) === normalize(modelLabel) ? "" : '<code>' + escapeHtml(model.slug) + '</code>';
+  }
+
+  function modelTrashIcon() {
+    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>';
+  }
+
   function modelCatalogMarkup() {
     const policies = policyModels();
     // aria-pressed="${String(transport === "auto")}" remains the transport DOM contract.
@@ -957,8 +972,9 @@
       const conflict = model.conflicts?.length ? " · 冲突待确认" : "";
       const visible = model.visibility === "list";
       const visibilityLabel = visible ? "隐藏 " + modelLabel : "显示 " + modelLabel;
+      const deleteLabel = pendingDeleteSlug === model.slug ? "再次点击确认删除 " + modelLabel : "删除 " + modelLabel;
       const sourceMarkup = source ? '<span data-model-source="' + escapeHtml(source) + '">' + escapeHtml(source) + conflict + '</span>' : conflict ? '<span class="b-model-row__confirm">' + escapeHtml(conflict.slice(3)) + '</span>' : '';
-      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><strong>' + escapeHtml(modelLabel) + '</strong><code>' + escapeHtml(model.slug) + '</code><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '</span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button><div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div><span class="b-model-row__priority">#' + (Number(model.priority) || 0) + '</span></span></article>';
+      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><strong>' + escapeHtml(modelLabel) + '</strong><span class="b-model-row__meta">' + modelSlugMarkup(model, modelLabel) + '<span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '</span></span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button><button class="b-model-row__delete" type="button" data-action="delete-model" data-model-delete aria-label="' + escapeHtml(deleteLabel) + '" title="' + escapeHtml(deleteLabel) + '">' + modelTrashIcon() + '</button><div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div></span></article>';
     }).join("");
   }
   function catalogRows() {
@@ -1016,9 +1032,7 @@
       message.textContent = catalog.state === "conflict"
         ? "Codex 配置中的目录指针已被外部修改，模型候选仍保持当前接管状态。"
         : catalog.state === "error" ? "模型候选目录未能保存，请重试并查看技术详情。"
-          : state.modelPolicy?.reason ? `传输策略读取失败，已保留上次有效策略：${state.modelPolicy.reason}。`
-            : models.some((model) => !modelIsComplete(model)) ? "有模型的上下文上限仍待确认，请编辑后再保存。"
-            : "";
+          : modelCatalogActionMessage || (state.modelPolicy?.reason ? `传输策略读取失败，已保留上次有效策略：${state.modelPolicy.reason}。` : "");
     }
     if (restart) {
       restart.hidden = !catalog.restartRequired;
@@ -1376,6 +1390,46 @@
     }
     catalogDraft = mergeSavedModelIntoListDraft(state.catalog.models, previousDraft, previousStateModels);
     modelPolicyDraft = mergeSavedPolicyIntoDraft(state.modelPolicy, previousPolicyDraft, previousPolicy);
+  }
+
+  async function deleteModelEntry(slug) {
+    const models = catalogModels();
+    const target = models.find((model) => model.slug === slug);
+    if (!target) return;
+    if (models.length <= 1) {
+      modelCatalogActionMessage = "至少保留一个模型候选，无法删除最后一项。";
+      renderModelCatalog(true);
+      return;
+    }
+    const nextModels = models
+      .filter((model) => model.slug !== slug)
+      .map((model, priority) => ({ ...model, priority: priority + 1 }));
+    const nextPolicy = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: { ...policyModels() } };
+    delete nextPolicy.models[slug];
+    pendingAction = "delete-model";
+    modelCatalogActionMessage = "";
+    renderControls();
+    try {
+      if (invoke) {
+        const saved = await invoke("save_model_settings", { models: nextModels, expectedRevision: state.catalog.revision, policy: nextPolicy });
+        if (saved?.catalog) state.catalog = saved.catalog;
+        state.modelPolicy = saved?.modelPolicy || state.modelPolicy;
+        if (saved?.error) throw new Error(saved.error);
+      } else {
+        state.catalog = { ...state.catalog, models: nextModels, restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
+        state.modelPolicy = nextPolicy;
+      }
+      catalogDraft = null;
+      modelPolicyDraft = null;
+      renderedModelCatalogMarkup = "";
+      modelCatalogActionMessage = `${target.displayName || target.slug} 已删除，需要重启 Codex 后生效。`;
+    } catch (error) {
+      state.catalog = { ...state.catalog, state: "error" };
+      state.technicalDetail = error instanceof Error ? error.message : String(error);
+    } finally {
+      pendingAction = "";
+      renderState();
+    }
   }
 
   async function saveModelEditor() {
@@ -2690,6 +2744,20 @@
       unseenLiveRequests = 0;
       liveStreamChanged = true;
       renderLiveStream();
+      return;
+    }
+    if (action === "delete-model") {
+      if (pendingAction) return;
+      const slug = control?.closest?.("[data-model-slug]")?.dataset.modelSlug;
+      if (!slug) return;
+      if (pendingDeleteSlug !== slug) {
+        pendingDeleteSlug = slug;
+        modelCatalogActionMessage = "再次点击垃圾桶确认删除；删除后可从上游重新导入。";
+        renderModelCatalog(true);
+        return;
+      }
+      pendingDeleteSlug = "";
+      await deleteModelEntry(slug);
       return;
     }
     if (action === "create-model") {
