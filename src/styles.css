@@ -5092,8 +5092,8 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
 }
 
 /* 方案一：一模型一行，减少信息噪声但保留复制、传输和可见性操作。 */
-body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-catalog__list { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 8px 20px 10px; max-block-size: calc(54px * 4 + 6px * 3 + 18px); }
-body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row { grid-template-columns: 24px minmax(0, 1fr) max-content; grid-template-areas: "drag copy actions"; min-height: 54px; min-block-size: 54px; gap: 8px; padding: 6px 10px; border-radius: 8px; }
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-catalog__list { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 8px 20px 10px; max-block-size: calc(48px * 4 + 6px * 3 + 18px); }
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row { grid-template-columns: 24px minmax(0, 1fr) max-content; grid-template-areas: "drag copy actions"; min-height: 48px; min-block-size: 48px; gap: 8px; padding: 6px 10px; border-radius: 8px; }
 body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy { grid-template-columns: minmax(0, 1fr); grid-template-areas: "name" "meta"; align-items: center; gap: 2px 8px; }
 body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy .b-model-row__meta { display: flex; align-items: center; min-width: 0; gap: 8px; }
@@ -5110,8 +5110,8 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
 body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__delete:focus-visible { border-color: var(--turbo-model-editor-error-color); color: var(--turbo-model-editor-error-color); background: var(--turbo-model-editor-error-bg); }
 body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy code { font-size: 0.58rem; }
 @media (max-width: 720px) {
-  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-catalog__list { max-block-size: calc(58px * 8 + 6px * 7 + 18px); }
-  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row { grid-template-columns: 24px minmax(0, 1fr) max-content; grid-template-areas: "drag copy actions"; min-height: 58px; min-block-size: 58px; align-items: center; }
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-catalog__list { max-block-size: calc(50px * 8 + 6px * 7 + 18px); }
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row { grid-template-columns: 24px minmax(0, 1fr) max-content; grid-template-areas: "drag copy actions"; min-height: 50px; min-block-size: 50px; align-items: center; }
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__drag,
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy,
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__actions { grid-area: auto; grid-column: auto; }
@@ -5126,4 +5126,19 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__visibility { min-width: 24px; width: 24px; min-height: 26px; height: 26px; padding-inline: 4px; }
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-transport-toggle { width: 64px; min-height: 26px; }
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-transport-toggle__option { min-height: 20px; padding-inline: 1px; font-size: 0.56rem; }
+}
+
+@media (min-width: 721px) and (max-width: 900px) {
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy,
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__actions {
+    grid-column: auto;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy {
+    grid-area: copy;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__actions {
+    grid-area: actions;
+  }
 }
