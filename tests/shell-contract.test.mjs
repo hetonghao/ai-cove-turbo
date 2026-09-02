@@ -18,7 +18,7 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   const configPanel = html.slice(html.indexOf('id="panel-config"'));
   const versionBarIndex = configPanel.indexOf('class="b-version-bar"');
   const configStageIndex = configPanel.indexOf('class="b-stage"');
-  const configCardIndex = configPanel.indexOf('class="b-popover b-popover--wide"');
+  const configCardIndex = configPanel.indexOf('class="b-popover b-popover--wide');
   const versionBarEndIndex = configPanel.indexOf("</header>", versionBarIndex);
   const updateProgressIndex = configPanel.indexOf('class="b-progress', versionBarIndex);
 
@@ -52,6 +52,13 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.match(livePanel, /data-state="hybrid-cold-start-http"/);
   assert.match(livePanel, /data-state="hybrid-recovery-http"/);
   assert.match(livePanel, /data-state="direct-http"/);
+  assert.match(livePanel, /data-action="reset-route-metrics"/);
+  assert.match(livePanel, /aria-controls="route-reset-popover"[^>]*aria-expanded="false"/);
+  assert.match(livePanel, /data-action="cancel-route-reset"/);
+  assert.match(livePanel, /data-action="confirm-route-reset"/);
+  assert.match(livePanel, /class="turbo-update-bubble__tail c-route-reset-popover__tail" viewBox="0 0 24 16"/);
+  assert.match(livePanel, /class="turbo-bubble-action turbo-bubble-action--secondary"[^>]*data-action="cancel-route-reset"/);
+  assert.match(livePanel, /class="turbo-bubble-action turbo-bubble-action--primary"[^>]*data-action="confirm-route-reset"/);
   assert.match(html, /data-action="toggle-autostart"/);
   assert.match(html, /data-action="toggle-dock"/);
   assert.match(html, /data-action="restart-codex"/);
@@ -61,12 +68,28 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.match(html, /data-action="confirm-non-ai-cove"/);
   assert.match(html, /data-action="check-for-updates"/);
   assert.match(html, /data-action="install-update"/);
+  assert.match(html, /class="b-version-bar__current-mark" data-update-current-mark/);
+  assert.match(html, /<path pathLength="1" d="m2\.5 8\.4 3\.2 3\.1 7\.3-7" \/>/);
   assert.match(html, /data-update-bubble-slot hidden/);
+  assert.match(html, /class="turbo-update-bubble turbo-tilt-bubble"/);
+  assert.match(livePanel, /class="c-route-reset-popover turbo-tilt-bubble"/);
   assert.match(html, /data-action="install-update-bubble"/);
   assert.match(html, /data-action="ignore-update-bubble"/);
   assert.match(html, /更新已准备好🎉/);
   assert.match(css, /\.turbo-update-bubble-slot\s*\{[\s\S]*?top:\s*calc\(100% \+ var\(--turbo-update-bubble-offset-block\)\);[\s\S]*?left:\s*var\(--turbo-update-bubble-offset-inline\);/);
   assert.match(app, /checkUpdatesOncePerDay/);
+  assert.match(app, /function renderUpdateCurrentMark/);
+  assert.match(app, /renderedUpdateState !== "current"/);
+  assert.match(css, /\.b-version-bar__current-mark\.is-entering\s*\{[\s\S]*?animation: turbo-current-mark-pop 360ms/);
+  assert.match(css, /@keyframes turbo-current-mark-draw/);
+  assert.match(app, /function bindTiltBubble/);
+  assert.match(app, /function openConnectionHoverCard/);
+  assert.match(app, /function positionConnectionHoverCard/);
+  assert.match(app, /c-hover-card--portal/);
+  assert.match(app, /const hasGlareEffect = Boolean\(glare \|\| \(tail && gradient\) \|\| bubble\.dataset\.tiltGlare === "true"\)/);
+  assert.match(app, /function bindTiltBubble\([\s\S]*maxTiltDegrees = 14/);
+  assert.match(app, /bubble\.dataset\.tiltGlare === "true"/);
+  assert.match(app, /--tilt-glare-x/);
   assert.match(app, /UPDATE_PREFERENCE_KEY/);
   assert.match(app, /setUpdateBubbleOpen\(false\)/);
   assert.match(app, /setUpdateBubbleOpen\(false\);[\s\S]*?data-ai-cove-trigger.*?focus/);
@@ -75,7 +98,8 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.match(html, /class="turbo-update-bubble__tail" viewBox="0 0 24 16"/);
   assert.match(css, /\.turbo-update-bubble__tail-stroke\s*\{[\s\S]*?stroke:\s*var\(--turbo-update-bubble-border\);[\s\S]*?stroke-width:\s*1\.2px;/);
   assert.match(css, /\.turbo-update-bubble__tail-highlight\s*\{[\s\S]*?mix-blend-mode:\s*screen;/);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.turbo-update-bubble\s*\{[\s\S]*?transform:\s*none !important;[\s\S]*?\}/);
+  assert.match(css, /\.turbo-update-bubble__glare,\s*\.c-route-reset-popover::before/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.turbo-tilt-bubble\s*\{[\s\S]*?transform:\s*none !important;[\s\S]*?\}/);
   assert.doesNotMatch(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.turbo-update-bubble,\s*\.turbo-update-bubble__glare/);
   assert.ok(versionBarIndex >= 0 && versionBarIndex < configStageIndex && configStageIndex < configCardIndex);
   assert.ok(configPanel.includes(`>v${packageJson.version}</span>`));
@@ -83,9 +107,26 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.equal(configPanel.match(/data-state="update-state"/g)?.length, 1);
   assert.ok(updateProgressIndex > versionBarIndex && updateProgressIndex < versionBarEndIndex);
   assert.match(configPanel, /class="b-version-bar__percent[^>]*data-state="update-progress"/);
+  assert.match(configPanel, /class="b-popover b-popover--wide turbo-tilt-bubble" data-tilt-only/);
+  assert.match(configPanel, /class="b-model-catalog b-model-catalog--wide turbo-tilt-bubble" data-tilt-only/);
+  assert.match(app, /all\("\[data-tilt-only\]"\)\.forEach\(\(bubble\) => bindTiltBubble\(\{ bubble, hitArea: bubble, maxTiltDegrees: 7 \}\)\)/);
+  assert.match(css, /\.b-config-page__header\s*\{[\s\S]*?margin:\s*0 0 clamp\(12px, 2\.4vh, 24px\);/);
+  assert.match(css, /\.b-model-catalog--wide\s*\{[\s\S]*?background:\s*rgba\(15, 22, 18, 0\.6\);/);
   assert.match(css, /\.b-version-bar \.b-progress\s*\{[^}]*position: absolute;/s);
   assert.match(css, /transform: scaleX\(var\(--progress, 0\)\)/);
+  assert.match(css, /\.c-route-metrics__actions\s*\{[\s\S]*?top:\s*-28px;/);
+  assert.match(css, /\.c-route-reset-popover\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?overflow:\s*visible;/);
+  assert.match(css, /\.c-route-reset-popover strong\s*\{[\s\S]*?color:\s*var\(--turbo-accent\);/);
+  assert.match(css, /\.turbo-bubble-action\s*\{[\s\S]*?min-height:\s*34px;[\s\S]*?transition: transform var\(--speed-fast\)/);
+  assert.match(css, /\.c-route-reset-popover \.c-route-reset-popover__tail\s*\{[\s\S]*?bottom:\s*-12px;[\s\S]*?width:\s*18px;[\s\S]*?height:\s*12px;/);
+  assert.match(css, /\.c-route-reset-popover \.turbo-update-bubble__tail-stroke\s*\{[\s\S]*?stroke:\s*var\(--turbo-accent-line\);[\s\S]*?stroke-width:\s*1px;/);
   assert.match(css, /\.c-transport__tooltip\s*\{[\s\S]*?max-height:\s*min\(420px, calc\(100dvh - 32px\)\);[\s\S]*?overflow-y:\s*auto;/);
+  assert.match(css, /--turbo-detail-viewport-inset:\s*32px;/);
+  assert.match(css, /\.c-hover-card\s*\{[\s\S]*?width:\s*max-content;[\s\S]*?min-width:\s*min\(var\(--turbo-hover-card-min-width\), calc\(100vw - var\(--turbo-detail-viewport-inset\)\)\);[\s\S]*?max-width:\s*min\(var\(--turbo-hover-card-max-width\), calc\(100vw - var\(--turbo-detail-viewport-inset\)\)\);/);
+  assert.match(css, /\.c-hover-card--portal\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?top:\s*var\(--c-hover-card-top, 8px\);[\s\S]*?left:\s*var\(--c-hover-card-left, 8px\);/);
+  assert.match(css, /body\[data-connection-hover-card="true"\] \.c-connection-inspector \.c-hover-card\s*\{[\s\S]*?visibility:\s*hidden !important;/);
+  assert.match(css, /\.c-connection-group__hint::after\s*\{[\s\S]*?max-width:\s*min\(260px, calc\(100vw - var\(--turbo-detail-viewport-inset\)\)\);/);
+  assert.match(css, /\.c-transport__tooltip\s*\{[\s\S]*?width:\s*max-content;[\s\S]*?min-width:\s*min\(var\(--turbo-request-tooltip-min-width\), calc\(100vw - var\(--turbo-detail-viewport-inset\)\)\);[\s\S]*?max-width:\s*min\(var\(--turbo-request-tooltip-max-width\), calc\(100vw - var\(--turbo-detail-viewport-inset\)\)\);/);
   assert.match(css, /\.c-transport__tooltip\s*\{[\s\S]*?z-index:\s*var\(--turbo-focus-layer\);[\s\S]*?background:\s*var\(--turbo-tooltip-bg\);[\s\S]*?visibility:\s*hidden;/);
   assert.match(css, /\.c-transport__tooltip\.is-visible\s*\{[\s\S]*?opacity:\s*1;[\s\S]*?visibility:\s*visible;/);
   assert.doesNotMatch(css, /\.b-progress\s*\{[^}]*height: 18px;/s);
@@ -195,6 +236,7 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
     "retry_takeover",
     "set_ai_cove_upstream",
     "confirm_non_ai_cove",
+    "reset_route_metrics",
     "check_for_updates",
     "install_update",
     "update_model_catalog",
@@ -208,6 +250,10 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
   assert.match(app, /window\.__TAURI__\?\.core\?\.invoke/);
   assert.match(app, /setInterval\([^,]+,\s*1_000\)/s);
   assert.match(app, /Preview/);
+  assert.match(app, /setRouteResetOpen/);
+  assert.match(app, /document\.body\.appendChild\(bubble\)/);
+  assert.match(app, /\[data-route-reset\], \[data-route-reset-popover\]/);
+  assert.doesNotMatch(app, /window\.confirm/);
   assert.match(app, /enabled/);
   assert.match(app, /visible/);
   assert.match(app, /command === "confirm_non_ai_cove"\) state\.nonAiCoveConfirmed = true/);
@@ -237,6 +283,15 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(configPanel, /data-action="save-model-settings"[^>]*disabled/);
   assert.match(configPanel, /data-action="undo-model-settings"[^>]*disabled/);
   assert.match(configPanel, /data-model-catalog-restart/);
+  assert.match(configPanel, /data-model-catalog-actions[^>]*hidden/);
+  assert.match(configPanel, /data-model-catalog-draft-actions[^>]*hidden/);
+  assert.match(configPanel, /class="c-route-reset-popover c-model-delete-popover turbo-tilt-bubble" data-model-delete-popover/);
+  assert.match(configPanel, /data-model-delete-popover data-tilt-glare="true"/);
+  assert.doesNotMatch(configPanel, /data-model-delete-popover[\s\S]*?turbo-update-bubble__tail/);
+  assert.match(configPanel, /data-action="cancel-model-delete"/);
+  assert.match(configPanel, /data-action="confirm-model-delete"/);
+  assert.match(configPanel, /data-action="save-model-settings"[^>]*disabled hidden/);
+  assert.match(configPanel, /data-action="undo-model-settings"[^>]*disabled hidden/);
   assert.match(configPanel, /data-action="restart-codex"[^>]*data-catalog-restart/);
   assert.match(app, /data-model-visibility-toggle/);
   assert.match(app, /data-model-drag-handle/);
@@ -258,10 +313,17 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(css, /\.b-model-catalog__actions button:hover:not\(:disabled\)\s*\{[\s\S]*?color:\s*var\(--b-accent\);[\s\S]*?background:\s*var\(--b-accent-soft\);/);
   assert.match(css, /\.b-model-catalog__actions button:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--b-accent\);/);
   assert.match(css, /\.b-model-catalog__actions button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;[\s\S]*?opacity:\s*0\.45;/);
+  assert.match(css, /\.b-model-catalog__draft-actions\s*\{[\s\S]*?background:\s*var\(--turbo-model-editor-footer-bg\);/);
+  assert.match(css, /\.b-model-catalog__draft-actions\s*\{[^}]*?border:\s*0;[^}]*?background:\s*var\(--turbo-model-editor-footer-bg\);/);
+  assert.match(css, /\.b-model-catalog__draft-actions \.turbo-bubble-action--primary\s*\{[\s\S]*?background:\s*var\(--turbo-accent\);/);
+  assert.match(css, /\.b-model-catalog__draft-actions \.turbo-bubble-action--secondary\s*\{[\s\S]*?background:\s*transparent;/);
+  assert.match(css, /\.b-model-catalog\[data-dirty="true"\] \.b-model-catalog__list\s*\{[\s\S]*?padding-bottom:\s*72px;[\s\S]*?scroll-padding-block-end:\s*72px;/);
   assert.match(css, /\.b-model-catalog__info\s*\{/);
   assert.match(css, /\.b-model-catalog__info::after\s*\{[\s\S]*?content:\s*attr\(data-tooltip\);/);
   assert.match(css, /\.b-model-catalog__info\s*\{[\s\S]*?color:\s*var\(--b-accent\);[\s\S]*?background:\s*var\(--b-accent-soft\);/);
   assert.match(css, /#panel-config \.b-hint\s*\{[\s\S]*?margin-top:\s*18px;/);
+  assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-hint\s*\{[\s\S]*?margin-block-start:\s*18px;/);
+  assert.doesNotMatch(app, /有模型的上下文上限仍待确认，请编辑后再保存。/);
   assert.match(css, /\.b-model-row__visibility\s*\{/);
   assert.match(css, /\.b-model-catalog__list\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
   assert.match(css, /\.b-model-catalog__toolbar\s*\{[\s\S]*?align-items:\s*center;[\s\S]*?line-height:\s*1\.2;/);
@@ -271,8 +333,9 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(css, /\.b-model-row__actions\s*\{[\s\S]*?display:\s*grid/);
   assert.match(css, /\.b-popover--wide \.b-action-feedback\.sr-only\s*\{[\s\S]*?clip-path:\s*inset\(50%\)/);
   assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config\s*\{[\s\S]*?display:\s*flex;[\s\S]*?overflow:\s*hidden;/);
-  assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-stage\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?min-block-size:\s*0;[\s\S]*?overflow:\s*hidden;/);
+  assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-stage\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?min-block-size:\s*0;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overflow-x:\s*hidden;/);
   assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-config-page\s*\{[\s\S]*?display:\s*flex;[\s\S]*?min-block-size:\s*0;/);
+  assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-config-view:not\(\[hidden\]\)\s*\{[\s\S]*?display:\s*flex;[\s\S]*?flex:\s*0 1 auto;[\s\S]*?flex-direction:\s*column;/);
   assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-model-catalog\s*\{[\s\S]*?display:\s*flex;[\s\S]*?flex:\s*0 1 auto;[\s\S]*?flex-direction:\s*column;[\s\S]*?gap:\s*0;[\s\S]*?max-block-size:\s*100%;[\s\S]*?min-block-size:\s*0;/);
   assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-model-catalog__list\s*\{[\s\S]*?flex:\s*0 1 auto;[\s\S]*?block-size:\s*fit-content;[\s\S]*?min-block-size:\s*0;[\s\S]*?max-block-size:\s*calc\(70px \* 4 \+ 7px \* 3 \+ 22px\);[\s\S]*?align-content:\s*start;[\s\S]*?overflow-x:\s*hidden;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overscroll-behavior:\s*contain;[\s\S]*?scrollbar-gutter:\s*stable;/);
   assert.match(css, /@media \(min-width: 721px\) and \(max-width: 900px\)\s*\{[\s\S]*?body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-model-row\s*\{[\s\S]*?min-block-size:\s*92px;/);
@@ -285,6 +348,11 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(css, /\.b-model-row\.is-dragging::after[\s\S]*?border:\s*1px dashed/);
   assert.match(css, /\.b-model-row\.is-drop-target::after[\s\S]*?border:\s*2px dashed var\(--b-accent\)/);
   assert.doesNotMatch(css, /\.b-model-catalog__list\s*\{[^}]*overflow:\s*visible;/);
+  assert.match(css, /\.b-model-editor__efforts\s*\{[\s\S]*?grid-template-columns:\s*repeat\(6, max-content\);[\s\S]*?justify-content:\s*space-between;/);
+  assert.match(css, /\.b-model-editor__efforts label\s*\{[\s\S]*?font-size:\s*0\.62rem;[\s\S]*?white-space:\s*nowrap;/);
+  assert.match(css, /\.b-model-editor__efforts label\s*\{[\s\S]*?min-width:\s*max-content;/);
+  assert.match(css, /\.b-model-dialog__surface\s*\{[\s\S]*?block-size:\s*min\(760px, calc\(100dvh - 28px\)\);[\s\S]*?grid-template-rows:\s*auto minmax\(0, 1fr\) auto auto;/);
+  assert.match(css, /\.b-model-discovery__list\s*\{[\s\S]*?min-height:\s*0;[\s\S]*?max-height:\s*none;[\s\S]*?overflow-y:\s*auto;/);
   assert.match(css, /\.b-transport-toggle\s*\{[\s\S]*?border:\s*1px solid var\(--b-line\);/);
   assert.match(css, /\.b-transport-toggle__option\[aria-pressed="true"\]\s*\{[\s\S]*?color:\s*var\(--b-accent\);[\s\S]*?background:\s*var\(--b-accent-soft\);/);
   assert.match(css, /\.b-transport-toggle__option:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--b-accent\);/);
@@ -317,20 +385,24 @@ test("模型目录支持上游发现、编辑向导与完整能力字段", async
   assert.doesNotMatch(html, /<legend>输入与工具<\/legend>|<legend>服务与协议<\/legend>/);
   assert.match(app, /discover_model_catalog/);
   assert.match(app, /MODEL_REASONING_OPTIONS/);
-  assert.match(app, /MODEL_REASONING_OPTIONS = \["low", "medium", "high", "xhigh", "max", "ultra"\][\s\S]*supportedReasoningLevels: MODEL_REASONING_OPTIONS\.map/);
+  assert.match(app, /MODEL_CONTEXT_DEFAULT = 275_000/);
+  assert.match(app, /MODEL_REASONING_OPTIONS = \["low", "medium", "high", "xhigh", "max", "ultra"\]/);
+  assert.match(app, /function renderEditorEffortOptions[\s\S]*MODEL_REASONING_OPTIONS\.map/);
+  assert.match(app, /supportedReasoningLevels: \[\{ effort: "low", description: "" \}, \{ effort: "medium", description: "" \}, \{ effort: "high", description: "" \}, \{ effort: "xhigh", description: "" \}\]/);
   assert.match(app, /defaultReasoningLevel: "high"/);
   assert.match(app, /effectiveContextWindowPercent: 95/);
   assert.match(app, /truncationPolicy: "auto"/);
-  assert.match(app, /inputModalities: \["text", "image"\]/);
-  assert.match(app, /supportsSearchTool: true/);
-  assert.match(app, /supportsParallelToolCalls: true/);
-  assert.match(app, /useResponsesLite: true/);
+  assert.match(app, /inputModalities: \["text"\]/);
+  assert.match(app, /supportsSearchTool: false/);
+  assert.match(app, /supportsParallelToolCalls: false/);
+  assert.match(app, /useResponsesLite: false/);
   assert.match(app, /sourceMarkup = source \?/);
   assert.match(app, /updates = catalogModels\(\)\.map\(\(model, priority\) => \(\{ slug: model\.slug, visibility: model\.visibility, priority: priority \+ 1 \}\)\)/);
   assert.match(app, /persistModelEntry[\s\S]*save_model_settings/);
   assert.doesNotMatch(app, /catalogFullDirty|const saveFull/);
   const catalogMarkup = app.slice(app.indexOf("function modelCatalogMarkup"), app.indexOf("function catalogRows"));
   assert.doesNotMatch(catalogMarkup, /model\.description|modelReasoningLabel|模板/);
+  assert.doesNotMatch(catalogMarkup, /b-model-row__priority/);
   assert.match(app, /data-model-source/);
   assert.match(rust, /discover_model_catalog/);
   assert.match(rust, /CatalogModelUpdate/);

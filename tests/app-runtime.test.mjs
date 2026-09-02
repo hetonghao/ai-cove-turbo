@@ -54,15 +54,17 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
-async function catalogHarness({ failSave = false, policyReason = null, freshStatus = false } = {}) {
+async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models } = {}) {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const catalog = {
     path: "/home/test/.codex/model-catalogs/ai_cove_turbo.json",
     state: "owned",
     sourcePath: "/home/test/models.json",
     models: [
-      { slug: "alpha", displayName: "Alpha", description: "a", visibility: "list", priority: 1, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }, { effort: "high", description: "" }], defaultReasoningLevel: "high", inputModalities: ["text", "image"], supportsSearchTool: true, supportsParallelToolCalls: true, supportsImageDetailOriginal: true, useResponsesLite: true, serviceTiers: [{ id: "priority", name: "Fast", description: "" }] },
-      { slug: "beta", displayName: "Beta", description: "b", visibility: "hide", priority: 2 },
+      ...(models || [
+        { slug: "alpha", displayName: "Alpha", description: "a", visibility: "list", priority: 1, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }, { effort: "high", description: "" }], defaultReasoningLevel: "high", inputModalities: ["text", "image"], supportsSearchTool: true, supportsParallelToolCalls: true, supportsImageDetailOriginal: true, useResponsesLite: true, serviceTiers: [{ id: "priority", name: "Fast", description: "" }] },
+        { slug: "beta", displayName: "Beta", description: "b", visibility: "hide", priority: 2 },
+      ]),
     ],
     changes: [],
     restartRequired: false,
@@ -78,6 +80,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     transportCapabilities: {
       alpha: { transport: "websocket", reasonCode: "ok" },
       beta: { transport: "http", reasonCode: "no_responses_websocket_channel" },
+      ...capabilityOverrides,
     },
   };
   const info = element({ modelCatalogInfo: "" });
@@ -114,6 +117,10 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
   });
   const message = element({ modelCatalogMessage: "" });
   const restart = element({ modelCatalogRestart: "" });
+  const catalogActions = element({ modelCatalogActions: "" });
+  catalogActions.hidden = true;
+  const draftActions = element({ modelCatalogDraftActions: "" });
+  draftActions.hidden = true;
   const editorError = element({ modelEditorError: "" });
   const editorFields = new Map();
   const editorSources = new Map();
@@ -145,6 +152,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
   ["slug", "displayName", "description", "max-context-window", "context-window", "reasoning-effort", "transport"].forEach((name) => {
     const field = element({ modelField: name });
     field.type = name === "context-window" ? "range" : "text";
+    field.matches = (selector) => selector.includes(`[data-model-field="${name}"]`);
     editorFields.set(name, field);
   });
   editorFields.set("context-value", element({ modelContextValue: "" }));
@@ -171,6 +179,11 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     target.closest = (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-action]" ? target : null;
     return target;
   });
+  const menuActions = ["create-model", "discover-models"].map((action) => {
+    const target = element({ action });
+    target.closest = (selector) => selector === "[data-action]" ? target : null;
+    return target;
+  });
   restartControl.closest = (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-action]" ? restartControl : null;
   actions.push(restartControl);
   const selectors = new Map([
@@ -178,6 +191,8 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     ["[data-model-catalog-list]", list],
     ["[data-model-catalog-message]", message],
     ["[data-model-catalog-restart]", restart],
+    ["[data-model-catalog-actions]", catalogActions],
+    ["[data-model-catalog-draft-actions]", draftActions],
     ["[data-model-editor]", editorRoot],
     ["[data-model-editor] h2", element()],
     ["[data-model-editor-summary]", element()],
@@ -193,9 +208,13 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
       if (failSave) throw new Error("save failed");
       return { ...catalog, models: args.updates, restartRequired: true, loaded: false, revision: "revision-2" };
     }
+    if (command === "discover_model_catalog") {
+      if (failDiscovery) throw new Error("discovery failed");
+      return { models: [], scope: "current_key", sourceVersion: "preview" };
+    }
     if (command === "save_model_settings") {
       if (failSave) throw new Error("save failed");
-      if (args.models.some((model) => !model.contextWindow || !model.maxContextWindow || !model.supportedReasoningLevels?.length)) throw new Error("incomplete model rejected");
+      if (args.models.some((model) => !model.contextWindow || !model.maxContextWindow || !model.supportedReasoningLevels?.length || Number(model.autoCompactTokenLimit) > Number(model.contextWindow) * 0.9)) throw new Error("invalid context settings rejected");
       const models = status.catalog.models.map((model) => args.models.find((candidate) => candidate.slug === model.slug) || model);
       return { catalog: { ...status.catalog, models, restartRequired: true, loaded: false, revision: "revision-2" }, modelPolicy: args.policy };
     }
@@ -238,7 +257,7 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     message,
     catalogRenders() { return catalogRenders; },
     async click(action) {
-      listeners.get("click")?.({ target: actions.find((target) => target.dataset.action === action) });
+      listeners.get("click")?.({ target: [...actions, ...menuActions].find((target) => target.dataset.action === action) });
       await new Promise((resolve) => setImmediate(resolve));
     },
     editModel(slug = "alpha") {
@@ -255,7 +274,14 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
     clickEditorUndo() {
       listeners.get("click")?.({ target: editorActions.get("undo") });
     },
+    editorActionDisabled(name) { return editorActions.get(name)?.disabled; },
     editorField(name) { return editorFields.get(name); },
+    inputEditor(name, value) {
+      const field = editorFields.get(name);
+      if (value !== undefined) field.value = String(value);
+      listeners.get("input")?.({ target: field });
+    },
+    editorSource(name) { return editorSources.get(name); },
     editorError() { return editorError.textContent || ""; },
     selectConfigView(view) {
       listeners.get("click")?.({ target: configViewButtons.find((target) => target.dataset.configView === view) });
@@ -310,8 +336,12 @@ async function catalogHarness({ failSave = false, policyReason = null, freshStat
       listeners.get("click")?.({ target: { closest: (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-model-visibility-toggle]" ? button : null } });
     },
     disabled(action) { return actions.find((target) => target.dataset.action === action)?.disabled; },
+    visible(action) { return actions.find((target) => target.dataset.action === action)?.hidden === false; },
+    catalogActionsVisible() { return catalogActions.hidden === false; },
+    draftActionsVisible() { return draftActions.hidden === false; },
     restartRequired() { return restartControl.dataset.required === "true"; },
     restartVisible() { return restart.hidden === false; },
+    catalogState() { return status.catalog.state; },
     order() { return [...domOrder]; },
     async tick() {
       await tick?.();
@@ -349,6 +379,10 @@ test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界",
   const saved = await catalogHarness();
   assert.equal(saved.disabled("save-model-settings"), true);
   assert.equal(saved.disabled("undo-model-settings"), true);
+  assert.equal(saved.visible("save-model-settings"), false);
+  assert.equal(saved.visible("undo-model-settings"), false);
+  assert.equal(saved.catalogActionsVisible(), false);
+  assert.equal(saved.draftActionsVisible(), false);
   assert.match(saved.info.title, /模型候选源文件：\/home\/test\/\.codex\/model-catalogs\/ai_cove_turbo\.json/);
   assert.match(saved.info.dataset.tooltip, /模型候选源文件：\/home\/test\/\.codex\/model-catalogs\/ai_cove_turbo\.json/);
   saved.dragRow("alpha", "beta");
@@ -356,6 +390,10 @@ test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界",
   saved.toggleVisibility("alpha");
   saved.drag("alpha", "beta");
   assert.equal(saved.disabled("save-model-settings"), false);
+  assert.equal(saved.visible("save-model-settings"), true);
+  assert.equal(saved.visible("undo-model-settings"), true);
+  assert.equal(saved.catalogActionsVisible(), true);
+  assert.equal(saved.draftActionsVisible(), true);
   await saved.click("save-model-settings");
   const save = saved.calls.find((call) => call.command === "update_model_catalog");
   assert.deepEqual(save.args.updates.map(({ slug, visibility, priority }) => ({ slug, visibility, priority })), [
@@ -365,11 +403,19 @@ test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界",
   assert.equal(save.args.expectedRevision, "revision-1");
   assert.equal(saved.restartVisible(), true);
   assert.equal(saved.restartRequired(), true);
+  assert.equal(saved.visible("save-model-settings"), false);
+  assert.equal(saved.visible("undo-model-settings"), false);
+  assert.equal(saved.catalogActionsVisible(), true);
+  assert.equal(saved.draftActionsVisible(), false);
 
   const cancelled = await catalogHarness();
   cancelled.toggleVisibility("alpha");
   await cancelled.click("undo-model-settings");
   assert.equal(cancelled.disabled("save-model-settings"), true);
+  assert.equal(cancelled.visible("save-model-settings"), false);
+  assert.equal(cancelled.visible("undo-model-settings"), false);
+  assert.equal(cancelled.catalogActionsVisible(), false);
+  assert.equal(cancelled.draftActionsVisible(), false);
   await cancelled.click("save-model-settings");
   const cancelledSave = cancelled.calls.find((call) => call.command === "update_model_catalog");
   assert.equal(cancelledSave, undefined);
@@ -498,6 +544,138 @@ test("模型传输策略编辑保存并显示能力摘要", async () => {
   failed.change("alpha", "http");
   await failed.click("save-model-settings");
   assert.match(failed.list.innerHTML, /WS 可用/);
+});
+
+test("允许模型但尚未确认传输通道时显示能力未知", async () => {
+  const harness = await catalogHarness({
+    capabilityOverrides: { alpha: { transport: "unknown", reasonCode: "no_http_channel" } },
+  });
+  assert.match(harness.list.innerHTML, /能力未知/);
+  assert.doesNotMatch(harness.list.innerHTML, /不可用/);
+});
+
+test("上游发现失败不应把模型目录标记为保存错误", async () => {
+  const harness = await catalogHarness({ failDiscovery: true });
+  await harness.click("discover-models");
+  assert.equal(harness.catalogState(), "owned");
+  assert.doesNotMatch(harness.message.textContent, /模型候选目录未能保存/);
+});
+
+test("模型上下文待确认时不再显示额外提示", async () => {
+  const harness = await catalogHarness();
+  assert.equal(harness.message.textContent, "");
+});
+
+test("新建模型默认模板可直接通过完整性校验", async () => {
+  const harness = await catalogHarness();
+  await harness.click("create-model");
+  harness.editorField("slug").value = "gamma";
+  harness.editorField("displayName").value = "Gamma";
+  await harness.saveEditor();
+
+  const save = harness.calls.find((call) => call.command === "save_model_settings");
+  assert.ok(save, harness.editorError());
+  const model = save.args.models.find((candidate) => candidate.slug === "gamma");
+  assert.equal(model.contextWindow, 275000);
+  assert.equal(model.maxContextWindow, 275000);
+  assert.equal(JSON.stringify(model.supportedReasoningLevels), JSON.stringify([
+    { effort: "low", description: "" },
+    { effort: "medium", description: "" },
+    { effort: "high", description: "" },
+    { effort: "xhigh", description: "" },
+  ]));
+  assert.equal(model.defaultReasoningLevel, "high");
+  assert.equal(harness.editorField("reasoning-effort").value, "high");
+  assert.doesNotMatch(harness.editorError(), /待确认/);
+  assert.equal(harness.editorSource("contextWindow").textContent, "来源：模板");
+  assert.equal(harness.editorSource("maxContextWindow").textContent, "来源：模板");
+  assert.equal(harness.editorSource("supportedReasoningLevels").textContent, "来源：模板");
+});
+
+test("异常模型上下文窗口在编辑器中应先钳制到最大值并可保存", async () => {
+  const harness = await catalogHarness({
+    models: [{
+      slug: "ox-alpha",
+      displayName: "ox-alpha",
+      description: "异常上下文模型",
+      visibility: "list",
+      priority: 1,
+      contextWindow: 1_000_000,
+      maxContextWindow: 950_000,
+      autoCompactTokenLimit: 900_000,
+      supportedReasoningLevels: [{ effort: "low", description: "" }, { effort: "medium", description: "" }],
+      defaultReasoningLevel: "medium",
+    }],
+  });
+
+  harness.editModel("ox-alpha");
+  assert.equal(harness.editorField("context-window").value, "950000");
+  await harness.saveEditor();
+  const save = harness.calls.find((call) => call.command === "save_model_settings");
+  assert.ok(save, harness.editorError());
+  const model = save.args.models.find((candidate) => candidate.slug === "ox-alpha");
+  assert.equal(model.contextWindow, 950000);
+  assert.equal(model.maxContextWindow, 950000);
+  assert.equal(model.autoCompactTokenLimit, 855000);
+});
+
+test("模型保存成功后再次编辑仍可提交新的修改", async () => {
+  const harness = await catalogHarness();
+  harness.editModel("alpha");
+  harness.editorField("displayName").value = "Alpha first";
+  await harness.saveEditor();
+  harness.editModel("alpha");
+  assert.equal(harness.editorField("displayName").value, "Alpha first");
+  harness.editorField("displayName").value = "Alpha second";
+  await harness.saveEditor();
+  const saves = harness.calls.filter((call) => call.command === "save_model_settings");
+  assert.equal(saves.length, 2);
+  assert.equal(saves[1].args.models.find((model) => model.slug === "alpha").displayName, "Alpha second");
+});
+
+test("模型保存后状态轮询再编辑仍使用最新目录 revision", async () => {
+  const harness = await catalogHarness({ freshStatus: true });
+  harness.editModel("alpha");
+  harness.editorField("displayName").value = "Alpha first";
+  await harness.saveEditor();
+  await harness.tick();
+  harness.editModel("alpha");
+  harness.editorField("displayName").value = "Alpha second";
+  await harness.saveEditor();
+  const saves = harness.calls.filter((call) => call.command === "save_model_settings");
+  assert.equal(saves.length, 2);
+  assert.equal(harness.editorError(), "");
+});
+
+test("模型首次保存后再次打开编辑器应恢复保存按钮", async () => {
+  const harness = await catalogHarness();
+  harness.editModel("alpha");
+  harness.editorField("displayName").value = "Alpha first";
+  await harness.saveEditor();
+  harness.editModel("alpha");
+  assert.equal(harness.editorActionDisabled("save"), false);
+  assert.equal(harness.editorActionDisabled("undo"), false);
+});
+
+test("模型保存失败后仍可继续修正并重试", async () => {
+  const harness = await catalogHarness({ failSave: true });
+  harness.editModel("alpha");
+  harness.editorField("displayName").value = "Alpha retry";
+  await harness.saveEditor();
+  assert.equal(harness.editorActionDisabled("save"), false);
+  assert.equal(harness.editorActionDisabled("undo"), false);
+});
+
+test("拖动当前上下文滑块应同步显示并保存对应阈值", async () => {
+  const harness = await catalogHarness();
+  harness.editModel("alpha");
+  harness.inputEditor("context-window", 400000);
+  assert.equal(harness.editorField("context-window").value, "400000");
+  assert.equal(harness.editorField("context-value").textContent, "400,000 tokens");
+  await harness.saveEditor();
+  const model = harness.calls.find((call) => call.command === "save_model_settings").args.models.find((candidate) => candidate.slug === "alpha");
+  assert.equal(model.contextWindow, 400000);
+  assert.equal(model.autoCompactTokenLimit, 360000);
 });
 
 test("策略文件读取失败时在模型候选区保留可执行提示", async () => {
@@ -1049,6 +1227,63 @@ test("没有近期 WebSocket 成功证据时保留通用 HTTP 降级提示", asy
   assert.equal(title.textContent, "Codex 可能仍在使用 HTTP");
   assert.match(message.textContent, /部分任务近期持续未建立 WebSocket/);
   assert.equal(action.dataset.action, "restart-codex");
+});
+
+test("HTTP AI Cove 上游显示 HTTPS 修复提示而不是离线故障", async () => {
+  // Given: 当前上游是 AI Cove 域名，但配置使用了 HTTP，服务尚未启动。
+  const { action, message, recovery, title } = await liveRecoveryHarness({
+    serviceHealthy: false,
+    configState: "needs_https",
+    configMessage: "当前上游 http://long-api.ai-cove.com 使用 HTTP，请改为 HTTPS 后重试接管",
+    aiCoveUpstream: true,
+    upstream: "http://long-api.ai-cove.com",
+  });
+
+  // When: Turbo 渲染配置前置条件失败状态。
+  // Then: 用户看到可执行的 HTTPS 修复和重试动作，而不是“本地服务离线”。
+  assert.equal(recovery.hidden, false);
+  assert.equal(title.textContent, "上游需要 HTTPS");
+  assert.match(message.textContent, /请改为 HTTPS/);
+  assert.equal(action.dataset.action, "retry-takeover");
+});
+
+test("HTTP AI Cove 上游的聚合状态使用待调整而不是阻塞或离线", async () => {
+  // Given: 后端明确报告需要 HTTPS，服务尚未启动。
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  const service = element({ state: "service-runtime", status: "waiting" });
+  const servicePrerequisite = element({ state: "service-prerequisite", status: "waiting" });
+  const http = element({ state: "http-status", status: "waiting" });
+  const stateNodes = [service, servicePrerequisite, http];
+  const document = {
+    readyState: "complete",
+    body: element(),
+    addEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll(selector) { return selector === "[data-state]" ? stateNodes : []; },
+  };
+  const window = {
+    __TAURI__: { core: { invoke: async () => ({
+      serviceHealthy: false,
+      configState: "needs_https",
+      configMessage: "当前上游使用 HTTP，请改为 HTTPS 后重试接管",
+    }) } },
+    location: { href: "tauri://localhost/?tab=live" },
+    history: { replaceState() {} },
+    addEventListener() {},
+    setInterval() {},
+  };
+
+  // When: Turbo 渲染状态聚合字段。
+  await runApp(source, { document, Error, window, URL, Intl });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // Then: 所有相关聚合项都是待调整/等待配置，不显示阻塞或离线色。
+  assert.equal(service.textContent, "需要调整");
+  assert.equal(service.dataset.status, "required");
+  assert.equal(servicePrerequisite.textContent, "待调整");
+  assert.equal(servicePrerequisite.dataset.status, "required");
+  assert.equal(http.textContent, "等待配置");
+  assert.equal(http.dataset.status, "required");
 });
 
 test("最新 Responses 请求已恢复 WebSocket 时不再提示重启", async () => {
@@ -2294,6 +2529,8 @@ test("最新版检查完成后显示已检查和 Turbo 已是最新", async () =
   checkUpdate.closest = (selector) => selector === "[data-action]" ? checkUpdate : null;
   const updateState = element({ state: "update-state" });
   const updateMessage = element({ state: "update-message" });
+  const currentMark = element({ updateCurrentMark: "" });
+  currentMark.hidden = true;
   const document = {
     hidden: false,
     readyState: "complete",
@@ -2301,7 +2538,9 @@ test("最新版检查完成后显示已检查和 Turbo 已是最新", async () =
     addEventListener(type, handler) {
       if (type === "click") onClick = handler;
     },
-    querySelector() { return null; },
+    querySelector(selector) {
+      return selector === "[data-update-current-mark]" ? currentMark : null;
+    },
     querySelectorAll(selector) {
       if (selector === "[data-action]") return [checkUpdate];
       if (selector === "[data-state]") return [updateState, updateMessage];
@@ -2329,6 +2568,8 @@ test("最新版检查完成后显示已检查和 Turbo 已是最新", async () =
 
   assert.equal(updateState.textContent, "已检查");
   assert.equal(updateMessage.textContent, "Turbo 已是最新");
+  assert.equal(currentMark.hidden, false);
+  assert.equal(currentMark.classList.contains("is-entering"), true);
 });
 
 test("安装更新期间持续读取并展示下载进度", async () => {

@@ -21,17 +21,18 @@
   const HTTP_DEGRADATION_MIN_SPAN_MS = 30_000;
   const HTTP_DEGRADATION_MIN_REQUESTS = 5;
   const MODEL_CONTEXT_MIN = 125_000;
+  const MODEL_CONTEXT_DEFAULT = 275_000;
   const MODEL_REASONING_OPTIONS = ["low", "medium", "high", "xhigh", "max", "ultra"];
   const DEFAULT_MODEL_CAPABILITIES = Object.freeze({
-    inputModalities: ["text", "image"],
-    supportsSearchTool: true,
-    supportsParallelToolCalls: true,
-    supportsImageDetailOriginal: true,
-    toolMode: "code_mode_only",
+    inputModalities: ["text"],
+    supportsSearchTool: false,
+    supportsParallelToolCalls: false,
+    supportsImageDetailOriginal: false,
+    toolMode: null,
     experimentalSupportedTools: [],
-    serviceTiers: [{ id: "priority", name: "Fast", description: "1.5x speed, increased usage" }],
+    serviceTiers: [],
     defaultServiceTier: null,
-    useResponsesLite: true,
+    useResponsesLite: false,
     preferWebsockets: false,
   });
   const NETWORK_ERROR_MESSAGE = "请求未能连接到 AI Cove 上游，疑似当前网络或代理异常。\n请尝试切换手机热点排查，如果无法定位请联管理员。";
@@ -239,8 +240,11 @@
   let connectionPanelTrigger = null;
   let connectionDockOffset = 0;
   let aiCoveBubbleOpen = false;
+  let routeResetOpen = false;
+  let routeResetTrigger = null;
   let updateBubbleOpen = !invoke;
   let updateCheckInFlight = false;
+  let renderedUpdateState = null;
   let updatePreference = readUpdatePreference();
   if (invoke && updatePreference.checkedDay === updateDayKey() && updatePreference.lastState) {
     state.updateState = updatePreference.lastState;
@@ -268,6 +272,7 @@
     "retry-takeover": ["retry_takeover"],
     "set-ai-cove-upstream": ["set_ai_cove_upstream"],
     "confirm-non-ai-cove": ["confirm_non_ai_cove"],
+    "reset-route-metrics": ["reset_route_metrics"],
     "check-for-updates": ["check_for_updates"],
     "install-update": ["install_update"],
   };
@@ -276,6 +281,7 @@
   let renderedModelCatalogMarkup = "";
   let modelCatalogActionMessage = "";
   let pendingDeleteSlug = "";
+  let modelDeleteTrigger = null;
   let draggedCatalogSlug = "";
   let draggedCatalogTargetSlug = "";
   let catalogPointerDrag = null;
@@ -354,6 +360,73 @@
     renderUpdateBubble();
   }
 
+  function setRouteResetOpen(open, { restoreFocus = false, trigger = null } = {}) {
+    routeResetOpen = Boolean(open);
+    routeResetTrigger = trigger || routeResetTrigger || $("[data-action='reset-route-metrics']");
+    const bubble = $("[data-route-reset-popover]");
+    if (bubble) bubble.hidden = !routeResetOpen;
+    routeResetTrigger?.setAttribute("aria-expanded", String(routeResetOpen));
+    if (routeResetOpen) {
+      if (bubble && !bubble.dataset.portaled) {
+        document.body.appendChild(bubble);
+        bubble.dataset.portaled = "true";
+      }
+      positionRouteResetPopover();
+      $("[data-action='confirm-route-reset']")?.focus?.();
+    }
+    else if (restoreFocus) routeResetTrigger?.focus?.();
+  }
+
+  function positionRouteResetPopover(trigger = routeResetTrigger, bubble = $("[data-route-reset-popover]")) {
+    if (!trigger || !bubble) return;
+    const triggerRect = trigger.getBoundingClientRect();
+    const bubbleRect = bubble.getBoundingClientRect();
+    const gap = 8;
+    const viewportWidth = window.innerWidth || document.documentElement?.clientWidth || 320;
+    const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || 240;
+    const spaceAbove = triggerRect.top - gap;
+    const spaceBelow = viewportHeight - triggerRect.bottom - gap;
+    const placeAbove = spaceAbove >= bubbleRect.height || spaceAbove >= spaceBelow;
+    const maxTop = Math.max(gap, viewportHeight - bubbleRect.height - gap);
+    const preferredTop = (placeAbove ? triggerRect.top - bubbleRect.height - gap : triggerRect.bottom + gap) - 10;
+    const maxLeft = Math.max(gap, viewportWidth - bubbleRect.width - gap);
+    const left = Math.min(Math.max(gap, triggerRect.right - bubbleRect.width), maxLeft);
+    bubble.style.setProperty("--route-reset-popover-top", `${Math.min(Math.max(gap, preferredTop), maxTop)}px`);
+    bubble.style.setProperty("--route-reset-popover-left", `${left}px`);
+    bubble.dataset.placement = placeAbove ? "above" : "below";
+  }
+
+  function setModelDeleteOpen(slug, trigger = null, { restoreFocus = false } = {}) {
+    const previousTrigger = modelDeleteTrigger;
+    pendingDeleteSlug = String(slug || "");
+    modelDeleteTrigger = trigger || (pendingDeleteSlug ? previousTrigger : null);
+    const bubble = $("[data-model-delete-popover]");
+    if (!bubble) return;
+    if (!pendingDeleteSlug) {
+      bubble.hidden = true;
+      modelDeleteTrigger = null;
+      if (restoreFocus) previousTrigger?.focus?.();
+      return;
+    }
+    const model = catalogModels().find((candidate) => candidate.slug === pendingDeleteSlug);
+    const modelLabel = model?.displayName || pendingDeleteSlug;
+    const title = bubble.querySelector("[data-model-delete-title]");
+    const message = bubble.querySelector("[data-model-delete-message]");
+    if (title) title.textContent = `确认删除「${modelLabel}」？`;
+    if (message) message.textContent = "删除后可从上游重新导入。";
+    if (!bubble.dataset.portaled) {
+      document.body.appendChild(bubble);
+      bubble.dataset.portaled = "true";
+    }
+    bubble.hidden = false;
+    positionRouteResetPopover(modelDeleteTrigger, bubble);
+    $("[data-action='confirm-model-delete']")?.focus?.();
+  }
+
+  function closeModelDeletePopover({ restoreFocus = false } = {}) {
+    setModelDeleteOpen("", null, { restoreFocus });
+  }
+
   function markUpdateCheckedToday() {
     if (!invoke) return;
     writeUpdatePreference({ ...updatePreference, checkedDay: updateDayKey() });
@@ -395,6 +468,7 @@
       warning: "等待确认",
       blocked: "已阻塞",
       conflict: "配置冲突",
+      needs_https: "需要改为 HTTPS",
       restored: "已恢复原配置",
       error: "发生错误",
       missing: "未找到配置",
@@ -439,7 +513,25 @@
     return labels[String(state.updateState).toLowerCase()] ?? state.updateState ?? "未知";
   }
 
+  function renderUpdateCurrentMark() {
+    const mark = $("[data-update-current-mark]");
+    if (!mark) return;
+    const updateState = String(state.updateState).toLowerCase();
+    const isCurrent = updateState === "current";
+    const enteredCurrent = isCurrent && renderedUpdateState !== "current";
+    mark.hidden = !isCurrent;
+    if (!isCurrent) {
+      mark.classList.remove("is-entering");
+    } else if (enteredCurrent) {
+      mark.classList.remove("is-entering");
+      void mark.offsetWidth;
+      mark.classList.add("is-entering");
+    }
+    renderedUpdateState = updateState;
+  }
+
   function activationSummary() {
+    if (String(state.configState).toLowerCase() === "needs_https") return "请先将上游改为 HTTPS";
     if (!state.serviceHealthy) return "本地通道尚未就绪";
     if (!configReady()) return "等待 Turbo 完成配置";
     const codex = String(state.codexState).toLowerCase();
@@ -603,11 +695,12 @@
   function formatState(key) {
     const configState = String(state.configState ?? "unknown").toUpperCase();
     const starting = configState === "STARTING";
+    const needsHttps = configState === "NEEDS_HTTPS";
     const observed = runtimeObserved();
     const values = {
       "runtime-mode": invoke ? "DESKTOP" : "PREVIEW",
-      "service-label": `${invoke ? "AI Cove" : "PREVIEW"} / ${starting ? "正在读取状态" : state.serviceHealthy ? "本地服务正常" : "本地服务异常"}`,
-      "service-title": starting ? "正在读取状态" : state.serviceHealthy ? "已连接并生效" : "通道未就绪",
+      "service-label": `${invoke ? "AI Cove" : "PREVIEW"} / ${starting ? "正在读取状态" : needsHttps ? "上游需要 HTTPS" : state.serviceHealthy ? "本地服务正常" : "本地服务异常"}`,
+      "service-title": starting ? "正在读取状态" : needsHttps ? "请将上游改为 HTTPS" : state.serviceHealthy ? "已连接并生效" : "通道未就绪",
       endpoint: state.endpoint || "—",
       "config-state": formatConfigState(),
       "config-message": state.configMessage || "—",
@@ -624,7 +717,7 @@
       "hybrid-cold-start-http": numberFormatter.format(Number(state.hybridColdStartHttp) || 0),
       "hybrid-recovery-http": numberFormatter.format(Number(state.hybridRecoveryHttp) || 0),
       "hybrid-policy-http": numberFormatter.format(Number(state.hybridPolicyHttp) || 0),
-      "direct-http": numberFormatter.format((Number(state.directHttp) || 0) + (Number(state.hybridPolicyHttp) || 0)),
+      "direct-http": numberFormatter.format(Number(state.directHttp) || 0),
       autostart: state.autostartEnabled ? "开" : "关",
       dock: state.dockVisible ? "开" : "关",
       restart: pendingAction === "restart-codex" || state.codexState === "restarting"
@@ -641,31 +734,37 @@
       "update-state": formatUpdateState(),
       "update-message": state.updateMessage || "—",
       "update-progress": `${Math.max(0, Math.min(100, Number(state.updateProgress) || 0))}%`,
-      "service-runtime": starting ? "正在读取" : state.serviceHealthy ? "正常" : "离线",
+      "service-runtime": starting ? "正在读取" : needsHttps ? "需要调整" : state.serviceHealthy ? "正常" : "离线",
       "restart-runtime": formatCodexState(),
       "http-zstd-runtime": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "已验证" : "待验证",
       "websocket-runtime": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "已验证" : String(state.websocketState).toLowerCase() === "failed" ? "连接失败" : "待验证",
       "websocket-zstd-runtime": !state.websocketEnabled ? "已关闭" : state.websocketZstdVerified ? "已验证" : "待验证",
-      "service-prerequisite": starting ? "检查中" : state.serviceHealthy ? "正常" : "异常",
+      "service-prerequisite": starting ? "检查中" : needsHttps ? "待调整" : state.serviceHealthy ? "正常" : "异常",
       "config-prerequisite": starting ? "检查中" : configReady() ? "已生效" : formatConfigState(),
       "restart-prerequisite": formatCodexState(),
-      "http-status": state.serviceHealthy ? "通道可用" : "通道不可用",
+      "http-status": needsHttps ? "等待配置" : state.serviceHealthy ? "通道可用" : "通道不可用",
       "http-zstd-status": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "压缩已验证" : "等待验证",
-      "websocket-handshake-status": !state.websocketEnabled ? "已关闭" : state.websocketVerified ? "连接已验证" : "等待连接",
-      "websocket-zstd-status": !state.websocketEnabled ? "已关闭" : state.websocketZstdVerified ? "压缩已验证" : "等待验证",
+      "websocket-handshake-status": !state.websocketEnabled ? "已关闭" : needsHttps ? "等待配置" : state.websocketVerified ? "连接已验证" : "等待连接",
+      "websocket-zstd-status": !state.websocketEnabled ? "已关闭" : needsHttps ? "等待配置" : state.websocketZstdVerified ? "压缩已验证" : "等待验证",
       "activation-summary": activationSummary(),
       "observed-state": observed ? "OBSERVED / LIVE" : "OBSERVED / WAITING",
-      "stream-state": starting ? "WAITING" : state.serviceHealthy ? (observed ? "ACTIVE" : "IDLE") : "OFFLINE",
+      "stream-state": starting ? "WAITING" : needsHttps ? "CONFIG_REQUIRED" : state.serviceHealthy ? (observed ? "ACTIVE" : "IDLE") : "OFFLINE",
     };
     return String(values[key] ?? "");
   }
 
   function statusFor(key) {
-    if (key.startsWith("service")) return state.serviceHealthy ? "verified" : String(state.configState).toLowerCase() === "starting" ? "waiting" : "blocked";
-    if (key.startsWith("config")) return configReady() ? "verified" : String(state.configState).toLowerCase() === "starting" ? "waiting" : "blocked";
+    if (key.startsWith("service")) {
+      const configState = String(state.configState).toLowerCase();
+      return state.serviceHealthy ? "verified" : configState === "starting" ? "waiting" : configState === "needs_https" ? "required" : "blocked";
+    }
+    if (key.startsWith("config")) {
+      const configState = String(state.configState).toLowerCase();
+      return configReady() ? "verified" : configState === "starting" ? "waiting" : configState === "needs_https" ? "required" : "blocked";
+    }
     if (key.startsWith("restart")) return codexStatus();
     if (key.startsWith("http-zstd")) return !state.compressionEnabled ? "disabled" : state.compressionVerified ? "verified" : "waiting";
-    if (key === "http-status") return state.serviceHealthy ? "verified" : "blocked";
+    if (key === "http-status") return state.serviceHealthy ? "verified" : String(state.configState).toLowerCase() === "needs_https" ? "required" : "blocked";
     if (key.startsWith("websocket-zstd")) return !state.websocketEnabled ? "disabled" : state.websocketZstdVerified ? "verified" : "waiting";
     if (key.startsWith("websocket")) return !state.websocketEnabled ? "disabled" : state.websocketVerified ? "verified" : String(state.websocketState).toLowerCase() === "failed" ? "blocked" : "waiting";
     return "";
@@ -684,6 +783,15 @@
   function liveRecovery() {
     const configState = String(state.configState).toLowerCase();
     if (configState === "starting" && !state.technicalDetail) return null;
+    if (configState === "needs_https") {
+      return {
+        title: "上游需要 HTTPS",
+        message: state.configMessage || "当前上游使用 HTTP，请改为 HTTPS 后重试接管。",
+        action: "retry-takeover",
+        label: "重试接管",
+        detail: state.technicalDetail,
+      };
+    }
     if (!state.serviceHealthy) {
       return {
         title: "本地服务离线",
@@ -797,7 +905,7 @@
       "non-ai-cove": !state.aiCoveUpstream && !state.aiCoveUpstreamFixAvailable,
       "ai-cove-upstream": Boolean(state.aiCoveUpstreamFixAvailable),
       "confirm-non-ai-cove": configState === "warning" && !state.nonAiCoveConfirmed,
-      retry: !state.aiCoveUpstreamFixAvailable && (configState === "blocked" || (configState === "conflict" && !state.serviceHealthy)),
+      retry: !state.aiCoveUpstreamFixAvailable && (configState === "blocked" || configState === "needs_https" || (configState === "conflict" && !state.serviceHealthy)),
       "install-update": ["available", "downloaded", "downloading", "installing", "error"].includes(updateState),
       "update-progress": ["downloading", "installing"].includes(updateState),
     };
@@ -809,6 +917,8 @@
   function renderControls() {
     const updateState = String(state.updateState).toLowerCase();
     const updateBusy = ["downloading", "installing"].includes(updateState);
+    const dirtyModelSettings = modelSettingsDirty();
+    const modelSettingsBusy = Boolean(pendingAction);
     const pressed = {
       "toggle-compression": state.compressionEnabled,
       "toggle-websocket": state.websocketEnabled,
@@ -819,14 +929,15 @@
       const action = control.dataset.action;
       const managed = Object.hasOwn(actions, action);
       if (action === "save-model-settings" || action === "undo-model-settings") {
-        const dirty = modelSettingsDirty();
+        const dirty = dirtyModelSettings;
         const actionPending = pendingAction === action;
-        control.disabled = Boolean(pendingAction) || !dirty;
+        control.disabled = modelSettingsBusy || !dirty;
+        control.hidden = modelSettingsBusy || !dirty;
         control.dataset.status = actionPending ? "pending" : dirty ? "ready" : "idle";
         control.setAttribute("aria-busy", String(actionPending));
       }
       if (action === "delete-model") {
-        control.disabled = Boolean(pendingAction);
+        control.disabled = modelSettingsBusy;
         control.setAttribute("aria-busy", String(pendingAction === action));
       }
       if (managed) {
@@ -860,6 +971,13 @@
         control.setAttribute("aria-pressed", String(pressed[action]));
       }
     });
+    const showDraftActions = dirtyModelSettings && !modelSettingsBusy;
+    const catalog = $(".b-model-catalog");
+    if (catalog) catalog.dataset.dirty = String(showDraftActions);
+    const draftActions = $("[data-model-catalog-draft-actions]");
+    if (draftActions) draftActions.hidden = !showDraftActions;
+    const catalogActions = $("[data-model-catalog-actions]");
+    if (catalogActions) catalogActions.hidden = !showDraftActions && !Boolean(state.catalog?.restartRequired);
   }
 
   function catalogListSignature(models) {
@@ -930,8 +1048,11 @@
   function capabilityBadge(slug) {
     const capability = state.transportCapabilities?.[slug];
     if (!capability) return '<span class="state-indicator" data-status="waiting">能力未知</span>';
-    const label = capability.transport === "websocket" ? "WS 可用" : capability.transport === "http" ? "压缩 HTTP" : "不可用";
-    return `<span class="state-indicator" data-status="${capability.transport === "unknown" ? "blocked" : "verified"}" title="${escapeHtml(capability.reasonCode || "")}">${label}</span>`;
+    const unavailable = capability.reasonCode === "model_not_allowed";
+    const label = unavailable
+      ? "不可用"
+      : capability.transport === "websocket" ? "WS 可用" : capability.transport === "http" ? "压缩 HTTP" : "能力未知";
+    return `<span class="state-indicator" data-status="${unavailable ? "blocked" : capability.transport === "unknown" ? "waiting" : "verified"}" title="${escapeHtml(capability.reasonCode || "")}">${label}</span>`;
   }
 
   function modelContextLabel(model) {
@@ -953,7 +1074,9 @@
 
   function modelSlugMarkup(model, modelLabel) {
     const normalize = (value) => String(value).toLowerCase().replaceAll(/[^a-z0-9]/g, "");
-    return normalize(model.slug) === normalize(modelLabel) ? "" : '<code>' + escapeHtml(model.slug) + '</code>';
+    return normalize(model.slug) === normalize(modelLabel)
+      ? ""
+      : '<code>' + escapeHtml(model.slug) + '</code>';
   }
 
   function modelTrashIcon() {
@@ -972,7 +1095,7 @@
       const conflict = model.conflicts?.length ? " · 冲突待确认" : "";
       const visible = model.visibility === "list";
       const visibilityLabel = visible ? "隐藏 " + modelLabel : "显示 " + modelLabel;
-      const deleteLabel = pendingDeleteSlug === model.slug ? "再次点击确认删除 " + modelLabel : "删除 " + modelLabel;
+      const deleteLabel = pendingDeleteSlug === model.slug ? "确认删除 " + modelLabel : "删除 " + modelLabel;
       const sourceMarkup = source ? (source === "上游" ? conflict ? '<span class="b-model-row__confirm" data-model-source="' + escapeHtml(source) + '">' + escapeHtml(conflict.slice(3)) + '</span>' : "" : '<span data-model-source="' + escapeHtml(source) + '">' + escapeHtml(source + conflict) + '</span>') : conflict ? '<span class="b-model-row__confirm">' + escapeHtml(conflict.slice(3)) + '</span>' : '';
       return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><span class="b-model-row__identity"><strong>' + escapeHtml(modelLabel) + '</strong>' + modelSlugMarkup(model, modelLabel) + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '<div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div></span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button><button class="b-model-row__delete" type="button" data-action="delete-model" data-model-delete aria-label="' + escapeHtml(deleteLabel) + '" title="' + escapeHtml(deleteLabel) + '">' + modelTrashIcon() + '</button></span></article>';
     }).join("");
@@ -1087,13 +1210,13 @@
       description: "",
       visibility: "list",
       priority: catalogModels().length + 1,
-      contextWindow: null,
-      maxContextWindow: null,
+      contextWindow: MODEL_CONTEXT_DEFAULT,
+      maxContextWindow: MODEL_CONTEXT_DEFAULT,
       effectiveContextWindowPercent: 95,
-      autoCompactTokenLimit: null,
+      autoCompactTokenLimit: Math.floor(MODEL_CONTEXT_DEFAULT * 0.9),
       truncationPolicy: "auto",
-      inputModalities: [...DEFAULT_MODEL_CAPABILITIES.inputModalities],
-      supportedReasoningLevels: MODEL_REASONING_OPTIONS.map((effort) => ({ effort, description: "" })),
+      inputModalities: ["text"],
+      supportedReasoningLevels: [{ effort: "low", description: "" }, { effort: "medium", description: "" }, { effort: "high", description: "" }, { effort: "xhigh", description: "" }],
       defaultReasoningLevel: "high",
       supportsReasoningSummaryParameter: false,
       defaultReasoningSummary: "none",
@@ -1102,9 +1225,9 @@
       fieldSources: {
         slug: "用户",
         displayName: "用户",
-        contextWindow: "待确认",
-        maxContextWindow: "待确认",
-        supportedReasoningLevels: "待确认",
+        contextWindow: "模板",
+        maxContextWindow: "模板",
+        supportedReasoningLevels: "模板",
       },
       conflicts: [],
     };
@@ -1127,6 +1250,7 @@
       range.min = String(MODEL_CONTEXT_MIN);
       range.max = validMaximum ? String(maximum) : String(MODEL_CONTEXT_MIN);
       range.disabled = !validMaximum;
+      range.style?.setProperty?.("--range-progress", "0%");
     }
     if (!validMaximum) {
       if (range) range.value = "125000";
@@ -1139,10 +1263,19 @@
     const current = Math.min(maximum, Math.max(MODEL_CONTEXT_MIN, Number.isFinite(requested) ? requested : maximum));
     if (range) range.value = String(current);
     if (output) output.textContent = Number(current).toLocaleString("zh-CN") + " tokens";
-    if (editorDraft && (editorMode !== "edit" || editorTouchedFields.has("contextWindow") || editorTouchedFields.has("maxContextWindow"))) {
+    if (range) {
+      const progress = maximum === MODEL_CONTEXT_MIN
+        ? 1
+        : (current - MODEL_CONTEXT_MIN) / (maximum - MODEL_CONTEXT_MIN);
+      range.style?.setProperty?.("--range-progress", `${Math.max(0, Math.min(1, progress)) * 100}%`);
+    }
+    const compactLimit = Math.floor(current * 0.9);
+    const contextChanged = editorDraft && (editorDraft.contextWindow !== current || editorDraft.maxContextWindow !== maximum);
+    const compactLimitExceeded = editorDraft && Number(editorDraft.autoCompactTokenLimit) > compactLimit;
+    if (editorDraft && (editorMode !== "edit" || editorTouchedFields.has("contextWindow") || editorTouchedFields.has("maxContextWindow") || contextChanged || compactLimitExceeded)) {
       editorDraft.maxContextWindow = maximum;
       editorDraft.contextWindow = current;
-      editorDraft.autoCompactTokenLimit = Math.floor(current * 0.9);
+      editorDraft.autoCompactTokenLimit = compactLimit;
     }
   }
 
@@ -1176,6 +1309,10 @@
 
   function renderModelEditor() {
     if (!editorDraft) return;
+    const saveButton = modelEditorElement('[data-model-editor-action="save"]');
+    const undoButton = modelEditorElement('[data-model-editor-action="undo"]');
+    if (saveButton) saveButton.disabled = false;
+    if (undoButton) undoButton.disabled = false;
     setEditorField("slug", editorDraft.slug);
     setEditorField("displayName", editorDraft.displayName || editorDraft.slug);
     setEditorField("description", editorDraft.description || "");
@@ -1257,7 +1394,9 @@
     const effort = String(read("reasoning-effort")?.value || "");
     const contextTouched = editorMode !== "edit"
       || editorTouchedFields.has("contextWindow")
-      || editorTouchedFields.has("maxContextWindow");
+      || editorTouchedFields.has("maxContextWindow")
+      || editorDraft.contextWindow !== editorOriginal?.contextWindow
+      || editorDraft.maxContextWindow !== editorOriginal?.maxContextWindow;
     const result = {
       ...editorDraft,
       slug,
@@ -1455,6 +1594,8 @@
       return;
     } finally {
       pendingAction = "";
+      if (saveButton) saveButton.disabled = false;
+      if (undoButton) undoButton.disabled = false;
       renderControls();
     }
     closeModelDialog($("[data-model-editor]"));
@@ -1612,6 +1753,7 @@
       const status = statusFor(key);
       if (status) target.dataset.status = status;
     });
+    renderUpdateCurrentMark();
     const updateProgress = Math.max(0, Math.min(100, Number(state.updateProgress) || 0));
     all("[data-state-progress]").forEach((target) => {
       target.style.setProperty("--progress", String(updateProgress / 100));
@@ -1686,6 +1828,7 @@
 
   function selectTab(tab, options = {}) {
     if (!TABS.includes(tab)) return;
+    if (tab !== "live") closeConnectionHoverCard();
     const previousTab = state.tab;
     state.tab = tab;
     renderTab({ ...options, previousTab });
@@ -1751,6 +1894,71 @@
         : Math.max(viewportMargin, viewportHeight - tooltipBounds.height - viewportMargin);
     tooltip.style.setProperty("--c-network-tooltip-left", `${left}px`);
     tooltip.style.setProperty("--c-network-tooltip-top", `${top}px`);
+  }
+
+  let activeConnectionHoverCard = null;
+
+  function closeConnectionHoverCard() {
+    if (!activeConnectionHoverCard) return;
+    document.body?.removeAttribute?.("data-connection-hover-card");
+    activeConnectionHoverCard.card?.remove?.();
+    activeConnectionHoverCard = null;
+  }
+
+  function positionConnectionHoverCard() {
+    const active = activeConnectionHoverCard;
+    if (!active) return;
+    if (!active.trigger?.parentElement || !active.card?.parentElement) {
+      closeConnectionHoverCard();
+      return;
+    }
+    const triggerBounds = active.trigger.getBoundingClientRect();
+    const cardBounds = active.card.getBoundingClientRect();
+    const viewportMargin = 8;
+    const viewportWidth = Number(window.innerWidth) || document.documentElement?.clientWidth || 0;
+    const left = Math.max(viewportMargin, Math.min(triggerBounds.left, viewportWidth - cardBounds.width - viewportMargin));
+    const top = Math.max(viewportMargin, triggerBounds.top - cardBounds.height - 7);
+    active.card.style.setProperty("--c-hover-card-left", `${left}px`);
+    active.card.style.setProperty("--c-hover-card-top", `${top}px`);
+  }
+
+  function syncConnectionHoverCard() {
+    const active = activeConnectionHoverCard;
+    if (!active) return;
+    const source = active.trigger.querySelector?.(".c-hover-card");
+    if (!source) {
+      closeConnectionHoverCard();
+      return;
+    }
+    active.card.innerHTML = source.innerHTML;
+    positionConnectionHoverCard();
+  }
+
+  function openConnectionHoverCard(trigger) {
+    const source = trigger.querySelector?.(".c-hover-card");
+    if (!source || !document.body) return;
+    if (activeConnectionHoverCard?.trigger === trigger) {
+      positionConnectionHoverCard();
+      return;
+    }
+    closeConnectionHoverCard();
+    const card = source.cloneNode?.(true);
+    if (!card) return;
+    card.classList?.add?.("c-hover-card--portal");
+    document.body.appendChild(card);
+    document.body.setAttribute("data-connection-hover-card", "true");
+    activeConnectionHoverCard = { trigger, card };
+    positionConnectionHoverCard();
+    const reveal = () => {
+      if (activeConnectionHoverCard?.card === card) card.classList?.add?.("is-visible");
+    };
+    if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(reveal);
+    else reveal();
+  }
+
+  function closeConnectionHoverCardFor(trigger) {
+    if (!activeConnectionHoverCard || (trigger && activeConnectionHoverCard.trigger !== trigger)) return;
+    closeConnectionHoverCard();
   }
 
   function normalizeConnectionSnapshot(snapshot) {
@@ -2184,6 +2392,7 @@
           ? "正在读取当前 WebSocket 连接…"
           : "";
     }
+    syncConnectionHoverCard();
   }
 
   function setConnectionPanelOpen(open, { restoreFocus = true, trigger = null, fromProgress = null } = {}) {
@@ -2205,6 +2414,7 @@
       panel.style.filter = "";
     }
     connectionPanelOpen = nextOpen;
+    if (!connectionPanelOpen) closeConnectionHoverCard();
     if (connectionPanelOpen && trigger) connectionPanelTrigger = trigger;
     all('[data-action="toggle-connections"]').forEach((control) => {
       control.setAttribute("aria-expanded", String(connectionPanelOpen));
@@ -2670,6 +2880,13 @@
       state.serviceHealthy = true;
     }
     if (command === "confirm_non_ai_cove") state.nonAiCoveConfirmed = true;
+    if (command === "reset_route_metrics") {
+      state.hybridWs = 0;
+      state.hybridColdStartHttp = 0;
+      state.hybridRecoveryHttp = 0;
+      state.directHttp = 0;
+      state.configMessage = "Preview：路径统计已重置";
+    }
     if (command === "check_for_updates") {
       state.updateState = "available";
       state.updateMessage = "Preview：发现可安装的新版本";
@@ -2737,6 +2954,19 @@
       renderLiveStream({ animateNew: false });
       return;
     }
+    if (action === "reset-route-metrics") {
+      if (pendingAction) return;
+      setRouteResetOpen(!routeResetOpen, { trigger: control });
+      return;
+    }
+    if (action === "cancel-route-reset") {
+      setRouteResetOpen(false, { restoreFocus: true });
+      return;
+    }
+    if (action === "confirm-route-reset") {
+      if (pendingAction) return;
+      setRouteResetOpen(false, { restoreFocus: true });
+    }
     if (action === "clear-stream") {
       clearedThroughId = Math.max(clearedThroughId, ...(state.recentRequests ?? []).map((request) => Number(request.id) || 0));
       displayedRequests = [];
@@ -2750,13 +2980,17 @@
       if (pendingAction) return;
       const slug = control?.closest?.("[data-model-slug]")?.dataset.modelSlug;
       if (!slug) return;
-      if (pendingDeleteSlug !== slug) {
-        pendingDeleteSlug = slug;
-        modelCatalogActionMessage = "再次点击垃圾桶确认删除；删除后可从上游重新导入。";
-        renderModelCatalog(true);
-        return;
-      }
-      pendingDeleteSlug = "";
+      setModelDeleteOpen(slug, control);
+      return;
+    }
+    if (action === "cancel-model-delete") {
+      closeModelDeletePopover({ restoreFocus: true });
+      return;
+    }
+    if (action === "confirm-model-delete") {
+      if (pendingAction || !pendingDeleteSlug) return;
+      const slug = pendingDeleteSlug;
+      closeModelDeletePopover();
       await deleteModelEntry(slug);
       return;
     }
@@ -2776,7 +3010,6 @@
         renderDiscoveredModels();
         openModelDialog($("[data-model-discovery]"));
       } catch (error) {
-        state.catalog = { ...state.catalog, state: "error" };
         state.configMessage = "模型发现未完成，请检查当前 Provider 和 API Key。";
         state.technicalDetail = error instanceof Error ? error.message : String(error);
       } finally {
@@ -2830,16 +3063,17 @@
       }
       return;
     }
-    const [command, buildArgs] = actions[action] ?? [];
+    const commandAction = action === "confirm-route-reset" ? "reset-route-metrics" : action;
+    const [command, buildArgs] = actions[commandAction] ?? [];
     if (!command || pendingAction) return;
     const args = buildArgs?.();
-    pendingAction = action;
+    pendingAction = commandAction;
     renderControls();
     try {
       if (invoke) {
         if (command === "check_for_updates") markUpdateCheckedToday();
         const status = await (args ? invoke(command, args) : invoke(command));
-        if (command === "confirm_non_ai_cove") state.nonAiCoveConfirmed = true;
+      if (command === "confirm_non_ai_cove") state.nonAiCoveConfirmed = true;
         applyStatus(status);
       } else applyPreviewAction(command, args);
     } catch (error) {
@@ -2849,6 +3083,8 @@
         } catch {
           state.configMessage = "Codex 重启未完成，请重试。";
         }
+      } else if (command === "retry_takeover") {
+        state.configMessage = error instanceof Error ? error.message : String(error);
       } else {
         state.configMessage = "操作未完成，请按提示重试。";
       }
@@ -3018,15 +3254,21 @@
     const tail = $(".turbo-update-bubble__tail");
     const gradient = $("#turbo-update-tail-glare-gradient");
     if (!slot || !bubble || !glare || !tail || !gradient) return;
+    bindTiltBubble({ bubble, hitArea: slot, glare, tail, gradient, hitAreaTopInset: 16 });
+  }
+
+  function bindTiltBubble({ bubble, hitArea = bubble, glare, tail, gradient, hitAreaTopInset = 0, hitAreaBottomInset = 0, maxTiltDegrees = 14 }) {
+    if (!bubble || !hitArea) return;
     const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
-    const target = { x: 0, y: 0, scale: 1, glareX: 50, glareY: 50, tailX: 12, tailY: 8 };
+    const hasGlareEffect = Boolean(glare || (tail && gradient) || bubble.dataset.tiltGlare === "true");
+    const target = { x: 0, y: 0, scale: 1, glareX: 50, glareY: 50, tailX: 12, tailY: 8, tailGlareX: 50, tailGlareY: 50 };
     const current = { ...target };
     let frame = 0;
     let active = false;
     let lastPointer = null;
     const inside = (clientX, clientY) => {
-      const rect = slot.getBoundingClientRect();
-      return rect.width > 0 && clientX >= rect.left && clientX <= rect.right && clientY >= rect.top - 16 && clientY <= rect.bottom;
+      const rect = hitArea.getBoundingClientRect();
+      return rect.width > 0 && clientX >= rect.left && clientX <= rect.right && clientY >= rect.top - hitAreaTopInset && clientY <= rect.bottom + hitAreaBottomInset;
     };
     const schedule = () => {
       if (!frame) frame = window.requestAnimationFrame(tick);
@@ -3040,39 +3282,55 @@
       current.glareY += (target.glareY - current.glareY) * 0.16;
       current.tailX += (target.tailX - current.tailX) * 0.16;
       current.tailY += (target.tailY - current.tailY) * 0.16;
+      current.tailGlareX += (target.tailGlareX - current.tailGlareX) * 0.16;
+      current.tailGlareY += (target.tailGlareY - current.tailGlareY) * 0.16;
       if (!reducedMotion?.matches) {
         bubble.style.transform = `perspective(800px) rotateX(${current.y}deg) rotateY(${current.x}deg) scale(${current.scale})`;
-        bubble.style.setProperty("--turbo-update-glare-x", `${current.glareX}%`);
-        bubble.style.setProperty("--turbo-update-glare-y", `${current.glareY}%`);
-        bubble.style.setProperty("--turbo-update-tail-glare-opacity", active ? "1" : "0");
-        gradient.setAttribute("cx", String(current.tailX));
-        gradient.setAttribute("cy", String(current.tailY));
-        glare.style.opacity = active ? "1" : "0";
+        if (hasGlareEffect) {
+          bubble.style.setProperty("--tilt-glare-x", `${current.glareX}%`);
+          bubble.style.setProperty("--tilt-glare-y", `${current.glareY}%`);
+          bubble.style.setProperty("--tilt-glare-opacity", active ? "1" : "0");
+          bubble.style.setProperty("--tilt-tail-glare-x", `${current.tailGlareX}%`);
+          bubble.style.setProperty("--tilt-tail-glare-y", `${current.tailGlareY}%`);
+          if (gradient && tail) {
+            gradient.setAttribute("cx", String(current.tailX));
+            gradient.setAttribute("cy", String(current.tailY));
+          }
+          if (glare) glare.style.opacity = active ? "1" : "0";
+        }
       }
       if (active || Math.abs(target.x - current.x) > 0.05 || Math.abs(target.y - current.y) > 0.05 || Math.abs(target.scale - current.scale) > 0.001) schedule();
     }
     const applyPointer = (clientX, clientY) => {
-      if (slot.hidden || reducedMotion?.matches) return;
+      if (hitArea.hidden || reducedMotion?.matches) return;
       const cardRect = bubble.getBoundingClientRect();
-      const tailRect = tail.getBoundingClientRect();
+      const tailRect = tail?.getBoundingClientRect();
       const x = Math.max(0, Math.min(1, (clientX - cardRect.left) / cardRect.width));
       const y = Math.max(0, Math.min(1, (clientY - cardRect.top) / cardRect.height));
       active = true;
       target.scale = 1.025;
-      target.x = (x - 0.5) * 14;
-      target.y = (0.5 - y) * 14;
+      target.x = (x - 0.5) * maxTiltDegrees;
+      target.y = (0.5 - y) * maxTiltDegrees;
       target.glareX = x * 100;
       target.glareY = y * 100;
-      target.tailX = Math.max(0, Math.min(24, ((clientX - tailRect.left) / tailRect.width) * 24));
-      target.tailY = Math.max(0, Math.min(16, ((clientY - tailRect.top) / tailRect.height) * 16));
+      target.tailGlareX = tailRect ? Math.max(0, Math.min(100, ((clientX - tailRect.left) / tailRect.width) * 100)) : 50;
+      target.tailGlareY = tailRect ? Math.max(0, Math.min(100, ((clientY - tailRect.top) / tailRect.height) * 100)) : 50;
+      target.tailX = tailRect ? Math.max(0, Math.min(24, ((clientX - tailRect.left) / tailRect.width) * 24)) : 12;
+      target.tailY = tailRect ? Math.max(0, Math.min(16, ((clientY - tailRect.top) / tailRect.height) * 16)) : 8;
       schedule();
     };
     const reset = () => {
       active = false;
       target.x = 0; target.y = 0; target.scale = 1;
-      target.glareX = 50; target.glareY = 50; target.tailX = 12; target.tailY = 8;
-      bubble.style.setProperty("--turbo-update-tail-glare-opacity", "0");
-      gradient.setAttribute("cx", "12"); gradient.setAttribute("cy", "8"); glare.style.opacity = "0"; schedule();
+      target.glareX = 50; target.glareY = 50; target.tailX = 12; target.tailY = 8; target.tailGlareX = 50; target.tailGlareY = 50;
+      if (hasGlareEffect) {
+        bubble.style.setProperty("--tilt-glare-opacity", "0");
+        if (gradient && tail) {
+          gradient.setAttribute("cx", "12"); gradient.setAttribute("cy", "8");
+        }
+        if (glare) glare.style.opacity = "0";
+      }
+      schedule();
     };
     const handleMove = (event) => {
       if (event.pointerType === "touch" || reducedMotion?.matches) return;
@@ -3093,6 +3351,14 @@
     state.configView = readConfigView();
     syncLiveRequests();
     const editorDialog = $("[data-model-editor]");
+    const advancedEditor = editorDialog?.querySelector?.(".b-model-editor__advanced");
+    advancedEditor?.addEventListener?.("toggle", () => {
+      if (!advancedEditor.open) return;
+      const firstField = advancedEditor.querySelector?.(".b-model-editor__advanced-body > .b-model-editor__field");
+      const reveal = () => firstField?.scrollIntoView?.({ block: "nearest", behavior: "auto" });
+      if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(reveal);
+      else reveal();
+    });
     editorDialog?.addEventListener?.("cancel", () => {
       if (editorDraft) editorDraft = readModelEditor();
     });
@@ -3174,6 +3440,8 @@
       }
       const action = event.target.closest?.("[data-action]");
       if (action) void handleAction(action.dataset.action, action);
+      if (routeResetOpen && !event.target.closest?.("[data-route-reset], [data-route-reset-popover]")) setRouteResetOpen(false);
+      if (pendingDeleteSlug && !event.target.closest?.("[data-model-delete], [data-model-delete-popover]")) closeModelDeletePopover();
       if (aiCoveBubbleOpen && !event.target.closest?.("[data-ai-cove-popover]")) setAiCoveBubbleOpen(false);
       const tab = event.target.closest?.("[data-tab]");
       if (tab) selectTab(tab.dataset.tab);
@@ -3181,15 +3449,23 @@
     document.addEventListener("pointerover", (event) => {
       const trigger = event.target.closest?.(".c-transport__detail");
       if (trigger) openNetworkTooltip(trigger);
+      const connectionTrigger = event.target.closest?.(".c-connection-chip, .c-connection-session__summary");
+      if (connectionTrigger) openConnectionHoverCard(connectionTrigger);
     });
     document.addEventListener("pointerout", (event) => {
       const trigger = event.target.closest?.(".c-transport__detail");
       if (trigger && !trigger.contains?.(event.relatedTarget)) closeNetworkTooltip(trigger);
+      const connectionTrigger = event.target.closest?.(".c-connection-chip, .c-connection-session__summary");
+      if (connectionTrigger && !connectionTrigger.contains?.(event.relatedTarget)) closeConnectionHoverCardFor(connectionTrigger);
     });
     window.addEventListener("resize", () => {
       const detail = document.activeElement?.closest?.(".c-transport__detail");
       if (detail) positionNetworkTooltip(detail);
+      positionConnectionHoverCard();
+      if (routeResetOpen) positionRouteResetPopover();
+      if (pendingDeleteSlug) positionRouteResetPopover(modelDeleteTrigger, $("[data-model-delete-popover]"));
     }, { passive: true });
+    document.addEventListener("scroll", positionConnectionHoverCard, { passive: true, capture: true });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && aiCoveBubbleOpen) {
         setAiCoveBubbleOpen(false, { restoreFocus: true });
@@ -3197,6 +3473,14 @@
       }
       if (event.key === "Escape" && connectionPanelOpen) {
         setConnectionPanelOpen(false);
+        return;
+      }
+      if (event.key === "Escape" && routeResetOpen) {
+        setRouteResetOpen(false, { restoreFocus: true });
+        return;
+      }
+      if (event.key === "Escape" && pendingDeleteSlug) {
+        closeModelDeletePopover({ restoreFocus: true });
         return;
       }
       const chartSlot = event.target.closest?.(".c-bar-slot");
@@ -3209,6 +3493,8 @@
     document.addEventListener("focusin", (event) => {
       const networkTrigger = event.target.closest?.(".c-transport__detail");
       if (networkTrigger) openNetworkTooltip(networkTrigger);
+      const connectionTrigger = event.target.closest?.(".c-connection-chip, .c-connection-session__summary");
+      if (connectionTrigger) openConnectionHoverCard(connectionTrigger);
       const chartSlot = event.target.closest?.(".c-bar-slot");
       if (!chartSlot) return;
       const slots = Array.from(all("[data-stat-bars] .c-bar-slot"));
@@ -3218,6 +3504,8 @@
     document.addEventListener("focusout", (event) => {
       const trigger = event.target.closest?.(".c-transport__detail");
       if (trigger && !trigger.contains?.(event.relatedTarget)) closeNetworkTooltip(trigger);
+      const connectionTrigger = event.target.closest?.(".c-connection-chip, .c-connection-session__summary");
+      if (connectionTrigger && !connectionTrigger.contains?.(event.relatedTarget)) closeConnectionHoverCardFor(connectionTrigger);
     });
     document.addEventListener("change", (event) => {
       markEditorFieldTouched(event.target);
@@ -3334,6 +3622,9 @@
     bindConnectionDock();
     bindDotField();
     bindUpdateBubble();
+    bindTiltBubble({ bubble: $("[data-route-reset-popover]"), hitArea: $("[data-route-reset-popover]"), tail: $(".c-route-reset-popover__tail"), gradient: $("#turbo-update-tail-glare-gradient"), glare: null, hitAreaTopInset: 12, hitAreaBottomInset: 12 });
+    bindTiltBubble({ bubble: $("[data-model-delete-popover]"), hitArea: $("[data-model-delete-popover]"), maxTiltDegrees: 14 });
+    all("[data-tilt-only]").forEach((bubble) => bindTiltBubble({ bubble, hitArea: bubble, maxTiltDegrees: 7 }));
     renderTab();
     renderState();
     renderConnectionInspector();

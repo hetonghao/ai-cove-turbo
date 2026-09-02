@@ -8,7 +8,7 @@
     <title>AI Cove Turbo</title>
     <script>if (window.__TAURI__ && /Macintosh/.test(navigator.userAgent)) document.documentElement.classList.add("is-macos-overlay");</script>
     <link rel="icon" type="image/png" href="./assets/turbo-icon.png" />
-    <link rel="stylesheet" href="./styles.css?catalog-editor=compact-actions-3" />
+    <link rel="stylesheet" href="./styles.css?catalog-editor=delete-popover-1" />
   </head>
   <body>
     <a class="sr-only" href="#main-content">跳到主要内容</a>
@@ -24,7 +24,7 @@
           </span>
           <span class="turbo-shell__brand-copy"><strong>Turbo</strong><small>AI Cove</small></span>
           <div class="turbo-update-bubble-slot" data-update-bubble-slot hidden>
-            <aside class="turbo-update-bubble" data-update-bubble aria-label="Turbo 更新提示">
+            <aside class="turbo-update-bubble turbo-tilt-bubble" data-update-bubble aria-label="Turbo 更新提示">
               <span class="turbo-update-bubble__glare" data-update-glare aria-hidden="true"></span>
               <svg class="turbo-update-bubble__tail" viewBox="0 0 24 16" aria-hidden="true">
                 <defs>
@@ -42,8 +42,8 @@
               <h2>更新已准备好🎉</h2>
               <p data-update-bubble-message>发现可安装的新版本。</p>
               <div class="turbo-update-bubble__actions">
-                <button class="turbo-update-bubble__install" type="button" data-action="install-update-bubble">立即更新</button>
-                <button class="turbo-update-bubble__ignore" type="button" data-action="ignore-update-bubble">忽略</button>
+                <button class="turbo-bubble-action turbo-bubble-action--primary" type="button" data-action="install-update-bubble">立即更新</button>
+                <button class="turbo-bubble-action turbo-bubble-action--secondary" type="button" data-action="ignore-update-bubble">忽略</button>
               </div>
             </aside>
           </div>
@@ -78,12 +78,15 @@
                     <div><dt>PROVIDER</dt><dd><code data-state="provider">—</code></dd></div>
                     <div><dt>CONFIG</dt><dd><span class="c-state state-indicator" data-state="config-prerequisite" data-status="waiting">检查中</span></dd></div>
                   </dl>
-                  <ul class="c-route-metrics" aria-label="按传输路径统计">
-                    <li><span>Hybrid <small>WS</small></span><strong data-state="hybrid-ws">0</strong></li>
-                    <li><span>首轮 <small>HTTP</small></span><strong data-state="hybrid-cold-start-http">0</strong></li>
-                    <li><span>回退 <small>HTTP</small></span><strong data-state="hybrid-recovery-http">0</strong></li>
-                    <li><span>压缩 <small>HTTP</small></span><strong data-state="direct-http">0</strong></li>
-                  </ul>
+                  <div class="c-route-metrics-wrap">
+                    <div class="c-route-metrics__actions" data-route-reset><button class="c-route-reset" type="button" data-action="reset-route-metrics" title="重置路径统计" aria-controls="route-reset-popover" aria-expanded="false" aria-label="重置路径统计"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 5.5A5.5 5.5 0 1 0 14 9" /><path d="M13 2.5v3h-3" /></svg><span>重置</span></button><aside id="route-reset-popover" class="c-route-reset-popover turbo-tilt-bubble" data-route-reset-popover role="dialog" aria-labelledby="route-reset-title" hidden><svg class="turbo-update-bubble__tail c-route-reset-popover__tail" viewBox="0 0 24 16" aria-hidden="true"><path class="turbo-update-bubble__tail-fill" d="M12 1 23 16H1Z" /><path class="turbo-update-bubble__tail-highlight" d="M12 1 23 16H1Z" /><path class="turbo-update-bubble__tail-stroke" d="M12 1 23 16M12 1 1 16" /></svg><strong id="route-reset-title">确认清零路径统计？</strong><p>仅清零下方四项计数，不影响请求流和统计页汇总。</p><div class="c-route-reset-popover__actions"><button class="turbo-bubble-action turbo-bubble-action--secondary" type="button" data-action="cancel-route-reset">取消</button><button class="turbo-bubble-action turbo-bubble-action--primary" type="button" data-action="confirm-route-reset">确认重置</button></div></aside></div>
+                    <ul class="c-route-metrics" aria-label="按传输路径统计">
+                      <li><span>Hybrid <small>WS</small></span><strong data-state="hybrid-ws">0</strong></li>
+                      <li><span>首轮 <small>HTTP</small></span><strong data-state="hybrid-cold-start-http">0</strong></li>
+                      <li><span>回退 <small>HTTP</small></span><strong data-state="hybrid-recovery-http">0</strong></li>
+                      <li><span>压缩 <small>HTTP</small></span><strong data-state="direct-http">0</strong></li>
+                    </ul>
+                  </div>
                 </section>
 
                 <section class="c-side-section" aria-labelledby="live-health-title">
@@ -198,7 +201,7 @@
           <header class="b-version-bar" aria-labelledby="b-version-title">
             <div class="c-product"><span class="c-prompt" aria-hidden="true">//</span><strong id="b-version-title">AI COVE TURBO</strong><span class="c-prompt">/ SETTING</span><span class="c-version">v0.1.0-pre.1</span></div>
             <div class="c-topbar__right">
-              <span class="b-version-bar__status"><strong data-state="update-state">尚未检查</strong><span data-state="update-message" aria-live="polite">尚未检查更新</span><b class="b-version-bar__percent is-conditional" data-state="update-progress" data-visible="update-progress" hidden>0%</b></span>
+              <span class="b-version-bar__status"><strong data-state="update-state">尚未检查</strong><span data-state="update-message" aria-live="polite">尚未检查更新</span><span class="b-version-bar__current-mark" data-update-current-mark aria-hidden="true" hidden><svg viewBox="0 0 16 16" focusable="false"><path pathLength="1" d="m2.5 8.4 3.2 3.1 7.3-7" /></svg></span><b class="b-version-bar__percent is-conditional" data-state="update-progress" data-visible="update-progress" hidden>0%</b></span>
               <div class="b-version-bar__actions"><button type="button" data-action="check-for-updates">检查更新</button><button class="is-conditional" type="button" data-action="install-update" data-visible="install-update" hidden>安装更新</button></div>
             </div>
             <div class="b-progress is-conditional" data-visible="update-progress" role="progressbar" aria-label="更新进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i data-state-progress="update-progress"></i></div>
@@ -212,7 +215,7 @@
                 </div>
               </header>
               <div id="config-view-panel-settings" class="b-config-view" data-config-view-panel="settings" role="tabpanel" aria-labelledby="config-view-settings">
-            <article class="b-popover b-popover--wide">
+            <article class="b-popover b-popover--wide turbo-tilt-bubble" data-tilt-only>
               <div class="b-config-layout">
                 <div class="b-config-column b-config-column--status">
                   <section class="b-status" aria-labelledby="config-title">
@@ -256,12 +259,13 @@
             </article>
               </div>
               <div id="config-view-panel-catalog" class="b-config-view" data-config-view-panel="catalog" role="tabpanel" aria-labelledby="config-view-catalog" hidden>
-                <section class="b-model-catalog b-model-catalog--wide" aria-labelledby="b-model-catalog-title">
+                <section class="b-model-catalog b-model-catalog--wide turbo-tilt-bubble" data-tilt-only aria-labelledby="b-model-catalog-title">
                   <header class="b-config-heading b-config-heading--catalog"><div><p class="eyebrow">MODEL CATALOG</p><h2 id="b-model-catalog-title">模型候选</h2><p>选择显示给 Codex 的模型，并设置每个模型的传输方式。</p></div><button class="b-model-catalog__info" type="button" data-model-catalog-info aria-label="查看模型候选源文件" title="模型候选源文件：正在读取" data-tooltip="模型候选源文件：正在读取">!</button></header>
-                  <div class="b-model-catalog__toolbar"><span><strong data-model-catalog-visible-count>0</strong> / <span data-model-catalog-total-count>0</span> 个候选显示给 Codex</span><span class="b-model-catalog__meta" data-model-catalog-meta></span><div class="b-model-catalog__toolbar-actions"><span>目录变化保存后需要重启</span><button type="button" data-action="discover-models">从上游发现</button><button type="button" data-action="create-model">添加模型</button></div></div>
+                  <div class="b-model-catalog__toolbar"><span><strong data-model-catalog-visible-count>0</strong> / <span data-model-catalog-total-count>0</span> 个候选显示给 Codex</span><span class="b-model-catalog__meta" data-model-catalog-meta></span><div class="b-model-catalog__toolbar-actions"><button type="button" data-action="discover-models">从上游发现</button><button type="button" data-action="create-model">添加模型</button></div></div>
                   <div class="b-model-catalog__list" data-model-catalog-list aria-live="polite"></div>
                   <p class="b-model-catalog__message" data-model-catalog-message role="status" aria-live="polite"></p>
-                  <div class="b-model-catalog__actions"><button type="button" data-action="save-model-settings" disabled>保存</button><button type="button" data-action="undo-model-settings" disabled>撤销修改</button><span class="b-model-catalog__restart is-conditional" data-model-catalog-restart hidden><span data-model-catalog-restart-message>模型候选已保存，需要重启 Codex</span><button type="button" data-action="restart-codex" data-catalog-restart data-restart-hint>重启</button></span></div>
+                  <div class="b-model-catalog__actions" data-model-catalog-actions hidden><span class="b-model-catalog__restart is-conditional" data-model-catalog-restart hidden><span data-model-catalog-restart-message>模型候选已保存，需要重启 Codex</span><button type="button" data-action="restart-codex" data-catalog-restart data-restart-hint>重启</button></span><div class="b-model-catalog__draft-actions" data-model-catalog-draft-actions aria-label="未保存的模型候选修改" hidden><button class="turbo-bubble-action turbo-bubble-action--secondary" type="button" data-action="undo-model-settings" disabled hidden>撤销</button><button class="turbo-bubble-action turbo-bubble-action--primary" type="button" data-action="save-model-settings" disabled hidden>保存</button></div></div>
+                  <aside class="c-route-reset-popover c-model-delete-popover turbo-tilt-bubble" data-model-delete-popover data-tilt-glare="true" role="dialog" aria-labelledby="model-delete-title" hidden><strong id="model-delete-title" data-model-delete-title>确认删除模型？</strong><p data-model-delete-message>删除后可从上游重新导入。</p><div class="c-route-reset-popover__actions"><button class="turbo-bubble-action turbo-bubble-action--secondary" type="button" data-action="cancel-model-delete">取消</button><button class="turbo-bubble-action turbo-bubble-action--primary" type="button" data-action="confirm-model-delete">确认删除</button></div></aside>
                 </section>
                 <dialog class="b-model-dialog" data-model-discovery aria-labelledby="b-model-discovery-title">
                   <form method="dialog" class="b-model-dialog__surface">
@@ -274,10 +278,10 @@
                   <form method="dialog" class="b-model-dialog__surface" data-model-editor-form>
                     <header><div><p class="eyebrow">MODEL ENTRY</p><h2 id="b-model-editor-title">配置模型</h2><p data-model-editor-summary>字段来源会随目录一起保留在 Turbo 元数据中。</p></div><button type="button" class="b-model-dialog__close" data-model-dialog-close="editor" aria-label="关闭模型编辑">×</button></header>
                     <div class="b-model-editor__body">
-                      <fieldset><legend>身份</legend><div class="b-model-editor__identity"><label>模型 ID <input data-model-field="slug" required pattern="\\S+" autocomplete="off" /><small data-model-source-for="slug"></small></label><label>显示名称 <input data-model-field="displayName" required autocomplete="off" /><small data-model-source-for="displayName"></small></label></div></fieldset>
-                      <fieldset><legend>上下文窗口</legend><label>最大上下文 <input data-model-field="max-context-window" type="number" min="125000" step="1" required inputmode="numeric" aria-label="最大上下文数值" /><small data-model-source-for="maxContextWindow"></small></label><label>当前上下文 <output data-model-context-value aria-live="polite">待确认</output><input data-model-field="context-window" type="range" min="125000" step="1" disabled aria-label="当前上下文滑块" /><small data-model-source-for="contextWindow"></small></label><p class="b-model-editor__hint" data-model-compact-hint>范围：125k 至模型最大上下文；有效上下文比例 95%，自动压缩阈值按当前上下文的 90% 计算。</p></fieldset>
-                      <fieldset><legend>思考</legend><div class="b-model-editor__efforts" data-model-efforts role="group" aria-label="支持的思考强度"></div><small data-model-source-for="supportedReasoningLevels"></small><label>默认 effort <select data-model-field="reasoning-effort"></select><small data-model-source-for="defaultReasoningLevel"></small></label></fieldset>
-                      <details class="b-model-editor__advanced"><summary>高级配置</summary><div class="b-model-editor__advanced-body"><label>描述（可选） <textarea data-model-field="description" rows="2" placeholder="留空自动生成"></textarea><small data-model-source-for="description"></small></label><fieldset><legend>传输</legend><label>模型策略 <select data-model-field="transport"><option value="auto">自动（按能力）</option><option value="http">仅 HTTP</option></select></label><p class="b-model-editor__hint">默认自动；Responses wire API 由 Provider 配置决定。</p></fieldset></div></details>
+                      <fieldset><legend>身份</legend><div class="b-model-editor__identity"><label class="b-model-editor__field"><span>模型 ID</span><input data-model-field="slug" required pattern="\\S+" autocomplete="off" /><small data-model-source-for="slug"></small></label><label class="b-model-editor__field"><span>显示名称</span><input data-model-field="displayName" required autocomplete="off" /><small data-model-source-for="displayName"></small></label></div></fieldset>
+                      <fieldset><legend>上下文窗口</legend><label class="b-model-editor__field"><span>最大上下文</span><input data-model-field="max-context-window" type="number" min="125000" step="1" required inputmode="numeric" aria-label="最大上下文数值" /><small data-model-source-for="maxContextWindow"></small></label><label class="b-model-editor__field b-model-editor__field--range"><span>当前上下文</span><output data-model-context-value aria-live="polite">待确认</output><input data-model-field="context-window" type="range" min="125000" step="1" disabled aria-label="当前上下文滑块" /><small data-model-source-for="contextWindow"></small></label><p class="b-model-editor__hint" data-model-compact-hint>范围：125k 至模型最大上下文；有效上下文比例 95%，自动压缩阈值按当前上下文的 90% 计算。</p></fieldset>
+                      <fieldset><legend>思考</legend><div class="b-model-editor__efforts" data-model-efforts role="group" aria-label="支持的思考强度"></div><small class="b-model-editor__section-source" data-model-source-for="supportedReasoningLevels"></small><label class="b-model-editor__field b-model-editor__field--select"><span>默认 effort</span><select data-model-field="reasoning-effort"></select><small data-model-source-for="defaultReasoningLevel"></small></label></fieldset>
+                      <details class="b-model-editor__advanced"><summary>高级配置</summary><div class="b-model-editor__advanced-body"><label class="b-model-editor__field"><span>描述（可选）</span><textarea data-model-field="description" rows="2" placeholder="留空自动生成"></textarea><small data-model-source-for="description"></small></label><fieldset><legend>传输</legend><label class="b-model-editor__field b-model-editor__field--select"><span>模型策略</span><select data-model-field="transport"><option value="auto">自动（按能力）</option><option value="http">仅 HTTP</option></select></label><p class="b-model-editor__hint">默认自动；Responses wire API 由 Provider 配置决定。</p></fieldset></div></details>
                     </div>
                     <p class="b-model-dialog__error" data-model-editor-error role="alert"></p>
                     <footer><button type="button" data-model-editor-action="save">保存</button><button type="button" data-model-editor-action="undo">撤销修改</button><button type="button" data-model-dialog-close="editor">取消</button></footer>
@@ -294,6 +298,6 @@
     <script src="./telemetry.js"></script>
     <script src="./strands.js"></script>
     <script src="./connection-dom.js"></script>
-    <script src="./app.js?catalog-layout=aligned-1"></script>
+    <script src="./app.js?catalog-layout=delete-popover-1"></script>
   </body>
 </html>
