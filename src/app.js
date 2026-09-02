@@ -1561,7 +1561,7 @@
       catalogDraft = null;
       modelPolicyDraft = null;
       renderedModelCatalogMarkup = "";
-      modelCatalogActionMessage = `${target.displayName || target.slug} 已删除，需要重启 Codex 后生效。`;
+      modelCatalogActionMessage = "";
     } catch (error) {
       state.catalog = { ...state.catalog, state: "error" };
       state.technicalDetail = error instanceof Error ? error.message : String(error);
