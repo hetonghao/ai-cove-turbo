@@ -5142,3 +5142,218 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
     grid-area: actions;
   }
 }
+/* 方案一：按原型的水平扫描线重排模型候选，能力与传输紧邻显示。 */
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-catalog__list {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 10px 20px 12px;
+  max-block-size: calc(50px * 6 + 6px * 5 + 18px);
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row {
+  grid-template-columns: 38px minmax(0, 1fr) max-content;
+  grid-template-areas: "drag copy actions";
+  min-height: 50px;
+  min-block-size: 50px;
+  gap: 12px;
+  padding: 7px 10px;
+  border: 1px solid rgba(193, 221, 207, 0.12);
+  border-radius: 11px;
+  background: rgba(21, 30, 26, 0.54);
+  box-shadow: inset 0 1px 0 rgba(239, 245, 239, 0.03);
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row:hover,
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row:focus-within {
+  border-color: rgba(112, 216, 238, 0.34);
+  background: rgba(112, 216, 238, 0.07);
+  box-shadow: inset 2px 0 var(--b-accent), inset 0 1px 0 rgba(239, 245, 239, 0.08);
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__drag {
+  grid-area: drag;
+  align-self: center;
+  justify-self: start;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy {
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) 92px 96px;
+  grid-template-areas: "identity details capability transport";
+  align-items: center;
+  gap: 0 12px;
+  min-width: 0;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__identity {
+  display: flex;
+  grid-area: identity;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__identity strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__identity code {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--b-faint);
+  font-size: 0.58rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy .b-model-row__details {
+  display: flex;
+  grid-area: details;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  flex-wrap: nowrap;
+  color: var(--b-muted);
+  font: 0.61rem/1 var(--font-mono);
+  white-space: nowrap;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__details span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__details [data-model-source] {
+  color: var(--b-accent);
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy .state-indicator {
+  grid-area: capability;
+  align-self: center;
+  justify-self: start;
+  min-width: max-content;
+  margin: 0;
+  white-space: nowrap;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy > .b-transport-toggle {
+  grid-area: transport;
+  width: 96px;
+  min-height: 28px;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__actions {
+  display: inline-flex;
+  grid-area: actions;
+  align-items: center;
+  gap: 5px;
+  width: auto;
+  min-width: 0;
+  margin: 0;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__edit,
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy-action,
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__delete {
+  min-width: 28px;
+  min-height: 28px;
+  padding-inline: 6px;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__delete {
+  display: grid;
+  place-items: center;
+  border-color: transparent;
+  border-radius: 5px;
+  color: var(--b-muted);
+  background: transparent;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__delete svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__delete:hover,
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__delete:focus-visible {
+  border-color: rgba(240, 154, 154, 0.5);
+  color: var(--turbo-model-editor-error-color);
+  background: var(--turbo-model-editor-error-bg);
+}
+
+@media (max-width: 720px) {
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-catalog__list {
+    max-block-size: calc(50px * 6 + 6px * 5 + 18px);
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row {
+    grid-template-columns: 38px minmax(0, 1fr) max-content;
+    min-height: 50px;
+    min-block-size: 50px;
+    gap: 10px;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy {
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) 62px 64px;
+    gap: 0 6px;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__actions {
+    gap: 2px;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__edit,
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy-action,
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__delete,
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__visibility {
+    min-width: 24px;
+    width: 24px;
+    min-height: 26px;
+    height: 26px;
+    padding-inline: 4px;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy .state-indicator {
+    max-width: 78px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.56rem;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy > .b-transport-toggle {
+    width: 64px;
+    min-height: 26px;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-transport-toggle__option {
+    min-height: 20px;
+    padding-inline: 1px;
+    font-size: 0.56rem;
+  }
+}
+
+@media (max-width: 500px) {
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy {
+    grid-template-columns: minmax(0, 1fr) minmax(54px, 0.8fr);
+    grid-template-areas:
+      "identity details"
+      "capability transport";
+    row-gap: 2px;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy .state-indicator {
+    justify-self: start;
+  }
+}
