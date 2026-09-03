@@ -434,12 +434,27 @@ fn prepare_catalog_models(
                     "新增模型缺少可用的 Codex 基准模板"
                 )));
             };
-            let mut created = template.clone();
-            write_model_fields(&mut created, model);
             let source_model = models
                 .iter()
                 .find(|source| source.slug == model.slug)
                 .unwrap_or(model);
+            let mut created = template.clone();
+            if let Some(object) = created.as_object_mut() {
+                if source_model
+                    .base_instructions
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    object.remove("base_instructions");
+                }
+                if let Some(messages) = object
+                    .get_mut("model_messages")
+                    .and_then(Value::as_object_mut)
+                {
+                    messages.remove("instructions_template");
+                }
+            }
+            write_model_fields(&mut created, model);
             sanitize_new_model_template(&mut created, template, source_model);
             entries.push(created);
         }
