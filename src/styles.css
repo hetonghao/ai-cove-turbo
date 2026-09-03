@@ -6233,7 +6233,7 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
   align-items: baseline;
   gap: 8px;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__root-status {
