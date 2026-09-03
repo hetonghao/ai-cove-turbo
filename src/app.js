@@ -1147,6 +1147,54 @@
     return modelRootPresence(catalogModels().find((model) => model.slug === slug)) === "present";
   }
 
+  function catalogRootSourceLabel(value) {
+    const labels = {
+      file: "接管前源文件",
+      bundled_cli: "Codex 内置目录",
+      bundledCli: "Codex 内置目录",
+    };
+    return labels[String(value || "")] || String(value || "未记录");
+  }
+
+  function catalogTimeLabel(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "未记录";
+    const numeric = Number(raw);
+    const parsed = /^\d{10,}$/.test(raw) && Number.isFinite(numeric) ? new Date(raw.length <= 10 ? numeric * 1_000 : numeric) : new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString("zh-CN", { hour12: false });
+  }
+
+  function catalogDigestLabel(value) {
+    const raw = String(value || "").trim();
+    return raw ? (raw.length > 16 ? raw.slice(0, 16) + "…" : raw) : "未记录";
+  }
+
+  function renderCatalogRootMetadata(catalog) {
+    const container = $("[data-model-catalog-root-meta]");
+    if (!container) return;
+    const metadata = catalog?.metadata || {};
+    const rootAvailable = metadata.rootAvailable === true;
+    const unavailableReason = String(metadata.rootUnavailableReason || "").trim();
+    const unavailableAt = metadata.rootUnavailableAt;
+    const fields = [
+      ["根目录来源", catalogRootSourceLabel(metadata.rootSourceType)],
+      ["Codex 版本", metadata.rootCodexVersion || metadata.rootClientVersion || "未记录"],
+      ["根目录摘要", catalogDigestLabel(metadata.rootSourceDigest)],
+      ["最近读取", catalogTimeLabel(metadata.rootLastReadAt)],
+      ["最近成功同步", catalogTimeLabel(metadata.rootLastSyncedAt)],
+    ];
+    if (!rootAvailable && (unavailableReason || unavailableAt)) {
+      fields.push(["根目录状态", `不可用${unavailableReason ? "：" + unavailableReason : ""}${unavailableAt ? " · " + catalogTimeLabel(unavailableAt) : ""}`, "is-unavailable"]);
+    }
+    const hasMetadata = rootAvailable || fields.some(([, value]) => value !== "未记录") || Boolean(unavailableReason || unavailableAt);
+    container.hidden = !hasMetadata;
+    if (!hasMetadata) {
+      container.innerHTML = "";
+      return;
+    }
+    container.innerHTML = fields.map(([label, value, status = ""]) => `<div class="b-model-catalog__root-meta-item${status ? " " + status : ""}"><dt>${escapeHtml(label)}</dt><dd title="${escapeHtml(value)}">${escapeHtml(value)}</dd></div>`).join("");
+  }
+
   function modelCatalogMarkup() {
     const policies = policyModels();
     // aria-pressed="${String(transport === "auto")}" remains the transport DOM contract.
@@ -1204,6 +1252,7 @@
     const visible = $("[data-model-catalog-visible-count]");
     const total = $("[data-model-catalog-total-count]");
     const metadata = $("[data-model-catalog-meta]");
+    renderCatalogRootMetadata(catalog);
     if (count) count.textContent = String(totalCount);
     if (visible) visible.textContent = String(visibleCount);
     if (total) total.textContent = String(totalCount);

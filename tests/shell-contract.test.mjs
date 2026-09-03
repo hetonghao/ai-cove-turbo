@@ -278,6 +278,7 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(configPanel, /data-config-view-panel="settings"/);
   assert.match(configPanel, /data-config-view-panel="catalog"[^>]*hidden/);
   assert.match(configPanel, /data-model-catalog-list/);
+  assert.match(configPanel, /data-model-catalog-root-meta/);
   assert.match(configPanel, /b-model-catalog b-model-catalog--wide/);
   assert.doesNotMatch(globalSettings, /data-model-catalog-list/);
   assert.match(configPanel, /data-model-catalog-info/);
@@ -308,6 +309,14 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(app, /data-model-drag-handle/);
   assert.match(app, /b-model-row__actions/);
   assert.match(app, /catalog\.path \|\| "~\/\.codex\/model-catalogs\/ai_cove_turbo\.json"/);
+  assert.match(app, /rootSourceType/);
+  assert.match(app, /rootCodexVersion/);
+  assert.match(app, /rootSourceDigest/);
+  assert.match(app, /rootLastReadAt/);
+  assert.match(app, /rootLastSyncedAt/);
+  assert.match(app, /rootUnavailableReason/);
+  assert.match(app, /rootUnavailableAt/);
+  assert.doesNotMatch(configPanel, /data-action="sync-model-catalog"|同步根目录/);
   assert.match(app, /class="b-model-row" draggable="false"/);
   assert.match(app, /class="b-transport-toggle" role="group"/);
   assert.match(app, /data-model-transport="auto"/);
@@ -330,6 +339,8 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(css, /\.b-model-catalog__draft-actions \.turbo-bubble-action--secondary\s*\{[\s\S]*?background:\s*transparent;/);
   assert.match(css, /\.b-model-catalog\[data-dirty="true"\] \.b-model-catalog__list\s*\{[\s\S]*?padding-bottom:\s*72px;[\s\S]*?scroll-padding-block-end:\s*72px;/);
   assert.match(css, /\.b-model-catalog__info\s*\{/);
+  assert.match(css, /\.b-model-catalog__root-meta\s*\{[\s\S]*?grid-template-columns:/);
+  assert.match(css, /\.b-model-catalog__root-meta-item\.is-unavailable dd\s*\{[\s\S]*?color:\s*var\(--turbo-model-editor-error-color\);/);
   assert.match(css, /\.b-model-catalog__info::after\s*\{[\s\S]*?content:\s*attr\(data-tooltip\);/);
   assert.match(css, /\.b-model-catalog__info\s*\{[\s\S]*?color:\s*var\(--b-accent\);[\s\S]*?background:\s*var\(--b-accent-soft\);/);
   assert.match(css, /#panel-config \.b-hint\s*\{[\s\S]*?margin-top:\s*18px;/);

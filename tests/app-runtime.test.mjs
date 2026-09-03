@@ -71,6 +71,16 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     loaded: true,
     requestVerified: false,
     revision: "revision-1",
+    metadata: {
+      rootSourceType: "bundled_cli",
+      rootCodexVersion: "0.42.0",
+      rootSourceDigest: "abc1234567890fedcba9876543210",
+      rootAvailable: false,
+      rootUnavailableReason: "root_catalog_unavailable",
+      rootLastReadAt: "1730000000000",
+      rootUnavailableAt: "1730000005000",
+      rootLastSyncedAt: "2026-09-03T12:00:00Z",
+    },
   };
   const status = {
     serviceHealthy: true,
@@ -116,6 +126,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     },
   });
   const message = element({ modelCatalogMessage: "" });
+  const rootMeta = element({ modelCatalogRootMeta: "" });
   const restart = element({ modelCatalogRestart: "" });
   const catalogActions = element({ modelCatalogActions: "" });
   catalogActions.hidden = true;
@@ -201,6 +212,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     ["[data-model-catalog-info]", info],
     ["[data-model-catalog-list]", list],
     ["[data-model-catalog-message]", message],
+    ["[data-model-catalog-root-meta]", rootMeta],
     ["[data-model-catalog-restart]", restart],
     ["[data-model-catalog-actions]", catalogActions],
     ["[data-model-catalog-draft-actions]", draftActions],
@@ -272,6 +284,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     info,
     list,
     message,
+    rootMeta,
     catalogRenders() { return catalogRenders; },
     catalogMarkup() { return catalogMarkup; },
     async click(action) {
@@ -514,6 +527,20 @@ test("根目录移除模型显示红色感叹号并保留可删除入口", async
   assert.match(markup, /b-model-row__root-status[^>]*aria-label="Codex 新版本已删除此模型，建议用户删除"/);
   assert.match(markup, /data-model-slug="removed"[\s\S]*?data-model-delete[^>]*aria-label="删除 Removed"(?![^>]*disabled)/);
   assert.match(markup, /data-model-slug="preset"[\s\S]*?data-model-delete[^>]*disabled[^>]*aria-disabled="true"[^>]*aria-label="此模型为 Codex 预设模型，暂不支持删除"/);
+});
+
+test("模型候选区展示根目录来源、摘要和读取生命周期", async () => {
+  const harness = await catalogHarness();
+  const rootMeta = harness.rootMeta;
+  assert.equal(rootMeta.hidden, false);
+  assert.match(rootMeta.innerHTML, /根目录来源/);
+  assert.match(rootMeta.innerHTML, /Codex 内置目录/);
+  assert.match(rootMeta.innerHTML, /根目录摘要/);
+  assert.match(rootMeta.innerHTML, /abc123456789/);
+  assert.match(rootMeta.innerHTML, /最近读取/);
+  assert.match(rootMeta.innerHTML, /最近成功同步/);
+  assert.match(rootMeta.innerHTML, /根目录状态/);
+  assert.match(rootMeta.innerHTML, /不可用：root_catalog_unavailable/);
 });
 
 test("模型弹窗保存独立于列表草稿并保留原上下文", async () => {

@@ -4687,6 +4687,41 @@ button:disabled {
   font: 0.58rem/1.2 var(--font-mono);
 }
 
+.b-model-catalog__root-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin: 0;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--b-line);
+}
+
+.b-model-catalog__root-meta-item {
+  min-width: 0;
+}
+
+.b-model-catalog__root-meta-item dt {
+  margin: 0 0 3px;
+  color: var(--b-faint);
+  font: 0.54rem/1.2 var(--font-mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.b-model-catalog__root-meta-item dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--b-muted);
+  font: 0.62rem/1.3 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.b-model-catalog__root-meta-item.is-unavailable dd {
+  color: var(--turbo-model-editor-error-color);
+}
+
 .b-model-catalog__list {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 7px;
@@ -5285,6 +5320,11 @@ button:disabled {
   .b-model-catalog__toolbar-actions {
     justify-content: space-between;
     flex-wrap: wrap;
+  }
+
+  .b-model-catalog__root-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-inline: 20px;
   }
 
   .b-model-catalog__list {
@@ -6005,6 +6045,11 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
 
   .b-model-dialog__surface > footer button {
     flex: 1 1 auto;
+  }
+
+  .b-model-catalog__root-meta {
+    grid-template-columns: 1fr;
+    padding-inline: 16px;
   }
 }
 
