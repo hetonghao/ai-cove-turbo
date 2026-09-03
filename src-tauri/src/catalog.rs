@@ -517,12 +517,15 @@ fn select_template(entries: &[Value]) -> Option<Value> {
             let valid_verbosity = entry
                 .get("support_verbosity")
                 .is_some_and(Value::is_boolean);
-            (valid_truncation && valid_shell && valid_verbosity).then_some(entry)
+            (valid_truncation
+                && valid_shell
+                && valid_verbosity
+                && has_complete_prompt_fields(entry))
+            .then_some(entry)
         })
         .collect::<Vec<_>>();
     candidates.sort_by_key(|entry| {
         (
-            !has_complete_prompt_fields(entry),
             !entry
                 .get("is_default")
                 .or_else(|| entry.get("default"))
@@ -1562,7 +1565,7 @@ mod tests {
         .expect("config fixture");
         fs::write(
             &source,
-            r#"{"models":[{"slug":"alpha","display_name":"Alpha","description":"a","visibility":"list","priority":2,"unknown":"kept","truncation_policy":{"mode":"bytes","limit":10000},"shell_type":"shell_command","support_verbosity":true},{"slug":"beta","display_name":"Beta","description":"b","visibility":"hide","priority":1,"truncation_policy":{"mode":"bytes","limit":10000},"shell_type":"shell_command","support_verbosity":true},{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","description":"Codex template","visibility":"list","priority":0,"template_only":"kept","truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true}]}"#,
+            r#"{"models":[{"slug":"alpha","display_name":"Alpha","description":"a","visibility":"list","priority":2,"unknown":"kept","truncation_policy":{"mode":"bytes","limit":10000},"shell_type":"shell_command","support_verbosity":true},{"slug":"beta","display_name":"Beta","description":"b","visibility":"hide","priority":1,"truncation_policy":{"mode":"bytes","limit":10000},"shell_type":"shell_command","support_verbosity":true},{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","description":"Codex template","visibility":"list","priority":0,"template_only":"kept","truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true,"base_instructions":"GPT-5.6-Sol base","model_messages":{"instructions_template":"GPT-5.6-Sol instructions"}}]}"#,
         )
         .expect("catalog fixture");
         (config, source)
@@ -2259,7 +2262,7 @@ mod tests {
 
     #[test]
     fn new_model_uses_the_gpt_5_6_sol_entry_as_template() -> Result<(), Box<dyn Error>> {
-        let bytes = br#"{"models":[{"slug":"gpt-5.6-sol","display_name":"Sol","description":"template","visibility":"list","priority":1,"context_window":125000,"max_context_window":250000,"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low","truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true,"template_only":"kept"}]}"#;
+        let bytes = br#"{"models":[{"slug":"gpt-5.6-sol","display_name":"Sol","description":"template","visibility":"list","priority":1,"context_window":125000,"max_context_window":250000,"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low","truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true,"template_only":"kept","base_instructions":"Sol base","model_messages":{"instructions_template":"Sol instructions"}}]}"#;
         let model = complete_model("gamma");
         let (next, _) = prepare_catalog_models(bytes, &CatalogMetadata::default(), &[model], &[])?;
         let document: Value = serde_json::from_slice(&next)?;
