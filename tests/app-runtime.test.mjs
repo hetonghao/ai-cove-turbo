@@ -54,7 +54,7 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
-async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models } = {}) {
+async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models, discoveredModels = [], initialConfigView = "settings" } = {}) {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const catalog = {
     path: "/home/test/.codex/model-catalogs/ai_cove_turbo.json",
@@ -167,6 +167,16 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   const editorClose = element({ modelDialogClose: "editor" });
   editorClose.closest = (selector) => selector === "[data-model-dialog-close]" ? editorClose : null;
   const documentBody = element({ configView: "settings" });
+  const discoveryRoot = element({ modelDiscovery: "" });
+  discoveryRoot.hidden = true;
+  discoveryRoot.showModal = () => { discoveryRoot.open = true; };
+  discoveryRoot.close = () => { discoveryRoot.open = false; };
+  const discoveryList = element({ modelDiscoveryList: "" });
+  const discoverySummary = element({ modelDiscoverySummary: "" });
+  const discoveryFilter = element({ modelDiscoveryFilter: "" });
+  discoveryFilter.matches = (selector) => selector.includes("[data-model-discovery-filter]");
+  const importAllAction = element({ action: "import-all-models" });
+  importAllAction.closest = (selector) => selector === "[data-action]" ? importAllAction : null;
   const restartControl = element({ action: "restart-codex", catalogRestart: "", restartHint: "" });
   const configViewButtons = ["settings", "catalog"].map((configView) => {
     const target = element({ configView });
@@ -174,7 +184,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     return target;
   });
   const configViewPanels = ["settings", "catalog"].map((configView) => element({ configViewPanel: configView }));
-  const actions = ["save-model-settings", "undo-model-settings"].map((action) => {
+  const actions = ["save-model-settings", "undo-model-settings", "open-config"].map((action) => {
     const target = element({ action });
     target.closest = (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-action]" ? target : null;
     return target;
@@ -186,6 +196,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   });
   restartControl.closest = (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-action]" ? restartControl : null;
   actions.push(restartControl);
+  actions.push(importAllAction);
   const selectors = new Map([
     ["[data-model-catalog-info]", info],
     ["[data-model-catalog-list]", list],
@@ -197,6 +208,11 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     ["[data-model-editor] h2", element()],
     ["[data-model-editor-summary]", element()],
     ["[data-model-editor-error]", editorError],
+    ["[data-model-discovery]", discoveryRoot],
+    ["[data-model-discovery-list]", discoveryList],
+    ["[data-model-discovery-summary]", discoverySummary],
+    ["[data-model-discovery-filter]", discoveryFilter],
+    ["[data-action=\"import-all-models\"]", importAllAction],
   ]);
   const listeners = new Map();
   const calls = [];
@@ -210,7 +226,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     }
     if (command === "discover_model_catalog") {
       if (failDiscovery) throw new Error("discovery failed");
-      return { models: [], scope: "current_key", sourceVersion: "preview" };
+      return { models: discoveredModels, scope: "current_key", sourceVersion: "preview" };
     }
     if (command === "save_model_settings") {
       if (failSave) throw new Error("save failed");
@@ -240,7 +256,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   };
   const window = {
     __TAURI__: { core: { invoke } },
-    location: { href: "tauri://localhost/?tab=config" },
+    location: { href: `tauri://localhost/?tab=config&view=${initialConfigView}` },
     history: { replaceState(_state, _title, url) { window.location.href = String(url); } },
     addEventListener() {},
     setInterval(handler) { tick = handler; },
@@ -256,6 +272,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     list,
     message,
     catalogRenders() { return catalogRenders; },
+    catalogMarkup() { return catalogMarkup; },
     async click(action) {
       listeners.get("click")?.({ target: [...actions, ...menuActions].find((target) => target.dataset.action === action) });
       await new Promise((resolve) => setImmediate(resolve));
@@ -352,6 +369,18 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     },
     setScrollTop(value) { list.scrollTop = value; },
     scrollTop() { return list.scrollTop; },
+    discoveryFilter() { return discoveryFilter; },
+    discoveryList() { return discoveryList; },
+    discoverySummary() { return discoverySummary; },
+    async inputDiscoveryFilter(value) {
+      discoveryFilter.value = value;
+      listeners.get("input")?.({ target: discoveryFilter });
+    },
+    async importDiscovered(slug) {
+      const button = element({ modelImport: slug });
+      button.closest = (selector) => selector === "[data-model-import]" ? button : null;
+      await listeners.get("click")?.({ target: button });
+    },
   };
 }
 
@@ -373,6 +402,19 @@ test("配置工作区通过顶部 Tab 切换并同步 URL 与键盘状态", asyn
   assert.equal(harness.configView(), "settings");
   harness.keydownConfig("End");
   assert.equal(harness.configView(), "catalog");
+});
+
+test("查看配置始终打开运行偏好工作区", async () => {
+  const harness = await catalogHarness({ initialConfigView: "catalog" });
+  assert.equal(harness.configView(), "catalog");
+
+  await harness.click("open-config");
+
+  assert.equal(harness.configView(), "settings");
+  assert.equal(harness.bodyConfigView(), "settings");
+  assert.equal(harness.configPanelHidden("settings"), false);
+  assert.equal(harness.configPanelHidden("catalog"), true);
+  assert.match(harness.url(), /view=settings/);
 });
 
 test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界", async () => {
@@ -546,11 +588,21 @@ test("模型传输策略编辑保存并显示能力摘要", async () => {
   assert.match(failed.list.innerHTML, /WS 可用/);
 });
 
-test("允许模型但尚未确认传输通道时显示能力未知", async () => {
+test("允许模型但尚未确认传输通道时统一升格为 HTTP", async () => {
   const harness = await catalogHarness({
     capabilityOverrides: { alpha: { transport: "unknown", reasonCode: "no_http_channel" } },
   });
-  assert.match(harness.list.innerHTML, /能力未知/);
+  assert.match(harness.list.innerHTML, /压缩 HTTP/);
+  assert.doesNotMatch(harness.list.innerHTML, /能力未知/);
+  assert.doesNotMatch(harness.list.innerHTML, /不可用/);
+});
+
+test("模型缺失传输能力信息时统一升格为 HTTP", async () => {
+  const harness = await catalogHarness({
+    capabilityOverrides: { alpha: null },
+  });
+  assert.match(harness.list.innerHTML, /压缩 HTTP/);
+  assert.doesNotMatch(harness.list.innerHTML, /能力未知/);
   assert.doesNotMatch(harness.list.innerHTML, /不可用/);
 });
 
@@ -564,6 +616,17 @@ test("上游发现失败不应把模型目录标记为保存错误", async () =>
 test("模型上下文待确认时不再显示额外提示", async () => {
   const harness = await catalogHarness();
   assert.equal(harness.message.textContent, "");
+});
+
+test("模型上下文来源待确认时不展示冗余来源标签", async () => {
+  const harness = await catalogHarness({
+    models: [
+      { slug: "alpha", displayName: "Alpha", description: "a", visibility: "list", priority: 1, contextWindow: 200000, maxContextWindow: 500000, fieldSources: { contextWindow: "待确认", maxContextWindow: "待确认" } },
+      { slug: "beta", displayName: "Beta", description: "b", visibility: "hide", priority: 2, contextWindow: 200000, maxContextWindow: 500000, fieldSources: { contextWindow: "用户", maxContextWindow: "用户" } },
+    ],
+  });
+  assert.doesNotMatch(harness.catalogMarkup(), /data-model-source="待确认"/);
+  assert.match(harness.catalogMarkup(), /data-model-source="用户">用户/);
 });
 
 test("新建模型默认模板可直接通过完整性校验", async () => {
@@ -585,6 +648,7 @@ test("新建模型默认模板可直接通过完整性校验", async () => {
     { effort: "xhigh", description: "" },
   ]));
   assert.equal(model.defaultReasoningLevel, "high");
+  assert.equal(JSON.stringify(model.inputModalities), JSON.stringify(["text", "image"]));
   assert.equal(harness.editorField("reasoning-effort").value, "high");
   assert.doesNotMatch(harness.editorError(), /待确认/);
   assert.equal(harness.editorSource("contextWindow").textContent, "来源：模板");
@@ -2839,4 +2903,54 @@ test("页面隐藏时暂停状态与连接摘要轮询并在恢复可见后立�
     "get_app_status",
     "get_connection_snapshot",
   ]);
+});
+
+test("上游发现列表支持本地筛选并按手动创建默认参数初始化模型能力", async () => {
+  const discoveredModels = [
+    { slug: "deepseek-chat", displayName: "DeepSeek Chat" },
+    { slug: "gpt-5-preview", displayName: "GPT 5 Preview" },
+  ];
+  const harness = await catalogHarness({ discoveredModels });
+  await harness.click("discover-models");
+
+  // 默认显示全部发现的模型
+  assert.match(harness.discoveryList().innerHTML, /deepseek-chat/);
+  assert.match(harness.discoveryList().innerHTML, /gpt-5-preview/);
+  assert.match(harness.discoverySummary().textContent, /2 个模型/);
+
+  // 输入筛选关键词进行本地过滤
+  await harness.inputDiscoveryFilter("deepseek");
+  assert.match(harness.discoveryList().innerHTML, /deepseek-chat/);
+  assert.doesNotMatch(harness.discoveryList().innerHTML, /gpt-5-preview/);
+  assert.match(harness.discoverySummary().textContent, /匹配 1 \/ 2 个模型/);
+
+  // 筛选无匹配项
+  await harness.inputDiscoveryFilter("not-found-model");
+  assert.match(harness.discoveryList().innerHTML, /未找到匹配的模型/);
+
+  // 恢复筛选
+  await harness.inputDiscoveryFilter("");
+  assert.match(harness.discoveryList().innerHTML, /deepseek-chat/);
+  assert.match(harness.discoveryList().innerHTML, /gpt-5-preview/);
+
+  // 导入未填上下文和思考强度的模型，检查是否按手动创建默认参数初始化
+  await harness.importDiscovered("deepseek-chat");
+  const save = harness.calls.find((call) => call.command === "save_model_settings");
+  assert.ok(save, "save_model_settings was called on import");
+  const importedModel = save.args.models.find((model) => model.slug === "deepseek-chat");
+  assert.ok(importedModel, "imported deepseek-chat exists in saved models");
+  assert.equal(importedModel.contextWindow, 275000);
+  assert.equal(importedModel.maxContextWindow, 275000);
+  assert.equal(importedModel.autoCompactTokenLimit, 247500);
+  assert.equal(JSON.stringify(importedModel.supportedReasoningLevels), JSON.stringify([
+    { effort: "low", description: "" },
+    { effort: "medium", description: "" },
+    { effort: "high", description: "" },
+    { effort: "xhigh", description: "" },
+  ]));
+  assert.equal(importedModel.defaultReasoningLevel, "high");
+  assert.equal(importedModel.fieldSources.contextWindow, "模板");
+  assert.equal(importedModel.fieldSources.maxContextWindow, "模板");
+  assert.equal(importedModel.fieldSources.supportedReasoningLevels, "模板");
+  assert.equal(importedModel.fieldSources.defaultReasoningLevel, "模板");
 });

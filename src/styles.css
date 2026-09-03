@@ -21,6 +21,9 @@
   --turbo-muted: #819187;
   --turbo-faint: #506057;
   --turbo-on-accent: #081014;
+  --turbo-danger: #ff7b74;
+  --turbo-danger-hover: #ff9b95;
+  --turbo-on-danger: #210b0b;
   --turbo-icon-bg: #f8f0e7;
   --turbo-header-layer: 4;
   --turbo-focus-layer: 10;
@@ -2647,6 +2650,22 @@ body[data-active-tab="config"] {
   background: var(--turbo-shell-config-bg);
 }
 
+.turbo-bubble-action--danger {
+  border: 0;
+  color: var(--turbo-on-danger);
+  background: var(--turbo-danger);
+}
+
+.turbo-bubble-action--danger:hover:not(:disabled) {
+  background: var(--turbo-danger-hover);
+  transform: translateY(-2px);
+}
+
+.turbo-bubble-action--danger:focus-visible {
+  outline: 2px solid var(--turbo-danger);
+  outline-offset: 2px;
+}
+
 .turbo-shell {
   display: grid;
   grid-template-rows: var(--turbo-shell-height) minmax(0, 1fr);
@@ -4914,6 +4933,31 @@ button:disabled {
   font-size: 1rem;
 }
 
+.b-model-discovery__filter {
+  padding: 14px 20px 0;
+}
+
+.b-model-discovery__filter input {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 1px solid var(--b-line);
+  border-radius: 8px;
+  color: var(--b-ink);
+  background: var(--turbo-model-editor-input-bg);
+  font: var(--turbo-type-status)/1.4 var(--font-mono);
+  outline: none;
+  transition: border-color var(--speed-fast) var(--ease-out);
+}
+
+.b-model-discovery__filter input:focus {
+  border-color: var(--b-accent);
+}
+
+.b-model-discovery__filter input::placeholder {
+  color: var(--b-faint);
+}
+
 .b-model-discovery__list {
   display: grid;
   gap: 7px;
@@ -5251,7 +5295,8 @@ button:disabled {
   .b-model-dialog__surface > header,
   .b-model-dialog__surface > footer,
   .b-model-editor__body,
-  .b-model-discovery__list {
+  .b-model-discovery__list,
+  .b-model-discovery__filter {
     padding-right: 12px;
     padding-left: 12px;
   }

@@ -26,7 +26,7 @@
   const MODEL_CONTEXT_DEFAULT = 275_000;
   const MODEL_REASONING_OPTIONS = ["low", "medium", "high", "xhigh", "max", "ultra"];
   const DEFAULT_MODEL_CAPABILITIES = Object.freeze({
-    inputModalities: ["text"],
+    inputModalities: ["text", "image"],
     supportsSearchTool: false,
     supportsParallelToolCalls: false,
     supportsImageDetailOriginal: false,
@@ -293,6 +293,7 @@
   let draggedCatalogTargetSlug = "";
   let catalogPointerDrag = null;
   let discoveredModels = [];
+  let discoveryQuery = "";
   let editorDraft = null;
   let editorMode = "create";
   let editorOriginal = null;
@@ -1073,12 +1074,12 @@
 
   function capabilityBadge(slug) {
     const capability = state.transportCapabilities?.[slug];
-    if (!capability) return '<span class="state-indicator" data-status="waiting">能力未知</span>';
+    if (!capability) return '<span class="state-indicator" data-status="verified">压缩 HTTP</span>';
     const unavailable = capability.reasonCode === "model_not_allowed";
     const label = unavailable
       ? "不可用"
-      : capability.transport === "websocket" ? "WS 可用" : capability.transport === "http" ? "压缩 HTTP" : "能力未知";
-    return `<span class="state-indicator" data-status="${unavailable ? "blocked" : capability.transport === "unknown" ? "waiting" : "verified"}" title="${escapeHtml(capability.reasonCode || "")}">${label}</span>`;
+      : capability.transport === "websocket" ? "WS 可用" : "压缩 HTTP";
+    return `<span class="state-indicator" data-status="${unavailable ? "blocked" : "verified"}" title="${escapeHtml(capability.reasonCode || "")}">${label}</span>`;
   }
 
   function modelContextLabel(model) {
@@ -1241,7 +1242,7 @@
       effectiveContextWindowPercent: 95,
       autoCompactTokenLimit: Math.floor(MODEL_CONTEXT_DEFAULT * 0.9),
       truncationPolicy: "auto",
-      inputModalities: ["text"],
+      inputModalities: ["text", "image"],
       supportedReasoningLevels: [{ effort: "low", description: "" }, { effort: "medium", description: "" }, { effort: "high", description: "" }, { effort: "xhigh", description: "" }],
       defaultReasoningLevel: "high",
       supportsReasoningSummaryParameter: false,
@@ -1731,21 +1732,35 @@
     const list = $("[data-model-discovery-list]");
     if (!list) return;
     const existing = new Map(catalogModels().map((model) => [model.slug, model]));
+    const query = discoveryQuery.trim().toLowerCase();
+    const filtered = query
+      ? discoveredModels.filter((model) =>
+          (model.slug && model.slug.toLowerCase().includes(query)) ||
+          (model.displayName && model.displayName.toLowerCase().includes(query))
+        )
+      : discoveredModels;
     list.innerHTML = discoveredModels.length
-      ? discoveredModels.map((model) => {
-        const current = existing.get(model.slug);
-        const conflict = current?.maxContextWindow && model.maxContextWindow && current.maxContextWindow !== model.maxContextWindow;
-        const status = conflict ? "上下文上限冲突" : current ? "已在目录" : "可导入";
-        const action = current
-          ? '<button type="button" disabled data-existing="true" aria-label="' + escapeHtml(model.slug) + ' 已存在">已存在</button>'
-          : '<button type="button" data-model-import="' + escapeHtml(model.slug) + '" data-existing="false">导入</button>';
-        return '<article class="b-model-discovery__item"><strong>' + escapeHtml(model.displayName || model.slug) + '</strong><code>' + escapeHtml(model.slug) + '</code><small>' + escapeHtml(modelIsComplete(model) ? modelContextLabel(model) + " · " + modelReasoningLabel(model) : "能力待确认") + '</small><span data-existing="' + String(Boolean(current)) + '" data-conflict="' + String(Boolean(conflict)) + '">' + status + '</span>' + action + '</article>';
-      }).join("")
+      ? (filtered.length
+        ? filtered.map((model) => {
+          const current = existing.get(model.slug);
+          const conflict = current?.maxContextWindow && model.maxContextWindow && current.maxContextWindow !== model.maxContextWindow;
+          const status = conflict ? "上下文上限冲突" : current ? "已在目录" : "可导入";
+          const action = current
+            ? '<button type="button" disabled data-existing="true" aria-label="' + escapeHtml(model.slug) + ' 已存在">已存在</button>'
+            : '<button type="button" data-model-import="' + escapeHtml(model.slug) + '" data-existing="false">导入</button>';
+          return '<article class="b-model-discovery__item"><strong>' + escapeHtml(model.displayName || model.slug) + '</strong><code>' + escapeHtml(model.slug) + '</code><small>' + escapeHtml(modelIsComplete(model) ? modelContextLabel(model) + " · " + modelReasoningLabel(model) : "能力待确认") + '</small><span data-existing="' + String(Boolean(current)) + '" data-conflict="' + String(Boolean(conflict)) + '">' + status + '</span>' + action + '</article>';
+        }).join("")
+        : '<p class="b-model-catalog__message">未找到匹配的模型。</p>')
       : '<p class="b-model-catalog__message">尚未发现模型。</p>';
     const summary = $("[data-model-discovery-summary]");
-    if (summary) summary.textContent = discoveredModels.length + " 个模型 · 当前密钥可用 · API Key 不会进入界面或目录";
+    if (summary) {
+      summary.textContent = query
+        ? `匹配 ${filtered.length} / ${discoveredModels.length} 个模型 · 当前密钥可用 · API Key 不会进入界面或目录`
+        : `${discoveredModels.length} 个模型 · 当前密钥可用 · API Key 不会进入界面或目录`;
+    }
     const importAll = $("[data-action=\"import-all-models\"]");
-    const importableCount = discoveredModels.filter((model) => !existing.has(model.slug)).length;
+    const importablePool = query ? filtered : discoveredModels;
+    const importableCount = importablePool.filter((model) => !existing.has(model.slug)).length;
     if (importAll) {
       importAll.disabled = importableCount === 0;
       importAll.setAttribute("aria-disabled", String(importableCount === 0));
@@ -1757,20 +1772,29 @@
     const normalized = cloneModel(model);
     const maximum = Number(normalized.maxContextWindow);
     const current = Number(normalized.contextWindow);
-    normalized.maxContextWindow = Number.isFinite(maximum) && maximum >= MODEL_CONTEXT_MIN ? maximum : null;
-    normalized.contextWindow = normalized.maxContextWindow && Number.isFinite(current) && current >= MODEL_CONTEXT_MIN
+    const hasValidMax = Number.isFinite(maximum) && maximum >= MODEL_CONTEXT_MIN;
+    const hasValidCurrent = Number.isFinite(current) && current >= MODEL_CONTEXT_MIN;
+    normalized.maxContextWindow = hasValidMax ? maximum : MODEL_CONTEXT_DEFAULT;
+    normalized.contextWindow = hasValidCurrent
       ? Math.min(current, normalized.maxContextWindow)
-      : null;
+      : Math.min(MODEL_CONTEXT_DEFAULT, normalized.maxContextWindow);
     normalized.effectiveContextWindowPercent = normalized.effectiveContextWindowPercent ?? 95;
-    normalized.autoCompactTokenLimit = normalized.contextWindow ? Math.floor(normalized.contextWindow * 0.9) : null;
+    normalized.autoCompactTokenLimit = Math.floor(normalized.contextWindow * 0.9);
     normalized.truncationPolicy = normalized.truncationPolicy || "auto";
-    normalized.inputModalities = normalized.inputModalities?.length ? [...normalized.inputModalities] : ["text"];
-    normalized.supportedReasoningLevels = normalized.supportedReasoningLevels?.length
+    normalized.inputModalities = normalized.inputModalities?.length ? [...normalized.inputModalities] : ["text", "image"];
+    const defaultEfforts = [
+      { effort: "low", description: "" },
+      { effort: "medium", description: "" },
+      { effort: "high", description: "" },
+      { effort: "xhigh", description: "" },
+    ];
+    const hasLevels = Boolean(normalized.supportedReasoningLevels?.length);
+    normalized.supportedReasoningLevels = hasLevels
       ? normalized.supportedReasoningLevels.map((level) => ({ ...level }))
-      : [];
+      : defaultEfforts;
     normalized.defaultReasoningLevel = normalized.supportedReasoningLevels.some((level) => level.effort === normalized.defaultReasoningLevel)
       ? normalized.defaultReasoningLevel
-      : null;
+      : (normalized.supportedReasoningLevels.some((level) => level.effort === "high") ? "high" : (normalized.supportedReasoningLevels[0]?.effort || "high"));
     normalized.supportsReasoningSummaryParameter = Boolean(normalized.supportsReasoningSummaryParameter);
     normalized.defaultReasoningSummary = normalized.supportsReasoningSummaryParameter ? normalized.defaultReasoningSummary || "none" : "none";
     normalized.serviceTiers = normalized.serviceTiers?.map((tier) => ({ ...tier })) || [];
@@ -1783,9 +1807,10 @@
     normalized.experimentalSupportedTools = normalized.experimentalSupportedTools || [];
     normalized.fieldSources = {
       ...(normalized.fieldSources || {}),
-      contextWindow: normalized.fieldSources?.contextWindow || "待确认",
-      maxContextWindow: normalized.fieldSources?.maxContextWindow || "待确认",
-      supportedReasoningLevels: normalized.fieldSources?.supportedReasoningLevels || "待确认",
+      contextWindow: hasValidCurrent && normalized.fieldSources?.contextWindow && normalized.fieldSources.contextWindow !== "待确认" ? normalized.fieldSources.contextWindow : "模板",
+      maxContextWindow: hasValidMax && normalized.fieldSources?.maxContextWindow && normalized.fieldSources.maxContextWindow !== "待确认" ? normalized.fieldSources.maxContextWindow : "模板",
+      supportedReasoningLevels: hasLevels && normalized.fieldSources?.supportedReasoningLevels && normalized.fieldSources.supportedReasoningLevels !== "待确认" ? normalized.fieldSources.supportedReasoningLevels : "模板",
+      defaultReasoningLevel: normalized.fieldSources?.defaultReasoningLevel && normalized.fieldSources.defaultReasoningLevel !== "待确认" ? normalized.fieldSources.defaultReasoningLevel : "模板",
     };
     return normalized;
   }
@@ -1840,7 +1865,14 @@
   async function importDiscoveredModels() {
     const models = catalogModels();
     const existing = new Set(models.map((model) => model.slug));
-    const importable = discoveredModels.filter((model) => !existing.has(model.slug));
+    const query = discoveryQuery.trim().toLowerCase();
+    const pool = query
+      ? discoveredModels.filter((model) =>
+          (model.slug && model.slug.toLowerCase().includes(query)) ||
+          (model.displayName && model.displayName.toLowerCase().includes(query))
+        )
+      : discoveredModels;
+    const importable = pool.filter((model) => !existing.has(model.slug));
     pendingAction = "import-all-models";
     renderControls();
     try {
@@ -2940,9 +2972,13 @@
       const preserveStoredUpdate = String(status.updateState).toLowerCase() === "idle"
         && updatePreference.checkedDay === updateDayKey()
         && updatePreference.lastState;
+      const nextCapabilities = status.transportCapabilities && typeof status.transportCapabilities === "object"
+        ? { ...(state.transportCapabilities || {}), ...status.transportCapabilities }
+        : state.transportCapabilities;
       state = {
         ...state,
         ...status,
+        ...(nextCapabilities ? { transportCapabilities: nextCapabilities } : {}),
         ...(preserveStoredUpdate ? {
           updateState: updatePreference.lastState,
           updateMessage: updatePreference.lastMessage || state.updateMessage,
@@ -3062,6 +3098,7 @@
       return;
     }
     if (action === "open-config") {
+      selectConfigView("settings");
       selectTab("config", { focus: true });
       return;
     }
@@ -3122,6 +3159,9 @@
     if (action === "discover-models") {
       if (pendingAction) return;
       pendingAction = action;
+      discoveryQuery = "";
+      const filterInput = $("[data-model-discovery-filter]");
+      if (filterInput) filterInput.value = "";
       renderControls();
       try {
         const result = invoke
@@ -3668,6 +3708,10 @@
     });
     document.addEventListener("input", (event) => {
       markEditorFieldTouched(event.target);
+      if (event.target.matches?.('[data-model-discovery-filter]')) {
+        discoveryQuery = event.target.value.trim().toLowerCase();
+        renderDiscoveredModels();
+      }
       if (event.target.matches?.('[data-model-field="max-context-window"], [data-model-field="context-window"]')) {
         syncEditorContextFields();
       }

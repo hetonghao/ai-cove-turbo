@@ -120,6 +120,8 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
   assert.match(css, /\.turbo-bubble-action\s*\{[\s\S]*?min-height:\s*34px;[\s\S]*?transition: transform var\(--speed-fast\)/);
   assert.match(css, /\.c-route-reset-popover \.c-route-reset-popover__tail\s*\{[\s\S]*?bottom:\s*-12px;[\s\S]*?width:\s*18px;[\s\S]*?height:\s*12px;/);
   assert.match(css, /\.c-route-reset-popover \.turbo-update-bubble__tail-stroke\s*\{[\s\S]*?stroke:\s*var\(--turbo-accent-line\);[\s\S]*?stroke-width:\s*1px;/);
+  assert.match(css, /--turbo-danger:\s*#ff7b74;/);
+  assert.match(css, /\.turbo-bubble-action--danger\s*\{[\s\S]*?background:\s*var\(--turbo-danger\);/);
   assert.match(css, /\.c-transport__tooltip\s*\{[\s\S]*?max-height:\s*min\(420px, calc\(100dvh - 32px\)\);[\s\S]*?overflow-y:\s*auto;/);
   assert.match(css, /--turbo-detail-viewport-inset:\s*32px;/);
   assert.match(css, /\.c-hover-card\s*\{[\s\S]*?width:\s*max-content;[\s\S]*?min-width:\s*min\(var\(--turbo-hover-card-min-width\), calc\(100vw - var\(--turbo-detail-viewport-inset\)\)\);[\s\S]*?max-width:\s*min\(var\(--turbo-hover-card-max-width\), calc\(100vw - var\(--turbo-detail-viewport-inset\)\)\);/);
@@ -288,6 +290,7 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(configPanel, /class="c-route-reset-popover c-model-delete-popover turbo-tilt-bubble" data-model-delete-popover/);
   assert.match(configPanel, /data-model-delete-popover data-tilt-glare="true"/);
   assert.doesNotMatch(configPanel, /data-model-delete-popover[\s\S]*?turbo-update-bubble__tail/);
+  assert.match(configPanel, /class="turbo-bubble-action turbo-bubble-action--danger"[^>]*data-action="confirm-model-delete"/);
   assert.doesNotMatch(app, /已删除，需要重启 Codex 后生效/);
   assert.match(configPanel, /data-action="cancel-model-delete"/);
   assert.match(configPanel, /data-action="confirm-model-delete"/);
@@ -364,12 +367,15 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
 test("模型目录支持上游发现、编辑向导与完整能力字段", async () => {
   // Given: 模型候选工作区的产品契约。
   const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const css = await readFile(new URL("styles.css", sourceUrl), "utf8");
   const app = await readFile(new URL("app.js", sourceUrl), "utf8");
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 
   // When: 检查前端和原生命令是否暴露完整闭环。
   // Then: 用户能发现、创建、编辑、复制模型，并配置上下文与 reasoning。
   assert.match(html, /data-action="discover-models"/);
+  assert.match(html, /data-model-discovery-filter/);
+  assert.match(css, /\.b-model-discovery__filter/);
   assert.match(html, /data-action="import-all-models"/);
   assert.match(html, /data-model-editor/);
   assert.match(html, /data-model-field="context-window"/);
@@ -393,7 +399,7 @@ test("模型目录支持上游发现、编辑向导与完整能力字段", async
   assert.match(app, /defaultReasoningLevel: "high"/);
   assert.match(app, /effectiveContextWindowPercent: 95/);
   assert.match(app, /truncationPolicy: "auto"/);
-  assert.match(app, /inputModalities: \["text"\]/);
+  assert.match(app, /inputModalities: \["text", "image"\]/);
   assert.match(app, /supportsSearchTool: false/);
   assert.match(app, /supportsParallelToolCalls: false/);
   assert.match(app, /useResponsesLite: false/);
