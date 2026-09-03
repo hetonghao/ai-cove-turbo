@@ -1,6 +1,9 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde_json::Value;
@@ -35,6 +38,37 @@ pub(crate) fn save_metadata(home: &Path, metadata: &CatalogMetadata) -> Result<(
 
 pub(crate) fn read_metadata(home: &Path) -> CatalogMetadata {
     catalog_storage::read_metadata(&fixed_catalog_path(home))
+}
+
+pub(crate) fn sync_catalog(
+    home: &Path,
+    config_path: &Path,
+    recovery_path: &Path,
+    restart_required: bool,
+    loaded: bool,
+    request_verified: bool,
+) -> Result<CatalogStatus, CatalogError> {
+    let fixed_path = fixed_catalog_path(home);
+    let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
+    if record.fixed_path != fixed_path || record.config_path != config_path {
+        return Err(CatalogError::OwnershipConflict);
+    }
+    let pointer = read_catalog_pointer(config_path)?;
+    if pointer.as_deref() != Some(fixed_path.as_path()) {
+        return Err(CatalogError::OwnershipConflict);
+    }
+    let (record, catalog_changed) = sync_catalog_from_root(&fixed_path, recovery_path, record)?;
+    status_from_file(
+        &fixed_path,
+        &record,
+        restart_required || catalog_changed,
+        if catalog_changed { false } else { loaded },
+        if catalog_changed {
+            false
+        } else {
+            request_verified
+        },
+    )
 }
 
 pub(crate) fn revision(bytes: &[u8]) -> String {
@@ -493,20 +527,29 @@ fn protected_root_slug(record: &OwnershipRecord, removed_slugs: &[String]) -> Op
 fn sync_catalog_from_root(
     fixed_path: &Path,
     recovery_path: &Path,
-    mut record: OwnershipRecord,
+    record: OwnershipRecord,
 ) -> Result<(OwnershipRecord, bool), CatalogError> {
-    let Some(source_path) = record.source_path.as_ref() else {
+    sync_catalog_from_root_with_executable(fixed_path, recovery_path, record, None)
+}
+
+fn sync_catalog_from_root_with_executable(
+    fixed_path: &Path,
+    recovery_path: &Path,
+    mut record: OwnershipRecord,
+    bundled_executable: Option<&Path>,
+) -> Result<(OwnershipRecord, bool), CatalogError> {
+    let Some((source_bytes, mut source_document, source_models)) =
+        root_snapshot(&record, bundled_executable)
+    else {
         return Ok((record, false));
     };
-    let Ok(source_bytes) = fs::read(source_path) else {
+    let source_digest = digest(&source_bytes);
+    let metadata_before = catalog_storage::read_metadata(fixed_path);
+    if record.root_document.is_object()
+        && metadata_before.root_source_digest.as_deref() == Some(source_digest.as_str())
+    {
         return Ok((record, false));
-    };
-    let Ok(mut source_document) = serde_json::from_slice::<Value>(&source_bytes) else {
-        return Ok((record, false));
-    };
-    let Ok(source_models) = parse_models(&source_bytes) else {
-        return Ok((record, false));
-    };
+    }
     if let Some(models) = source_document
         .get_mut("models")
         .and_then(Value::as_array_mut)
@@ -545,7 +588,6 @@ fn sync_catalog_from_root(
     metadata.root_source_digest = Some(next_digest);
     metadata.root_seen_slugs = next_seen.clone();
     let next_bytes = serde_json::to_vec_pretty(&current_document).map_err(CatalogError::Json)?;
-    let metadata_before = catalog_storage::read_metadata(fixed_path);
     let catalog_changed = next_bytes != current_bytes;
     let metadata_changed = metadata != metadata_before;
     if catalog_changed {
@@ -576,6 +618,60 @@ fn sync_catalog_from_root(
         }
     }
     Ok((record, catalog_changed))
+}
+
+fn root_snapshot(
+    record: &OwnershipRecord,
+    bundled_executable: Option<&Path>,
+) -> Option<(Vec<u8>, Value, Vec<CatalogModel>)> {
+    if let Some(source_path) = record.source_path.as_ref() {
+        if let Ok(source_bytes) = fs::read(source_path) {
+            if let (Ok(source_document), Ok(source_models)) = (
+                serde_json::from_slice::<Value>(&source_bytes),
+                parse_models(&source_bytes),
+            ) {
+                return Some((source_bytes, source_document, source_models));
+            }
+        }
+    }
+    let source_bytes = bundled_catalog_bytes(
+        bundled_executable.unwrap_or_else(|| Path::new("codex")),
+        record.config_path.parent(),
+    )?;
+    let source_document = serde_json::from_slice::<Value>(&source_bytes).ok()?;
+    let source_models = parse_models(&source_bytes).ok()?;
+    Some((source_bytes, source_document, source_models))
+}
+
+fn bundled_catalog_bytes(executable: &Path, current_dir: Option<&Path>) -> Option<Vec<u8>> {
+    let mut command = Command::new(executable);
+    command
+        .args(["debug", "models", "--bundled"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
+    }
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) => return None,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+    child
+        .wait_with_output()
+        .ok()
+        .and_then(|output| output.status.success().then_some(output.stdout))
 }
 
 fn merge_root_models(
@@ -611,7 +707,11 @@ fn merge_root_models(
             .iter()
             .position(|model| model.get("slug").and_then(Value::as_str) == Some(slug))
         else {
-            current_models.push(next_model.clone());
+            let mut added = next_model.clone();
+            let slug = slug.to_owned();
+            let normalized = CatalogModel::with_safe_defaults(model_from_discovery(&added, slug));
+            write_model_fields(&mut added, &normalized);
+            current_models.push(added);
             continue;
         };
         let Some(current_object) = current_models[current_index].as_object_mut() else {
@@ -653,6 +753,27 @@ fn merge_root_models(
             }
         }
     }
+    current_models.sort_by(|left, right| {
+        let left_priority = left
+            .get("priority")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let right_priority = right
+            .get("priority")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        left_priority.cmp(&right_priority).then_with(|| {
+            left.get("slug")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("slug")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+        })
+    });
     Ok(())
 }
 
@@ -909,6 +1030,9 @@ pub(crate) fn restore_catalog(
 mod tests {
     use std::{error::Error, fs};
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -1141,6 +1265,86 @@ mod tests {
                 .any(|slug| slug == "beta")
         );
         assert!(saved.revision != synced.revision);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_sync_falls_back_to_bundled_catalog_and_skips_unchanged_digest()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        ensure_catalog(root.path(), &config, &recovery)?;
+        let record = read_record(&recovery)?.ok_or("recovery missing")?;
+        fs::remove_file(&source)?;
+
+        let bundled = root.path().join("bundled.json");
+        let bundled_bytes = br#"{"models":[{"slug":"alpha","display_name":"Alpha","description":"bundled update","visibility":"list","priority":2,"truncation_policy":{"mode":"bytes","limit":10000},"shell_type":"shell_command","support_verbosity":true},{"slug":"beta","display_name":"Beta","description":"b","visibility":"hide","priority":1,"truncation_policy":{"mode":"bytes","limit":10000},"shell_type":"shell_command","support_verbosity":true},{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","description":"Codex template","visibility":"list","priority":0,"truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true}]}"#;
+        fs::write(&bundled, bundled_bytes)?;
+        let executable = root.path().join("codex-fake");
+        fs::write(
+            &executable,
+            format!("#!/bin/sh\ncat \"{}\"\n", bundled.display()),
+        )?;
+        let mut permissions = fs::metadata(&executable)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions)?;
+
+        let (synced_record, changed) = sync_catalog_from_root_with_executable(
+            &fixed_catalog_path(root.path()),
+            &recovery,
+            record,
+            Some(&executable),
+        )?;
+        assert!(changed);
+        let synced = status_from_file(
+            &fixed_catalog_path(root.path()),
+            &synced_record,
+            true,
+            false,
+            false,
+        )?;
+        assert_eq!(
+            synced
+                .models
+                .iter()
+                .find(|model| model.slug == "alpha")
+                .map(|model| model.description.as_str()),
+            Some("bundled update")
+        );
+        assert_eq!(
+            synced.metadata.root_source_digest.as_deref(),
+            Some(digest(bundled_bytes).as_str())
+        );
+        let (_, changed_again) = sync_catalog_from_root_with_executable(
+            &fixed_catalog_path(root.path()),
+            &recovery,
+            synced_record,
+            Some(&executable),
+        )?;
+        assert!(!changed_again);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_catalog_output_is_rejected_when_not_valid_json() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        ensure_catalog(root.path(), &config, &recovery)?;
+        let record = read_record(&recovery)?.ok_or("recovery missing")?;
+        fs::remove_file(&source)?;
+        let executable = root.path().join("codex-invalid");
+        fs::write(&executable, "#!/bin/sh\nprintf '%s' invalid\n")?;
+        let mut permissions = fs::metadata(&executable)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions)?;
+
+        assert!(root_snapshot(&record, Some(&executable)).is_none());
         Ok(())
     }
 

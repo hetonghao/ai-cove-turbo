@@ -9,7 +9,7 @@ use std::{
         Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(all(not(test), target_os = "macos"))]
@@ -42,6 +42,7 @@ use crate::{
 const DEFAULT_PORT: u16 = 44_175;
 const TRAFFIC_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 const TRAFFIC_COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const CATALOG_SYNC_MIN_INTERVAL_MS: u64 = 5_000;
 
 fn codex_database_path(config_path: &Path) -> PathBuf {
     config_path
@@ -295,6 +296,7 @@ pub(crate) struct AppRuntime {
     status: RwLock<AppStatus>,
     catalog: Mutex<CatalogStatus>,
     catalog_write_lock: AsyncMutex<()>,
+    catalog_last_sync_ms: AtomicU64,
     compression_enabled: Arc<AtomicBool>,
     websocket_enabled: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
@@ -338,6 +340,7 @@ impl AppRuntime {
             status: RwLock::new(status),
             catalog: Mutex::new(catalog_status),
             catalog_write_lock: AsyncMutex::new(()),
+            catalog_last_sync_ms: AtomicU64::new(0),
             metrics,
             managed: Mutex::new(None),
             proxy: AsyncMutex::new(None),
@@ -1799,6 +1802,15 @@ impl AppRuntime {
     }
 
     fn refresh_catalog(&self) {
+        let Ok(_write_guard) = self.catalog_write_lock.try_lock() else {
+            return;
+        };
+        let now = unix_time_ms();
+        let previous = self.catalog_last_sync_ms.load(Ordering::Relaxed);
+        if !catalog_sync_due(previous, now) {
+            return;
+        }
+        self.catalog_last_sync_ms.store(now, Ordering::Relaxed);
         let current = lock_mutex(&self.catalog).clone();
         if current.state == "restored" {
             return;
@@ -1809,7 +1821,7 @@ impl AppRuntime {
             .parent()
             .and_then(Path::parent)
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        match catalog::read_catalog(
+        match catalog::sync_catalog(
             &home,
             &self.paths.config_path,
             &self.paths.catalog_recovery_path(),
@@ -1842,6 +1854,18 @@ impl AppRuntime {
                 format!("Turbo 会话续接记录失败，下次启动将要求重启 Codex：{error}");
         });
     }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(u64::MAX)
+}
+
+fn catalog_sync_due(last_probe_ms: u64, now_ms: u64) -> bool {
+    last_probe_ms == 0 || now_ms.saturating_sub(last_probe_ms) >= CATALOG_SYNC_MIN_INTERVAL_MS
 }
 
 fn load_session_handoff(handoff_path: &Path) -> (Option<SessionHandoff>, Option<ConfigError>) {
@@ -2855,6 +2879,13 @@ supports_websockets = false
     #[test]
     fn traffic_persistence_runs_every_thirty_seconds() {
         assert_eq!(TRAFFIC_SAVE_INTERVAL, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn catalog_sync_probe_is_throttled_between_intervals() {
+        assert!(catalog_sync_due(0, 1));
+        assert!(!catalog_sync_due(10_000, 14_999));
+        assert!(catalog_sync_due(10_000, 15_000));
     }
 
     #[tokio::test]
