@@ -1050,14 +1050,6 @@ fn merge_root_models(
             let complete_shape = root_model_shape_is_complete(&added);
             normalize_root_model(&mut added, template.as_ref());
             validate_root_model(&added, complete_shape)?;
-            if !complete_shape {
-                set_root_field_source(metadata, slug, "capabilities", "待确认");
-                metadata
-                    .conflicts
-                    .entry(slug.to_owned())
-                    .or_default()
-                    .push("capabilities: 根目录条目能力不完整，待确认".to_owned());
-            }
             current_models.push(added);
             continue;
         };
@@ -1117,8 +1109,19 @@ fn merge_root_models(
     }
     for model in current_models.iter_mut() {
         let complete_shape = root_model_shape_is_complete(model);
+        let slug = model.get("slug").and_then(Value::as_str).map(str::to_owned);
         normalize_root_model(model, template.as_ref());
         validate_root_model(model, complete_shape)?;
+        if !complete_shape {
+            if let Some(slug) = slug.as_deref() {
+                set_root_field_source(metadata, slug, "capabilities", "待确认");
+                let conflicts = metadata.conflicts.entry(slug.to_owned()).or_default();
+                let marker = "capabilities: 根目录条目能力不完整，待确认".to_owned();
+                if !conflicts.contains(&marker) {
+                    conflicts.push(marker);
+                }
+            }
+        }
     }
     current_models.sort_by(|left, right| {
         let left_priority = left
