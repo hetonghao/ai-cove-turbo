@@ -2941,6 +2941,21 @@ supports_websockets = false
         assert!(runtime.catalog_sync_running.load(Ordering::Acquire));
     }
 
+    #[test]
+    fn catalog_refresh_schedules_without_waiting_for_probe() {
+        let root = tempdir().expect("temporary runtime root");
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: root.path().join("config.toml"),
+            data_dir: root.path().join("data"),
+        });
+        let started = std::time::Instant::now();
+
+        runtime.refresh_catalog();
+
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(runtime.catalog_last_sync_ms.load(Ordering::Acquire) > 0);
+    }
+
     #[tokio::test]
     async fn traffic_persistence_reports_write_failures() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
