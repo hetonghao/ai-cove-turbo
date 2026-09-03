@@ -1294,6 +1294,8 @@ fn remove_catalog_metadata(metadata: &mut CatalogMetadata, removed_slugs: &[Stri
     for slug in removed_slugs {
         metadata.field_sources.remove(slug);
         metadata.conflicts.remove(slug);
+        metadata.root_field_digests.remove(slug);
+        metadata.user_overrides.remove(slug);
     }
 }
 
