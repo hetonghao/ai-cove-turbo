@@ -623,6 +623,19 @@ test("自动同步到达时保留模型列表草稿，撤销后应用最新目�
   assert.match(harness.catalogMarkup(), /data-model-slug="gamma"/);
 });
 
+test("自动同步到达时不覆盖打开中的模型编辑草稿", async () => {
+  const harness = await catalogHarness({ freshStatus: true });
+  harness.editModel("alpha");
+  harness.inputEditor("displayName", "Alpha draft");
+  harness.setCatalogModels([
+    { slug: "alpha", displayName: "Alpha from Codex", description: "root", visibility: "list", priority: 1, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
+    { slug: "beta", displayName: "Beta", description: "b", visibility: "hide", priority: 2 },
+  ]);
+
+  await harness.tick();
+  assert.equal(harness.editorField("displayName").value, "Alpha draft");
+});
+
 test("目录状态变化重建列表后保留用户滚动位置", async () => {
   const harness = await catalogHarness({ freshStatus: true });
   harness.setScrollTop(120);

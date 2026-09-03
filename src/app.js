@@ -1051,6 +1051,10 @@
     return catalogListDirty() || policyDraftDirty();
   }
 
+  function editorDraftDirty() {
+    return Boolean(editorDraft && editorTouchedFields.size);
+  }
+
   function visibilityIcon(visible) {
     return visible
       ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-5 9.5-5 9.5 5 9.5 5-3.5 5-9.5 5-9.5-5-9.5-5Z"/><circle cx="12" cy="12" r="2.5"/></svg>'
@@ -3068,7 +3072,7 @@
     if (status && typeof status === "object") {
       const previousModels = JSON.stringify(state.catalog?.models || []);
       const previousPolicy = policySignature(state.modelPolicy);
-      const preserveCatalogDraft = modelSettingsDirty();
+      const preserveCatalogDraft = modelSettingsDirty() || editorDraftDirty();
       const preserveStoredUpdate = String(status.updateState).toLowerCase() === "idle"
         && updatePreference.checkedDay === updateDayKey()
         && updatePreference.lastState;
