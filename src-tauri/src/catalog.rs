@@ -648,16 +648,14 @@ fn sync_catalog_from_root_with_executable(
     if digest(&latest_bytes) != digest(&current_bytes) {
         return Err(CatalogError::ContentChanged);
     }
+    let mut rollback = CatalogSyncRollbackGuard::new(fixed_path, &current_bytes, &metadata_before);
+    rollback.catalog_touched = catalog_changed;
+    rollback.metadata_touched = metadata_changed;
     if catalog_changed {
         write_atomic(fixed_path, &next_bytes)?;
     }
     if metadata_changed {
-        if let Err(error) = catalog_storage::write_metadata(fixed_path, &metadata) {
-            if catalog_changed {
-                let _ = write_atomic(fixed_path, &current_bytes);
-            }
-            return Err(error);
-        }
+        catalog_storage::write_metadata(fixed_path, &metadata)?;
     }
     let previous_record = record.clone();
     record.root_document = source_document;
@@ -665,17 +663,50 @@ fn sync_catalog_from_root_with_executable(
     if record.root_document != previous_record.root_document
         || record.root_slugs != previous_record.root_slugs
     {
-        if let Err(error) = write_record(recovery_path, &record) {
-            if catalog_changed {
-                let _ = write_atomic(fixed_path, &current_bytes);
-            }
-            if metadata_changed {
-                let _ = catalog_storage::write_metadata(fixed_path, &metadata_before);
-            }
-            return Err(error);
+        write_record(recovery_path, &record)?;
+    }
+    rollback.commit();
+    Ok((record, catalog_changed))
+}
+
+struct CatalogSyncRollbackGuard {
+    fixed_path: PathBuf,
+    current_bytes: Vec<u8>,
+    metadata_before: CatalogMetadata,
+    catalog_touched: bool,
+    metadata_touched: bool,
+    committed: bool,
+}
+
+impl CatalogSyncRollbackGuard {
+    fn new(fixed_path: &Path, current_bytes: &[u8], metadata_before: &CatalogMetadata) -> Self {
+        Self {
+            fixed_path: fixed_path.to_path_buf(),
+            current_bytes: current_bytes.to_owned(),
+            metadata_before: metadata_before.clone(),
+            catalog_touched: false,
+            metadata_touched: false,
+            committed: false,
         }
     }
-    Ok((record, catalog_changed))
+
+    const fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for CatalogSyncRollbackGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if self.catalog_touched {
+            let _ = write_atomic(&self.fixed_path, &self.current_bytes);
+        }
+        if self.metadata_touched {
+            let _ = catalog_storage::write_metadata(&self.fixed_path, &self.metadata_before);
+        }
+    }
 }
 
 fn root_snapshot(
