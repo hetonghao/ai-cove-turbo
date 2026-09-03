@@ -1046,16 +1046,18 @@ fn merge_root_models(
             .iter()
             .position(|model| model.get("slug").and_then(Value::as_str) == Some(slug))
         else {
-            let Some(template) = template.as_ref() else {
-                continue;
-            };
             let mut added = next_model.clone();
             let complete_shape = root_model_shape_is_complete(&added);
+            normalize_root_model(&mut added, template.as_ref());
+            validate_root_model(&added, complete_shape)?;
             if !complete_shape {
-                continue;
+                set_root_field_source(metadata, slug, "capabilities", "待确认");
+                metadata
+                    .conflicts
+                    .entry(slug.to_owned())
+                    .or_default()
+                    .push("capabilities: 根目录条目能力不完整，待确认".to_owned());
             }
-            normalize_root_model(&mut added, Some(template));
-            validate_root_model_required(&added)?;
             current_models.push(added);
             continue;
         };
@@ -1388,23 +1390,13 @@ fn validate_root_model(model: &Value, complete_shape: bool) -> Result<(), Catalo
 }
 
 fn root_model_shape_is_complete(model: &Value) -> bool {
-    [
-        "context_window",
-        "max_context_window",
-        "supported_reasoning_levels",
-        "default_reasoning_level",
-    ]
-    .into_iter()
-    .any(|key| model.get(key).is_some())
-}
-
-fn validate_root_model_required(model: &Value) -> Result<(), CatalogError> {
-    let Some(slug) = model.get("slug").and_then(Value::as_str) else {
-        return Err(CatalogError::InvalidSchema("模型缺少 slug".to_owned()));
-    };
-    CatalogModel::with_safe_defaults(model_from_discovery(model, slug.to_owned()))
-        .validate_complete()
-        .map_err(CatalogError::InvalidSchema)
+    model.get("context_window").is_some()
+        || model.get("max_context_window").is_some()
+        || model
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .is_some_and(|levels| !levels.is_empty())
+        || model.get("default_reasoning_level").is_some()
 }
 
 fn validate_codex_document(document: &Value) -> Result<(), CatalogError> {
@@ -1791,6 +1783,52 @@ mod tests {
                 .any(|slug| slug == "beta")
         );
         assert!(saved.revision != synced.revision);
+        Ok(())
+    }
+
+    #[test]
+    fn root_sync_keeps_incomplete_added_model_pending() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        ensure_catalog(root.path(), &config, &recovery)?;
+
+        let mut root_document: Value = serde_json::from_slice(&fs::read(&source)?)?;
+        root_document["models"]
+            .as_array_mut()
+            .expect("models array")
+            .push(serde_json::json!({
+                "slug": "remote-basic",
+                "display_name": "Remote Basic",
+                "description": "能力待确认",
+                "visibility": "list",
+                "priority": 3,
+                "truncation_policy": {"mode": "tokens", "limit": 10000},
+                "shell_type": "shell_command",
+                "support_verbosity": true
+            }));
+        fs::write(&source, serde_json::to_vec_pretty(&root_document)?)?;
+
+        let refreshed = ensure_catalog(root.path(), &config, &recovery)?;
+        let pending = refreshed
+            .models
+            .iter()
+            .find(|model| model.slug == "remote-basic")
+            .ok_or("incomplete root model missing")?;
+        assert_eq!(
+            pending
+                .field_sources
+                .get("capabilities")
+                .map(String::as_str),
+            Some("待确认")
+        );
+        assert!(
+            pending
+                .conflicts
+                .iter()
+                .any(|value| value == "capabilities: 根目录条目能力不完整，待确认")
+        );
         Ok(())
     }
 
