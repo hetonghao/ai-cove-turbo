@@ -87,7 +87,7 @@ async fn auto_http_only_capability_skips_upstream_websocket_application_attempt(
 }
 
 #[tokio::test]
-async fn http_response_continuation_stays_on_http_and_preserves_response_id() -> io::Result<()> {
+async fn http_response_continuation_is_rejected_without_http_replay() -> io::Result<()> {
     // Given: Auto policy resolves the model to HttpOnly.
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::Persistent,
@@ -108,18 +108,26 @@ async fn http_response_continuation_stays_on_http_and_preserves_response_id() ->
         .ok_or_else(|| io::Error::other("HTTP response id missing"))?;
     assert_eq!(first_id, "http-response-1");
     send_continuation(&mut client, first_id).await?;
-    server.fixture.wait_http(2).await?;
 
-    // Then: the continuation remains HTTP and receives a new terminal response ID.
+    // Then: Turbo reports state missing locally instead of sending unsupported stateful HTTP.
     let second = next_event_value(&mut client).await?;
     assert_eq!(
-        second.pointer("/response/id").and_then(Value::as_str),
-        Some("http-response-2")
+        second.pointer("/error/code"),
+        Some(&Value::from("previous_response_not_found"))
     );
     let counts = server.fixture.counts().await;
     assert!(counts.private_handshakes >= 6);
     assert_eq!(counts.private_messages, 0);
-    assert_eq!(counts.http_requests, 2);
+    assert_eq!(counts.http_requests, 1);
+
+    // And: a fresh full request remains usable over HTTP.
+    send_create(&mut client).await?;
+    server.fixture.wait_http(2).await?;
+    let third = next_event_value(&mut client).await?;
+    assert_eq!(
+        third.pointer("/response/id").and_then(Value::as_str),
+        Some("http-response-2")
+    );
 
     drop(client);
     proxy.stop().await;

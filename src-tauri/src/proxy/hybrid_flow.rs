@@ -215,6 +215,19 @@ async fn start_response(
     if previous_response_id.is_some()
         && session.last_response_transport == Some(super::ResponseTransport::Http)
     {
+        if session
+            .last_http_traffic
+            .is_some_and(|traffic| traffic.route == traffic::TrafficRoute::HybridCapabilityHttp)
+        {
+            session.response_started = false;
+            let _ = send_error(
+                client,
+                "previous_response_not_found",
+                "Previous response is not available on this websocket",
+            )
+            .await;
+            return true;
+        }
         let Ok(http_payload) = continuation_payload(&payload) else {
             let _ = send_error(
                 client,
