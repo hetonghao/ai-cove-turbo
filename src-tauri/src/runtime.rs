@@ -1223,6 +1223,8 @@ impl AppRuntime {
                 .collect(),
             root_source_digest: None,
             root_seen_slugs: Vec::new(),
+            root_available: false,
+            root_unavailable_reason: None,
             conflicts: result
                 .models
                 .iter()
@@ -1825,11 +1827,17 @@ impl AppRuntime {
             &home,
             &self.paths.config_path,
             &self.paths.catalog_recovery_path(),
+            &current.revision,
             current.restart_required,
             current.loaded,
             current.request_verified,
         ) {
             Ok(updated) => {
+                if updated.revision != current.revision {
+                    self.set_pending_verification_models(
+                        updated.models.iter().map(|model| model.slug.clone()),
+                    );
+                }
                 *lock_mutex(&self.catalog) = updated.clone();
                 self.update_status(|status| status.catalog = updated);
             }

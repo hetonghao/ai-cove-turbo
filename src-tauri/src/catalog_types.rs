@@ -366,6 +366,10 @@ pub(crate) struct CatalogMetadata {
     #[serde(default)]
     pub(crate) root_seen_slugs: Vec<String>,
     #[serde(default)]
+    pub(crate) root_available: bool,
+    #[serde(default)]
+    pub(crate) root_unavailable_reason: Option<String>,
+    #[serde(default)]
     pub(crate) field_sources: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default)]
     pub(crate) conflicts: BTreeMap<String, Vec<String>>,
