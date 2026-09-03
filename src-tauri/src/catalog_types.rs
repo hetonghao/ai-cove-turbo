@@ -409,6 +409,10 @@ pub(crate) struct CatalogMetadata {
     #[serde(default)]
     pub(crate) root_template_source_digest: Option<String>,
     #[serde(default)]
+    pub(crate) root_field_digests: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default)]
+    pub(crate) user_overrides: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     pub(crate) field_sources: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default)]
     pub(crate) conflicts: BTreeMap<String, Vec<String>>,

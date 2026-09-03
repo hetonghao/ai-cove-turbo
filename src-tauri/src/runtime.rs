@@ -1234,6 +1234,8 @@ impl AppRuntime {
             root_last_synced_at: None,
             root_template_source_slug: None,
             root_template_source_digest: None,
+            root_field_digests: BTreeMap::new(),
+            user_overrides: BTreeMap::new(),
             conflicts: result
                 .models
                 .iter()

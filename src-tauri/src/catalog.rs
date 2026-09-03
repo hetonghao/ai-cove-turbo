@@ -711,6 +711,7 @@ fn sync_catalog_from_root_with_executable(
         .collect::<Vec<_>>();
     metadata.root_source_digest = Some(next_digest);
     metadata.root_seen_slugs = next_seen.clone();
+    metadata.root_field_digests = root_field_digests(&source_document);
     let next_bytes = serde_json::to_vec_pretty(&current_document).map_err(CatalogError::Json)?;
     let catalog_changed = next_bytes != current_bytes;
     metadata.root_last_synced_at = Some(now_ms_string());
@@ -896,6 +897,30 @@ fn root_fields_from_document(
         .unwrap_or_default()
 }
 
+fn root_field_digests(
+    document: &Value,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
+    document
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| {
+                    let slug = model.get("slug")?.as_str()?.to_owned();
+                    let fields = model.as_object()?.iter().filter_map(|(key, value)| {
+                        (key != "slug")
+                            .then(|| canonical_digest(value).ok())
+                            .flatten()
+                            .map(|digest| (key.clone(), digest))
+                    });
+                    Some((slug, fields.collect()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn previous_root_document(record: &OwnershipRecord) -> Value {
     if record.root_fields.is_empty() {
         return if record.root_document.is_object() {
@@ -1072,9 +1097,13 @@ fn merge_root_models(
             if current == next {
                 set_root_field_source(metadata, slug, &key, "上游");
                 clear_root_conflict(metadata, slug, &key);
+                clear_user_override(metadata, slug, &key);
                 continue;
             }
             if next == old {
+                if current != old {
+                    set_user_override(metadata, slug, &key);
+                }
                 continue;
             }
             if current == old {
@@ -1087,6 +1116,7 @@ fn merge_root_models(
                     }
                 }
                 set_root_field_source(metadata, slug, &key, "上游");
+                clear_user_override(metadata, slug, &key);
             } else if matches!(
                 key.as_str(),
                 "display_name" | "description" | "visibility" | "priority"
@@ -1097,6 +1127,7 @@ fn merge_root_models(
                 if !conflicts.contains(&marker) {
                     conflicts.push(marker);
                 }
+                set_user_override(metadata, slug, &key);
             } else {
                 set_root_field_source(metadata, slug, &key, "冲突");
                 let conflicts = metadata.conflicts.entry(slug.to_owned()).or_default();
@@ -1104,6 +1135,7 @@ fn merge_root_models(
                 if !conflicts.contains(&marker) {
                     conflicts.push(marker);
                 }
+                set_user_override(metadata, slug, &key);
             }
         }
     }
@@ -1238,6 +1270,23 @@ fn clear_root_conflict(metadata: &mut CatalogMetadata, slug: &str, key: &str) {
         if conflicts.is_empty() {
             metadata.conflicts.remove(slug);
         }
+    }
+}
+
+fn set_user_override(metadata: &mut CatalogMetadata, slug: &str, key: &str) {
+    let fields = metadata.user_overrides.entry(slug.to_owned()).or_default();
+    if !fields.iter().any(|field| field == key) {
+        fields.push(key.to_owned());
+    }
+}
+
+fn clear_user_override(metadata: &mut CatalogMetadata, slug: &str, key: &str) {
+    let Some(fields) = metadata.user_overrides.get_mut(slug) else {
+        return;
+    };
+    fields.retain(|field| field != key);
+    if fields.is_empty() {
+        metadata.user_overrides.remove(slug);
     }
 }
 
@@ -1773,6 +1822,23 @@ mod tests {
                 .conflicts
                 .iter()
                 .any(|value| value.contains("description"))
+        );
+        assert!(
+            synced
+                .metadata
+                .user_overrides
+                .get("alpha")
+                .is_some_and(|fields| fields.iter().any(|field| field == "description"))
+        );
+        assert_eq!(
+            synced
+                .metadata
+                .root_field_digests
+                .get("alpha")
+                .and_then(|fields| fields.get("description")),
+            Some(&canonical_digest(
+                &root_document["models"][0]["description"]
+            )?),
         );
         assert_eq!(
             synced.metadata.root_source_digest.as_deref(),
