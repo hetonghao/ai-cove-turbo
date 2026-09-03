@@ -6236,6 +6236,57 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
   overflow: hidden;
 }
 
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__root-status {
+  position: relative;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid rgba(255, 123, 116, 0.55);
+  border-radius: 50%;
+  color: var(--turbo-danger);
+  background: rgba(255, 123, 116, 0.12);
+  font: 700 0.66rem/1 var(--font-mono);
+  cursor: help;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__root-status[data-tooltip]::after {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  left: 0;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 32px));
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 123, 116, 0.55);
+  border-radius: 7px;
+  color: var(--b-ink);
+  background: var(--b-surface-2);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.42);
+  content: attr(data-tooltip);
+  font: 0.65rem/1.45 var(--font-mono);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-3px);
+  visibility: hidden;
+  transition: opacity var(--speed-fast) var(--ease-out), transform var(--speed-fast) var(--ease-out), visibility var(--speed-fast);
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__root-status[data-tooltip]:hover::after,
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__root-status[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__root-status:focus-visible {
+  outline: 2px solid var(--turbo-danger);
+  outline-offset: 2px;
+}
+
 body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__identity strong {
   min-width: 0;
   overflow: hidden;
@@ -6317,6 +6368,12 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
   border-radius: 5px;
   color: var(--b-muted);
   background: transparent;
+}
+
+body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__delete:disabled {
+  cursor: not-allowed;
+  color: var(--b-faint);
+  opacity: 0.45;
 }
 
 body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__delete svg {

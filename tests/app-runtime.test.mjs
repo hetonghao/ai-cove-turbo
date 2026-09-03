@@ -502,6 +502,20 @@ test("确认删除模型候选后列表移除目标并向后端传递删除意�
   assert.match(harness.catalogMarkup(), /data-model-slug="beta"/);
 });
 
+test("根目录移除模型显示红色感叹号并保留可删除入口", async () => {
+  const harness = await catalogHarness({
+    models: [
+      { slug: "removed", displayName: "Removed", description: "r", visibility: "list", priority: 1, rootMissing: true, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
+      { slug: "preset", displayName: "Preset", description: "p", visibility: "list", priority: 2, rootPresence: true, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
+    ],
+  });
+
+  const markup = harness.catalogMarkup();
+  assert.match(markup, /b-model-row__root-status[^>]*aria-label="Codex 新版本已删除此模型，建议用户删除"/);
+  assert.match(markup, /data-model-slug="removed"[\s\S]*?data-model-delete[^>]*aria-label="删除 Removed"(?![^>]*disabled)/);
+  assert.match(markup, /data-model-slug="preset"[\s\S]*?data-model-delete[^>]*disabled[^>]*aria-disabled="true"[^>]*aria-label="此模型为 Codex 预设模型，暂不支持删除"/);
+});
+
 test("模型弹窗保存独立于列表草稿并保留原上下文", async () => {
   const harness = await catalogHarness();
   harness.toggleVisibility("alpha");
@@ -565,6 +579,21 @@ test("状态轮询不重建模型目录控件或覆盖未保存编辑", async ()
 
   const policySave = harness.calls.find((call) => call.command === "update_model_policy");
   assert.equal(policySave.args.update.models.alpha, "http");
+});
+
+test("自动同步到达时保留模型列表草稿，撤销后应用最新目录", async () => {
+  const harness = await catalogHarness({ freshStatus: true });
+  harness.toggleVisibility("alpha");
+  harness.setCatalogModels([
+    { slug: "alpha", displayName: "Alpha", description: "a", visibility: "list", priority: 1, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
+    { slug: "beta", displayName: "Beta", description: "b", visibility: "hide", priority: 2 },
+    { slug: "gamma", displayName: "Gamma", description: "g", visibility: "list", priority: 3, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
+  ]);
+
+  await harness.tick();
+  assert.doesNotMatch(harness.catalogMarkup(), /data-model-slug="gamma"/);
+  await harness.click("undo-model-settings");
+  assert.match(harness.catalogMarkup(), /data-model-slug="gamma"/);
 });
 
 test("目录状态变化重建列表后保留用户滚动位置", async () => {

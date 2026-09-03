@@ -969,7 +969,9 @@
         control.setAttribute("aria-busy", String(actionPending));
       }
       if (action === "delete-model") {
-        control.disabled = modelSettingsBusy;
+        const protectedModel = modelDeleteProtected(control);
+        control.disabled = modelSettingsBusy || protectedModel;
+        control.setAttribute("aria-disabled", String(protectedModel));
         control.setAttribute("aria-busy", String(pendingAction === action));
       }
       if (managed) {
@@ -1122,6 +1124,26 @@
     return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>';
   }
 
+  function modelRootPresence(model) {
+    if (typeof model?.rootPresence === "boolean") return model.rootPresence ? "present" : "missing";
+    if (typeof model?.rootMissing === "boolean") return model.rootMissing ? "missing" : "present";
+    return "unknown";
+  }
+
+  const ROOT_MODEL_MISSING_LABEL = "Codex 新版本已删除此模型，建议用户删除";
+  const ROOT_MODEL_PROTECTED_LABEL = "此模型为 Codex 预设模型，暂不支持删除";
+
+  function rootModelStatusMarkup(model) {
+    return modelRootPresence(model) === "missing"
+      ? '<span class="b-model-row__root-status" tabindex="0" role="img" aria-label="' + ROOT_MODEL_MISSING_LABEL + '" title="' + ROOT_MODEL_MISSING_LABEL + '" data-tooltip="' + ROOT_MODEL_MISSING_LABEL + '">!</span>'
+      : "";
+  }
+
+  function modelDeleteProtected(control) {
+    const slug = control?.closest?.("[data-model-slug]")?.dataset?.modelSlug;
+    return modelRootPresence(catalogModels().find((model) => model.slug === slug)) === "present";
+  }
+
   function modelCatalogMarkup() {
     const policies = policyModels();
     // aria-pressed="${String(transport === "auto")}" remains the transport DOM contract.
@@ -1134,9 +1156,13 @@
       const conflict = model.conflicts?.length ? " · 冲突待确认" : "";
       const visible = model.visibility === "list";
       const visibilityLabel = visible ? "隐藏 " + modelLabel : "显示 " + modelLabel;
-      const deleteLabel = pendingDeleteSlug === model.slug ? "确认删除 " + modelLabel : "删除 " + modelLabel;
+      const rootPresence = modelRootPresence(model);
+      const deleteProtected = rootPresence === "present";
+      const deleteLabel = deleteProtected
+        ? ROOT_MODEL_PROTECTED_LABEL
+        : pendingDeleteSlug === model.slug ? "确认删除 " + modelLabel : "删除 " + modelLabel;
       const sourceMarkup = source ? (source === "上游" ? conflict ? '<span class="b-model-row__confirm" data-model-source="' + escapeHtml(source) + '">' + escapeHtml(conflict.slice(3)) + '</span>' : "" : '<span data-model-source="' + escapeHtml(source) + '">' + escapeHtml(source + conflict) + '</span>') : conflict ? '<span class="b-model-row__confirm">' + escapeHtml(conflict.slice(3)) + '</span>' : '';
-      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><span class="b-model-row__identity"><strong>' + escapeHtml(modelLabel) + '</strong>' + modelSlugMarkup(model, modelLabel) + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '<div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div></span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button><button class="b-model-row__delete" type="button" data-action="delete-model" data-model-delete aria-label="' + escapeHtml(deleteLabel) + '" title="' + escapeHtml(deleteLabel) + '">' + modelTrashIcon() + '</button></span></article>';
+      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><span class="b-model-row__identity">' + rootModelStatusMarkup(model) + '<strong>' + escapeHtml(modelLabel) + '</strong>' + modelSlugMarkup(model, modelLabel) + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '<div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div></span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button><button class="b-model-row__delete" type="button" data-action="delete-model" data-model-delete' + (deleteProtected ? ' disabled aria-disabled="true"' : "") + ' aria-label="' + escapeHtml(deleteLabel) + '" title="' + escapeHtml(deleteLabel) + '">' + modelTrashIcon() + '</button></span></article>';
     }).join("");
   }
   function catalogRows() {
@@ -1181,7 +1207,9 @@
     if (metadata) {
       const source = catalog.metadata?.sourceVersion ? "来源 " + catalog.metadata.sourceVersion : catalog.metadata?.sourceUrl ? "已记录上游来源" : "来源待记录";
       const lifecycle = catalog.loaded ? catalog.requestVerified ? "已加载 · 请求已验证" : "已加载 · 等待请求" : catalog.restartRequired ? "待重启 Codex" : "尚未加载";
-      metadata.textContent = source + " · " + lifecycle;
+      const syncState = String(catalog.syncState || catalog.sync_status || "").trim();
+      const syncMessage = String(catalog.syncMessage || catalog.sync_message || "").trim();
+      metadata.textContent = [source, lifecycle, syncState, syncMessage].filter(Boolean).join(" · ");
     }
     if (info) {
       const managedPath = catalog.path || "~/.codex/model-catalogs/ai_cove_turbo.json";
@@ -1662,6 +1690,11 @@
     const models = catalogModels();
     const target = models.find((model) => model.slug === slug);
     if (!target) return;
+    if (modelRootPresence(target) === "present") {
+      modelCatalogActionMessage = ROOT_MODEL_PROTECTED_LABEL;
+      renderModelCatalog(true);
+      return;
+    }
     if (models.length <= 1) {
       modelCatalogActionMessage = "至少保留一个模型候选，无法删除最后一项。";
       renderModelCatalog(true);
@@ -2983,6 +3016,7 @@
     if (status && typeof status === "object") {
       const previousModels = JSON.stringify(state.catalog?.models || []);
       const previousPolicy = policySignature(state.modelPolicy);
+      const preserveCatalogDraft = modelSettingsDirty();
       const preserveStoredUpdate = String(status.updateState).toLowerCase() === "idle"
         && updatePreference.checkedDay === updateDayKey()
         && updatePreference.lastState;
@@ -3000,8 +3034,8 @@
         } : {}),
         technicalDetail: "",
       };
-      if (status.catalog && JSON.stringify(status.catalog.models || []) !== previousModels) catalogDraft = null;
-      if (status.modelPolicy && policySignature(status.modelPolicy) !== previousPolicy) modelPolicyDraft = null;
+      if (status.catalog && JSON.stringify(status.catalog.models || []) !== previousModels && !preserveCatalogDraft) catalogDraft = null;
+      if (status.modelPolicy && policySignature(status.modelPolicy) !== previousPolicy && !preserveCatalogDraft) modelPolicyDraft = null;
       applySessionNames(state.sessionNames);
       if (["available", "downloaded"].includes(String(state.updateState).toLowerCase()) && updatePreference.dismissedDay !== updateDayKey()) {
         updateBubbleOpen = true;
@@ -3153,6 +3187,7 @@
       if (pendingAction) return;
       const slug = control?.closest?.("[data-model-slug]")?.dataset.modelSlug;
       if (!slug) return;
+      if (modelDeleteProtected(control)) return;
       setModelDeleteOpen(slug, control);
       return;
     }

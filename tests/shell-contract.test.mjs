@@ -294,6 +294,13 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.doesNotMatch(app, /已删除，需要重启 Codex 后生效/);
   assert.match(configPanel, /data-action="cancel-model-delete"/);
   assert.match(configPanel, /data-action="confirm-model-delete"/);
+  assert.match(app, /Codex 新版本已删除此模型，建议用户删除/);
+  assert.match(app, /此模型为 Codex 预设模型，暂不支持删除/);
+  assert.match(app, /modelRootPresence/);
+  assert.match(app, /disabled aria-disabled="true"/);
+  assert.match(css, /\.b-model-row__root-status\s*\{[\s\S]*?color:\s*var\(--turbo-danger\);/);
+  assert.match(css, /\.b-model-row__delete:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;[\s\S]*?opacity:\s*0\.45;/);
+  assert.doesNotMatch(configPanel, /同步根目录|手动同步/);
   assert.match(configPanel, /data-action="save-model-settings"[^>]*disabled hidden/);
   assert.match(configPanel, /data-action="undo-model-settings"[^>]*disabled hidden/);
   assert.match(configPanel, /data-action="restart-codex"[^>]*data-catalog-restart/);
