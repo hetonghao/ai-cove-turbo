@@ -1225,6 +1225,15 @@ impl AppRuntime {
             root_seen_slugs: Vec::new(),
             root_available: false,
             root_unavailable_reason: None,
+            root_unavailable_at: None,
+            root_source_type: None,
+            root_codex_version: None,
+            root_client_version: None,
+            root_binary_digest: None,
+            root_last_read_at: None,
+            root_last_synced_at: None,
+            root_template_source_slug: None,
+            root_template_source_digest: None,
             conflicts: result
                 .models
                 .iter()

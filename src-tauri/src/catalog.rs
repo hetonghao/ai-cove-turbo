@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::Value;
@@ -184,7 +184,8 @@ pub(crate) fn ensure_catalog(
             .iter()
             .map(|model| model.slug.clone())
             .collect(),
-        root_document: baseline_document.clone(),
+        root_fields: root_fields_from_document(&baseline_document),
+        root_document: Value::Null,
         baseline_models,
         baseline_document,
     };
@@ -435,7 +436,11 @@ fn prepare_catalog_models(
             };
             let mut created = template.clone();
             write_model_fields(&mut created, model);
-            sanitize_new_model_template(&mut created, template, model);
+            let source_model = models
+                .iter()
+                .find(|source| source.slug == model.slug)
+                .unwrap_or(model);
+            sanitize_new_model_template(&mut created, template, source_model);
             entries.push(created);
         }
     }
@@ -462,6 +467,13 @@ fn prepare_catalog_models(
     });
     validate_codex_document(&document)?;
     let mut metadata = previous_metadata.clone();
+    if let Some(template) = template.as_ref() {
+        metadata.root_template_source_slug = template
+            .get("slug")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        metadata.root_template_source_digest = canonical_digest(template).ok();
+    }
     remove_catalog_metadata(&mut metadata, removed_slugs);
     for model in &normalized_models {
         metadata
@@ -510,6 +522,7 @@ fn select_template(entries: &[Value]) -> Option<Value> {
         .collect::<Vec<_>>();
     candidates.sort_by_key(|entry| {
         (
+            !has_complete_prompt_fields(entry),
             !entry
                 .get("is_default")
                 .or_else(|| entry.get("default"))
@@ -532,6 +545,20 @@ fn select_template(entries: &[Value]) -> Option<Value> {
         )
     });
     candidates.first().cloned().cloned()
+}
+
+fn has_complete_prompt_fields(entry: &Value) -> bool {
+    let base = entry
+        .get("base_instructions")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let template = entry
+        .get("model_messages")
+        .and_then(Value::as_object)
+        .and_then(|messages| messages.get("instructions_template"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    base && template
 }
 
 fn remove_catalog_entries(entries: &mut Vec<Value>, removed_slugs: &[String]) {
@@ -586,20 +613,49 @@ fn sync_catalog_from_root_with_executable(
     mut record: OwnershipRecord,
     bundled_executable: Option<&Path>,
 ) -> Result<(OwnershipRecord, bool), CatalogError> {
-    let Some((_source_bytes, mut source_document, source_models)) =
-        root_snapshot(&record, bundled_executable)
-    else {
+    let read_at = now_ms_string();
+    let Some(snapshot) = root_snapshot(&record, bundled_executable) else {
         let mut metadata = catalog_storage::read_metadata(fixed_path);
         metadata.root_available = false;
         metadata.root_unavailable_reason = Some("root_catalog_unavailable".to_owned());
+        metadata.root_unavailable_at = Some(read_at.clone());
+        metadata.root_last_read_at = Some(read_at);
         catalog_storage::write_metadata(fixed_path, &metadata)?;
         return Ok((record, false));
     };
+    let mut source_document = snapshot.document;
+    let source_models = snapshot.models;
     let source_digest = canonical_digest(&source_document).map_err(CatalogError::Json)?;
     let metadata_before = catalog_storage::read_metadata(fixed_path);
-    if record.root_document.is_object()
+    let mut metadata = metadata_before.clone();
+    metadata.root_last_read_at = Some(read_at);
+    metadata.root_available = true;
+    metadata.root_unavailable_reason = None;
+    metadata.root_unavailable_at = None;
+    metadata.root_source_type = Some(snapshot.source_type);
+    metadata.root_codex_version = snapshot.codex_version.clone();
+    metadata.root_client_version = snapshot.cli_version.clone();
+    metadata.root_binary_digest = snapshot.binary_digest;
+    let root_metadata_stable = metadata_before.root_available
+        && metadata_before.root_unavailable_reason.is_none()
+        && metadata_before.root_unavailable_at.is_none()
+        && metadata_before.root_last_read_at.is_some()
+        && metadata_before.root_last_synced_at.is_some()
+        && metadata_before.root_source_digest.as_deref() == Some(source_digest.as_str())
+        && metadata_before.root_source_type == metadata.root_source_type
+        && metadata_before.root_codex_version == metadata.root_codex_version
+        && metadata_before.root_client_version == metadata.root_client_version
+        && metadata_before.root_binary_digest == metadata.root_binary_digest;
+    if root_metadata_stable {
+        return Ok((record, false));
+    }
+    if record.root_fields.is_empty()
+        && !record.root_document.is_object()
         && metadata_before.root_source_digest.as_deref() == Some(source_digest.as_str())
     {
+        if metadata != metadata_before {
+            catalog_storage::write_metadata(fixed_path, &metadata)?;
+        }
         return Ok((record, false));
     }
     if let Some(models) = source_document
@@ -617,15 +673,10 @@ fn sync_catalog_from_root_with_executable(
     {
         migrate_legacy_models(models);
     }
-    let previous_document = if record.root_document.is_object() {
-        &record.root_document
-    } else {
-        &record.baseline_document
-    };
-    let mut metadata = catalog_storage::read_metadata(fixed_path);
+    let previous_document = previous_root_document(&record);
     merge_root_models(
         &mut current_document,
-        previous_document,
+        &previous_document,
         &source_document,
         &mut metadata,
     )?;
@@ -639,16 +690,22 @@ fn sync_catalog_from_root_with_executable(
         .collect::<Vec<_>>();
     metadata.root_source_digest = Some(next_digest);
     metadata.root_seen_slugs = next_seen.clone();
-    metadata.root_available = true;
-    metadata.root_unavailable_reason = None;
     let next_bytes = serde_json::to_vec_pretty(&current_document).map_err(CatalogError::Json)?;
     let catalog_changed = next_bytes != current_bytes;
+    metadata.root_last_synced_at = Some(now_ms_string());
     let metadata_changed = metadata != metadata_before;
     let latest_bytes = fs::read(fixed_path).map_err(CatalogError::Read)?;
     if digest(&latest_bytes) != digest(&current_bytes) {
         return Err(CatalogError::ContentChanged);
     }
-    let mut rollback = CatalogSyncRollbackGuard::new(fixed_path, &current_bytes, &metadata_before);
+    let recovery_before = fs::read(recovery_path).map_err(CatalogError::Read)?;
+    let mut rollback = CatalogSyncRollbackGuard::new(
+        fixed_path,
+        &current_bytes,
+        &metadata_before,
+        recovery_path,
+        &recovery_before,
+    );
     rollback.catalog_touched = catalog_changed;
     rollback.metadata_touched = metadata_changed;
     if catalog_changed {
@@ -658,11 +715,13 @@ fn sync_catalog_from_root_with_executable(
         catalog_storage::write_metadata(fixed_path, &metadata)?;
     }
     let previous_record = record.clone();
-    record.root_document = source_document;
+    record.root_fields = root_fields_from_document(&source_document);
+    record.root_document = Value::Null;
     record.root_slugs = next_seen;
-    if record.root_document != previous_record.root_document
+    if record.root_fields != previous_record.root_fields
         || record.root_slugs != previous_record.root_slugs
     {
+        rollback.recovery_touched = true;
         write_record(recovery_path, &record)?;
     }
     rollback.commit();
@@ -673,19 +732,31 @@ struct CatalogSyncRollbackGuard {
     fixed_path: PathBuf,
     current_bytes: Vec<u8>,
     metadata_before: CatalogMetadata,
+    recovery_path: PathBuf,
+    recovery_before: Vec<u8>,
     catalog_touched: bool,
     metadata_touched: bool,
+    recovery_touched: bool,
     committed: bool,
 }
 
 impl CatalogSyncRollbackGuard {
-    fn new(fixed_path: &Path, current_bytes: &[u8], metadata_before: &CatalogMetadata) -> Self {
+    fn new(
+        fixed_path: &Path,
+        current_bytes: &[u8],
+        metadata_before: &CatalogMetadata,
+        recovery_path: &Path,
+        recovery_before: &[u8],
+    ) -> Self {
         Self {
             fixed_path: fixed_path.to_path_buf(),
             current_bytes: current_bytes.to_owned(),
             metadata_before: metadata_before.clone(),
+            recovery_path: recovery_path.to_path_buf(),
+            recovery_before: recovery_before.to_owned(),
             catalog_touched: false,
             metadata_touched: false,
+            recovery_touched: false,
             committed: false,
         }
     }
@@ -706,37 +777,161 @@ impl Drop for CatalogSyncRollbackGuard {
         if self.metadata_touched {
             let _ = catalog_storage::write_metadata(&self.fixed_path, &self.metadata_before);
         }
+        if self.recovery_touched {
+            let _ = write_atomic(&self.recovery_path, &self.recovery_before);
+        }
     }
+}
+
+struct RootSnapshot {
+    document: Value,
+    models: Vec<CatalogModel>,
+    source_type: String,
+    codex_version: Option<String>,
+    cli_version: Option<String>,
+    binary_digest: Option<String>,
 }
 
 fn root_snapshot(
     record: &OwnershipRecord,
     bundled_executable: Option<&Path>,
-) -> Option<(Vec<u8>, Value, Vec<CatalogModel>)> {
+) -> Option<RootSnapshot> {
     if let Some(source_path) = record.source_path.as_ref() {
         if let Ok(source_bytes) = fs::read(source_path) {
             if let (Ok(source_document), Ok(source_models)) = (
                 serde_json::from_slice::<Value>(&source_bytes),
                 parse_models(&source_bytes),
             ) {
-                return Some((source_bytes, source_document, source_models));
+                return Some(RootSnapshot {
+                    codex_version: source_document
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    cli_version: None,
+                    document: source_document,
+                    models: source_models,
+                    source_type: "file".to_owned(),
+                    binary_digest: None,
+                });
             }
         }
     }
-    let source_bytes = bundled_executable
-        .map(|executable| bundled_catalog_bytes(executable, record.config_path.parent()))
-        .unwrap_or_else(|| {
-            [
-                Path::new("codex"),
-                Path::new("/opt/homebrew/bin/codex"),
-                Path::new("/usr/local/bin/codex"),
-            ]
-            .into_iter()
-            .find_map(|executable| bundled_catalog_bytes(executable, record.config_path.parent()))
-        })?;
-    let source_document = serde_json::from_slice::<Value>(&source_bytes).ok()?;
-    let source_models = parse_models(&source_bytes).ok()?;
-    Some((source_bytes, source_document, source_models))
+    let candidates = bundled_executable.into_iter().chain(
+        [
+            Path::new("codex"),
+            Path::new("/opt/homebrew/bin/codex"),
+            Path::new("/usr/local/bin/codex"),
+        ]
+        .into_iter(),
+    );
+    for executable in candidates {
+        let Some(source_bytes) = bundled_catalog_bytes(executable, record.config_path.parent())
+        else {
+            continue;
+        };
+        let Ok(source_document) = serde_json::from_slice::<Value>(&source_bytes) else {
+            continue;
+        };
+        let Ok(source_models) = parse_models(&source_bytes) else {
+            continue;
+        };
+        let catalog_version = source_document
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        return Some(RootSnapshot {
+            codex_version: catalog_version,
+            cli_version: codex_version(executable, record.config_path.parent()),
+            document: source_document,
+            models: source_models,
+            source_type: "bundled_cli".to_owned(),
+            binary_digest: fs::read(executable).ok().map(|bytes| digest(&bytes)),
+        });
+    }
+    None
+}
+
+fn root_fields_from_document(
+    document: &Value,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, Value>> {
+    document
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| {
+                    let slug = model.get("slug")?.as_str()?.to_owned();
+                    let fields = model
+                        .as_object()?
+                        .iter()
+                        .filter(|(key, _)| key.as_str() != "slug")
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect();
+                    Some((slug, fields))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn previous_root_document(record: &OwnershipRecord) -> Value {
+    if record.root_fields.is_empty() {
+        return if record.root_document.is_object() {
+            record.root_document.clone()
+        } else {
+            record.baseline_document.clone()
+        };
+    }
+    let mut document = record.baseline_document.clone();
+    let Some(models) = document.get_mut("models").and_then(Value::as_array_mut) else {
+        return document;
+    };
+    models.retain(|model| {
+        model
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_none_or(|slug| record.root_fields.contains_key(slug))
+    });
+    for (slug, fields) in &record.root_fields {
+        let mut model = serde_json::Map::new();
+        model.extend(fields.clone());
+        model.insert("slug".to_owned(), Value::String(slug.clone()));
+        if let Some(existing) = models
+            .iter_mut()
+            .find(|entry| entry.get("slug").and_then(Value::as_str) == Some(slug.as_str()))
+        {
+            *existing = Value::Object(model);
+        } else {
+            models.push(Value::Object(model));
+        }
+    }
+    document
+}
+
+fn now_ms_string() -> String {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or_else(
+        |_| "0".to_owned(),
+        |duration| duration.as_millis().to_string(),
+    )
+}
+
+fn codex_version(executable: &Path, current_dir: Option<&Path>) -> Option<String> {
+    let mut command = Command::new(executable);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
+    }
+    let output = command.output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|version| !version.is_empty())
 }
 
 fn canonical_digest(value: &Value) -> Result<String, serde_json::Error> {
@@ -808,6 +1003,14 @@ fn merge_root_models(
         .get("models")
         .and_then(Value::as_array)
         .ok_or_else(|| CatalogError::InvalidSchema("根目录缺少 models 数组".to_owned()))?;
+    let template = select_template(current_models).or_else(|| select_template(next_models));
+    if let Some(template) = template.as_ref() {
+        metadata.root_template_source_slug = template
+            .get("slug")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        metadata.root_template_source_digest = canonical_digest(template).ok();
+    }
     for next_model in next_models {
         let Some(slug) = next_model.get("slug").and_then(Value::as_str) else {
             continue;
@@ -822,10 +1025,16 @@ fn merge_root_models(
             .iter()
             .position(|model| model.get("slug").and_then(Value::as_str) == Some(slug))
         else {
+            let Some(template) = template.as_ref() else {
+                continue;
+            };
             let mut added = next_model.clone();
-            let slug = slug.to_owned();
-            let normalized = CatalogModel::with_safe_defaults(model_from_discovery(&added, slug));
-            write_model_fields(&mut added, &normalized);
+            let complete_shape = root_model_shape_is_complete(&added);
+            if !complete_shape {
+                continue;
+            }
+            normalize_root_model(&mut added, Some(template));
+            validate_root_model_required(&added)?;
             current_models.push(added);
             continue;
         };
@@ -883,6 +1092,11 @@ fn merge_root_models(
             }
         }
     }
+    for model in current_models.iter_mut() {
+        let complete_shape = root_model_shape_is_complete(model);
+        normalize_root_model(model, template.as_ref());
+        validate_root_model(model, complete_shape)?;
+    }
     current_models.sort_by(|left, right| {
         let left_priority = left
             .get("priority")
@@ -905,6 +1119,73 @@ fn merge_root_models(
         })
     });
     Ok(())
+}
+
+fn normalize_root_model(model: &mut Value, template: Option<&Value>) {
+    let Some(slug) = model.get("slug").and_then(Value::as_str).map(str::to_owned) else {
+        return;
+    };
+    let original = model_from_discovery(model, slug.clone());
+    let own_base = model.get("base_instructions").cloned();
+    let own_messages = model
+        .get("model_messages")
+        .and_then(Value::as_object)
+        .and_then(|messages| messages.get("instructions_template"))
+        .cloned();
+    let normalized = CatalogModel::with_safe_defaults(model_from_discovery(model, slug));
+    write_model_fields(model, &normalized);
+    if let Some(base) =
+        own_base.filter(|value| value.as_str().is_some_and(|text| !text.trim().is_empty()))
+    {
+        if let Some(object) = model.as_object_mut() {
+            object.insert("base_instructions".to_owned(), base);
+        }
+    } else if let Some(base) = template.and_then(|value| value.get("base_instructions")) {
+        if let Some(object) = model.as_object_mut() {
+            if let Some(base) = base.as_str() {
+                object.insert(
+                    "base_instructions".to_owned(),
+                    Value::String(replace_template_identity(
+                        base,
+                        template.unwrap_or(&Value::Null),
+                        &original,
+                    )),
+                );
+            }
+        }
+    }
+    let inherited_instructions = own_messages.is_none();
+    if let Some(instructions) = own_messages.or_else(|| {
+        template
+            .and_then(|value| value.get("model_messages"))
+            .and_then(Value::as_object)
+            .and_then(|messages| messages.get("instructions_template"))
+            .cloned()
+    }) {
+        let object = model.as_object_mut();
+        if let Some(object) = object {
+            let messages = object
+                .entry("model_messages".to_owned())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Some(messages) = messages.as_object_mut() {
+                let instructions = if inherited_instructions {
+                    instructions.clone().as_str().map_or(instructions, |value| {
+                        Value::String(replace_template_identity(
+                            value,
+                            template.unwrap_or(&Value::Null),
+                            &original,
+                        ))
+                    })
+                } else {
+                    instructions
+                };
+                messages.insert("instructions_template".to_owned(), instructions);
+            }
+        }
+    }
+    if let Some(template) = template {
+        sanitize_new_model_template(model, template, &original);
+    }
 }
 
 fn set_root_field_source(metadata: &mut CatalogMetadata, slug: &str, key: &str, source: &str) {
@@ -950,10 +1231,27 @@ fn sanitize_new_model_template(model: &mut Value, template: &Value, target: &Cat
     object.remove("availability_nux");
     object.remove("upgrade");
     if !CatalogModel::is_gpt_like_slug(&target.slug) {
-        object.remove("apply_patch_tool_type");
-        object.remove("additional_speed_tiers");
+        for key in [
+            "apply_patch_tool_type",
+            "additional_speed_tiers",
+            "supports_reasoning_summary_parameter",
+            "default_reasoning_summary",
+            "service_tiers",
+            "default_service_tier",
+            "use_responses_lite",
+            "prefer_websockets",
+            "supports_image_detail_original",
+            "supports_search_tool",
+            "supports_parallel_tool_calls",
+            "tool_mode",
+            "experimental_supported_tools",
+            "supported_tools",
+            "tools",
+            "experimental_tools",
+        ] {
+            object.remove(key);
+        }
         object.insert("service_tiers".to_owned(), serde_json::json!([]));
-        object.remove("default_service_tier");
         object.insert(
             "supports_reasoning_summary_parameter".to_owned(),
             serde_json::Value::Bool(false),
@@ -962,66 +1260,130 @@ fn sanitize_new_model_template(model: &mut Value, template: &Value, target: &Cat
             "default_reasoning_summary".to_owned(),
             serde_json::Value::String("none".to_owned()),
         );
-    }
-    if let Some(instructions) = template.get("base_instructions").and_then(Value::as_str) {
+        object.insert("use_responses_lite".to_owned(), Value::Bool(false));
+        object.insert("prefer_websockets".to_owned(), Value::Bool(false));
         object.insert(
-            "base_instructions".to_owned(),
-            Value::String(replace_template_model_name(instructions, template, target)),
+            "supports_image_detail_original".to_owned(),
+            Value::Bool(false),
+        );
+        object.insert("supports_search_tool".to_owned(), Value::Bool(false));
+        object.insert(
+            "supports_parallel_tool_calls".to_owned(),
+            Value::Bool(false),
+        );
+        object.insert(
+            "experimental_supported_tools".to_owned(),
+            serde_json::json!([]),
         );
     }
-    if let Some(messages) = object
-        .get_mut("model_messages")
-        .and_then(Value::as_object_mut)
+    if target
+        .base_instructions
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
     {
-        if let Some(instructions) = template
-            .get("model_messages")
-            .and_then(Value::as_object)
-            .and_then(|messages| messages.get("instructions_template"))
-            .and_then(Value::as_str)
-        {
-            messages.insert(
-                "instructions_template".to_owned(),
-                Value::String(replace_template_model_name(instructions, template, target)),
-            );
+        if let Some(instructions) = template.get("base_instructions").cloned() {
+            if let Some(instructions) = instructions.as_str() {
+                object.insert(
+                    "base_instructions".to_owned(),
+                    Value::String(replace_template_identity(instructions, template, target)),
+                );
+            }
+        }
+    } else if let Some(instructions) = target.base_instructions.as_deref() {
+        object.insert(
+            "base_instructions".to_owned(),
+            Value::String(instructions.to_owned()),
+        );
+    }
+    let template_instructions = template
+        .get("model_messages")
+        .and_then(Value::as_object)
+        .and_then(|messages| messages.get("instructions_template"))
+        .cloned();
+    if let Some(instructions) = template_instructions {
+        let messages = object
+            .entry("model_messages".to_owned())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(messages) = messages.as_object_mut() {
+            let existing = messages.get("instructions_template").cloned();
+            let missing = existing
+                .as_ref()
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty());
+            if missing || existing.as_ref() == Some(&instructions) {
+                if let Some(instructions) = instructions.as_str() {
+                    messages.insert(
+                        "instructions_template".to_owned(),
+                        Value::String(replace_template_identity(instructions, template, target)),
+                    );
+                }
+            }
         }
     }
 }
 
-fn replace_template_model_name(text: &str, template: &Value, target: &CatalogModel) -> String {
+fn replace_template_identity(text: &str, template: &Value, target: &CatalogModel) -> String {
     let target_name = if target.display_name.trim().is_empty() {
         target.slug.trim()
     } else {
         target.display_name.trim()
     };
-    let sources = [
-        Some("GPT-5.6-Sol"),
-        Some("GPT-5.6 Sol"),
-        Some("gpt-5.6-sol"),
-        Some("GPT-5.6"),
-        Some("GPT-5"),
-        template.get("display_name").and_then(Value::as_str),
-        template.get("slug").and_then(Value::as_str),
-    ];
-    let mut result = text.to_owned();
-    let mut markers = Vec::new();
-    for (index, source) in sources.into_iter().enumerate() {
-        let Some(source) = source.filter(|value| !value.is_empty()) else {
-            continue;
-        };
-        if !result.contains(source) {
-            continue;
-        }
-        let mut marker = format!("__AI_COVE_MODEL_NAME_{index}__");
-        while result.contains(&marker) || target_name.contains(&marker) {
-            marker.push('_');
-        }
-        result = result.replace(source, &marker);
-        markers.push(marker);
+    let mut sources = Vec::new();
+    if let Some(value) = template.get("display_name").and_then(Value::as_str) {
+        sources.push(value.to_owned());
     }
-    for marker in markers {
-        result = result.replace(&marker, target_name);
+    if let Some(value) = template.get("slug").and_then(Value::as_str) {
+        sources.push(value.to_owned());
+        sources.push(value.replace(['-', '_'], " "));
+        if value.to_ascii_lowercase().starts_with("gpt-") {
+            sources.extend(["GPT-5.6".to_owned(), "GPT-5".to_owned()]);
+        }
+    }
+    if sources.is_empty() {
+        return text.to_owned();
+    }
+    let mut result = text.to_owned();
+    sources.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    sources.dedup();
+    for source in sources {
+        if !source.is_empty() {
+            result = result.replace(&source, target_name);
+        }
     }
     result
+}
+
+fn validate_root_model(model: &Value, complete_shape: bool) -> Result<(), CatalogError> {
+    let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let parsed = model_from_discovery(model, slug.to_owned());
+    if complete_shape {
+        CatalogModel::with_safe_defaults(parsed)
+            .validate_complete()
+            .map_err(CatalogError::InvalidSchema)?;
+    }
+    Ok(())
+}
+
+fn root_model_shape_is_complete(model: &Value) -> bool {
+    [
+        "context_window",
+        "max_context_window",
+        "supported_reasoning_levels",
+        "default_reasoning_level",
+    ]
+    .into_iter()
+    .any(|key| model.get(key).is_some())
+}
+
+fn validate_root_model_required(model: &Value) -> Result<(), CatalogError> {
+    let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+        return Err(CatalogError::InvalidSchema("模型缺少 slug".to_owned()));
+    };
+    CatalogModel::with_safe_defaults(model_from_discovery(model, slug.to_owned()))
+        .validate_complete()
+        .map_err(CatalogError::InvalidSchema)
 }
 
 fn validate_codex_document(document: &Value) -> Result<(), CatalogError> {
@@ -1144,6 +1506,12 @@ pub(crate) fn restore_catalog(
         )?;
     }
     match fs::remove_file(recovery_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(CatalogError::Write(error)),
+    }
+    let metadata_path = fixed_path.with_file_name("ai_cove_turbo.metadata.json");
+    match fs::remove_file(metadata_path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(CatalogError::Write(error)),
@@ -1455,6 +1823,8 @@ mod tests {
             synced.metadata.root_source_digest.as_deref(),
             Some(canonical_digest(&serde_json::from_slice::<Value>(bundled_bytes)?)?.as_str())
         );
+        let metadata_before_repeat =
+            catalog_storage::read_metadata(&fixed_catalog_path(root.path()));
         let (_, changed_again) = sync_catalog_from_root_with_executable(
             &fixed_catalog_path(root.path()),
             &recovery,
@@ -1462,6 +1832,10 @@ mod tests {
             Some(&executable),
         )?;
         assert!(!changed_again);
+        assert_eq!(
+            catalog_storage::read_metadata(&fixed_catalog_path(root.path())),
+            metadata_before_repeat
+        );
         Ok(())
     }
 

@@ -156,6 +156,13 @@ impl CatalogModel {
             self.default_reasoning_summary = Some("none".to_owned());
             self.service_tiers = Vec::new();
             self.default_service_tier = None;
+            self.use_responses_lite = false;
+            self.prefer_websockets = false;
+            self.supports_image_detail_original = false;
+            self.supports_search_tool = false;
+            self.supports_parallel_tool_calls = false;
+            self.tool_mode = None;
+            self.experimental_supported_tools.clear();
             self.field_sources.insert(
                 "supportsReasoningSummaryParameter".to_owned(),
                 "模板".to_owned(),
@@ -166,6 +173,20 @@ impl CatalogModel {
                 .insert("serviceTiers".to_owned(), "模板".to_owned());
             self.field_sources
                 .insert("defaultServiceTier".to_owned(), "模板".to_owned());
+            self.field_sources
+                .insert("useResponsesLite".to_owned(), "模板".to_owned());
+            self.field_sources
+                .insert("preferWebsockets".to_owned(), "模板".to_owned());
+            self.field_sources
+                .insert("supportsImageDetailOriginal".to_owned(), "模板".to_owned());
+            self.field_sources
+                .insert("supportsSearchTool".to_owned(), "模板".to_owned());
+            self.field_sources
+                .insert("supportsParallelToolCalls".to_owned(), "模板".to_owned());
+            self.field_sources
+                .insert("toolMode".to_owned(), "模板".to_owned());
+            self.field_sources
+                .insert("experimentalSupportedTools".to_owned(), "模板".to_owned());
         } else if !self.supports_reasoning_summary_parameter {
             if self.default_reasoning_summary.as_deref() != Some("none") {
                 self.default_reasoning_summary = Some("none".to_owned());
@@ -370,6 +391,24 @@ pub(crate) struct CatalogMetadata {
     #[serde(default)]
     pub(crate) root_unavailable_reason: Option<String>,
     #[serde(default)]
+    pub(crate) root_unavailable_at: Option<String>,
+    #[serde(default)]
+    pub(crate) root_source_type: Option<String>,
+    #[serde(default)]
+    pub(crate) root_codex_version: Option<String>,
+    #[serde(default)]
+    pub(crate) root_client_version: Option<String>,
+    #[serde(default)]
+    pub(crate) root_binary_digest: Option<String>,
+    #[serde(default)]
+    pub(crate) root_last_read_at: Option<String>,
+    #[serde(default)]
+    pub(crate) root_last_synced_at: Option<String>,
+    #[serde(default)]
+    pub(crate) root_template_source_slug: Option<String>,
+    #[serde(default)]
+    pub(crate) root_template_source_digest: Option<String>,
+    #[serde(default)]
     pub(crate) field_sources: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default)]
     pub(crate) conflicts: BTreeMap<String, Vec<String>>,
@@ -395,6 +434,8 @@ pub(crate) struct OwnershipRecord {
     #[serde(default)]
     pub(crate) root_slugs: Vec<String>,
     #[serde(default)]
+    pub(crate) root_fields: BTreeMap<String, BTreeMap<String, Value>>,
+    #[serde(skip_serializing, default)]
     pub(crate) root_document: Value,
     #[serde(default)]
     pub(crate) baseline_document: Value,
