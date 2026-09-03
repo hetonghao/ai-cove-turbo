@@ -1091,16 +1091,20 @@
     const autoPolicy = (policyModels()[slug] || "auto") === "auto";
     const wsTooltip = "来自于 AI Cove 的模型能力：支持 Hybrid WebSocket 加速，建议配置传输方式：自动。";
     const httpTooltip = "来自于 AI Cove 的模型能力：支持 压缩 HTTP，建议配置传输方式：HTTP。";
-    if (!capability) return `<span class="state-indicator" data-status="verified" title="${httpTooltip}" data-tooltip="${httpTooltip}">${autoPolicy ? "自动 → 压缩 HTTP" : "压缩 HTTP"}</span>`;
-    const unavailable = capability.allowed === false || capability.reasonCode === "model_not_allowed";
-    const isWs = capability.transport === "websocket";
-    const label = unavailable
+    const unavailable = capability?.allowed === false || capability?.reasonCode === "model_not_allowed";
+    const isWs = capability?.transport === "websocket";
+    const label = !capability
+      ? autoPolicy ? "自动 → 压缩 HTTP" : "压缩 HTTP"
+      : unavailable
       ? "不可用"
       : isWs ? "WS 可用" : autoPolicy ? "自动 → 压缩 HTTP" : "压缩 HTTP";
-    const tooltip = unavailable
+    const tooltip = !capability
+      ? httpTooltip
+      : unavailable
       ? (capability.reasonCode || "")
       : isWs ? wsTooltip : httpTooltip;
-    return `<span class="state-indicator" data-status="${unavailable ? "blocked" : "verified"}" title="${escapeHtml(tooltip)}" data-tooltip="${escapeHtml(tooltip)}">${label}</span>`;
+    const tooltipId = `model-capability-tooltip-${encodeURIComponent(slug)}`;
+    return `<span class="state-indicator b-model-capability c-transport__detail" data-status="${unavailable ? "blocked" : "verified"}" tabindex="0" aria-describedby="${escapeHtml(tooltipId)}">${label}<span class="c-transport__tooltip b-model-capability__tooltip" id="${escapeHtml(tooltipId)}" role="tooltip">${escapeHtml(tooltip)}</span></span>`;
   }
 
   function modelContextLabel(model) {
@@ -1142,7 +1146,7 @@
 
   function rootModelStatusMarkup(model) {
     return modelRootPresence(model) === "missing"
-      ? '<span class="b-model-row__root-status" tabindex="0" role="img" aria-label="' + ROOT_MODEL_MISSING_LABEL + '" title="' + ROOT_MODEL_MISSING_LABEL + '" data-tooltip="' + ROOT_MODEL_MISSING_LABEL + '">!</span>'
+      ? '<span class="b-model-row__root-status" tabindex="0" role="img" aria-label="' + ROOT_MODEL_MISSING_LABEL + '" data-tooltip="' + ROOT_MODEL_MISSING_LABEL + '">!</span>'
       : "";
   }
 

@@ -689,6 +689,19 @@ test("模型传输策略编辑保存并显示能力摘要", async () => {
   assert.match(failed.list.innerHTML, /WS 可用/);
 });
 
+test("模型能力提示使用可移出滚动容器的单一浮层", async () => {
+  const app = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const harness = await catalogHarness();
+
+  assert.match(app, /b-model-capability/);
+  assert.match(app, /c-transport__detail/);
+  assert.doesNotMatch(harness.list.innerHTML, /class="state-indicator[^>]*title=/);
+  assert.doesNotMatch(harness.list.innerHTML, /b-model-row__root-status[^>]*title=/);
+  assert.match(css, /\.b-model-capability__tooltip\.c-transport__tooltip/);
+  assert.match(css, /position: fixed/);
+});
+
 test("允许模型但尚未确认传输通道时统一升格为 HTTP", async () => {
   const harness = await catalogHarness({
     capabilityOverrides: { alpha: { transport: "http", reasonCode: "no_http_channel" } },
