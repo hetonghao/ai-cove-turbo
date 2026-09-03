@@ -193,3 +193,11 @@ test("实时页壳声明 UPSTREAM 覆盖入口、候选弹窗与非 AI Cove 标�
   assert.match(rust, /set_upstream_override/);
   assert.match(css, /\.c-upstream-dialog/);
 });
+
+test("上游弹窗声明非零最小高度，避免原生 dialog 塌成一根线", async () => {
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const rule = css.match(/\.b-model-dialog\.c-upstream-dialog\s*\{([\s\S]*?)\n\}/)?.[1] || "";
+  assert.match(rule, /min-block-size:\s*var\(--turbo-upstream-dialog-min-height\)/);
+  const surfaceRule = css.match(/\.b-model-dialog\.c-upstream-dialog \.c-upstream-dialog__surface\s*\{([\s\S]*?)\n\}/)?.[1] || "";
+  assert.match(surfaceRule, /grid-template-rows:\s*auto minmax\(0, 1fr\) auto auto/);
+});

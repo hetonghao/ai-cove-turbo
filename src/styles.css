@@ -26,6 +26,8 @@
   --turbo-focus-layer: 10;
   --turbo-hairline: 1px;
   --turbo-upstream-dialog-width: 560px;
+  --turbo-upstream-dialog-height: 365px;
+  --turbo-upstream-dialog-min-height: 320px;
   --turbo-upstream-dialog-max-height: 620px;
   --turbo-upstream-dialog-inset: 24px;
   --turbo-upstream-dialog-mobile-inset: 16px;
@@ -2183,8 +2185,10 @@ body[data-connection-hover-card="true"] .c-connection-inspector .c-hover-card {
 .b-model-dialog.c-upstream-dialog {
   width: min(var(--turbo-upstream-dialog-width), calc(100vw - var(--turbo-upstream-dialog-inset)));
   max-width: var(--turbo-upstream-dialog-width);
-  block-size: fit-content;
-  max-block-size: min(var(--turbo-upstream-dialog-max-height), calc(100dvh - var(--turbo-upstream-dialog-inset)));
+  block-size: min(var(--turbo-upstream-dialog-height), calc(100dvh - var(--turbo-upstream-dialog-mobile-inset)));
+  min-block-size: var(--turbo-upstream-dialog-min-height);
+  min-height: var(--turbo-upstream-dialog-min-height);
+  max-block-size: min(var(--turbo-upstream-dialog-max-height), calc(100dvh - var(--turbo-upstream-dialog-mobile-inset)));
   --b-line: var(--turbo-accent-line);
   --b-ink: var(--turbo-ink);
   --b-muted: var(--turbo-muted);
@@ -2196,9 +2200,10 @@ body[data-connection-hover-card="true"] .c-connection-inspector .c-hover-card {
 }
 
 .b-model-dialog.c-upstream-dialog .c-upstream-dialog__surface {
-  block-size: auto;
+  block-size: 100%;
   max-block-size: 100%;
-  grid-template-rows: auto auto auto auto;
+  min-block-size: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
 }
 
 .c-upstream-dialog__body {
