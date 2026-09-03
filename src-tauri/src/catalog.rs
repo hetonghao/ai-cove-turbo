@@ -101,7 +101,14 @@ pub(crate) fn ensure_catalog(
         if pointer.as_deref() != Some(fixed_path.as_path()) {
             return Err(CatalogError::OwnershipConflict);
         }
-        return status_from_file(&fixed_path, &record, false, true, false);
+        let (record, catalog_changed) = sync_catalog_from_root(&fixed_path, recovery_path, record)?;
+        return status_from_file(
+            &fixed_path,
+            &record,
+            catalog_changed,
+            !catalog_changed,
+            false,
+        );
     }
 
     let current_pointer = read_catalog_pointer(config_path)?;
@@ -140,6 +147,7 @@ pub(crate) fn ensure_catalog(
             .iter()
             .map(|model| model.slug.clone())
             .collect(),
+        root_document: baseline_document.clone(),
         baseline_models,
         baseline_document,
     };
@@ -480,6 +488,190 @@ fn protected_root_slug(record: &OwnershipRecord, removed_slugs: &[String]) -> Op
         .iter()
         .find(|slug| root_slugs.iter().any(|root_slug| root_slug == *slug))
         .cloned()
+}
+
+fn sync_catalog_from_root(
+    fixed_path: &Path,
+    recovery_path: &Path,
+    mut record: OwnershipRecord,
+) -> Result<(OwnershipRecord, bool), CatalogError> {
+    let Some(source_path) = record.source_path.as_ref() else {
+        return Ok((record, false));
+    };
+    let Ok(source_bytes) = fs::read(source_path) else {
+        return Ok((record, false));
+    };
+    let Ok(mut source_document) = serde_json::from_slice::<Value>(&source_bytes) else {
+        return Ok((record, false));
+    };
+    let Ok(source_models) = parse_models(&source_bytes) else {
+        return Ok((record, false));
+    };
+    if let Some(models) = source_document
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+    {
+        migrate_legacy_models(models);
+    }
+    let current_bytes = fs::read(fixed_path).map_err(CatalogError::Read)?;
+    let mut current_document: Value =
+        serde_json::from_slice(&current_bytes).map_err(CatalogError::Json)?;
+    if let Some(models) = current_document
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+    {
+        migrate_legacy_models(models);
+    }
+    let previous_document = if record.root_document.is_object() {
+        &record.root_document
+    } else {
+        &record.baseline_document
+    };
+    let mut metadata = catalog_storage::read_metadata(fixed_path);
+    merge_root_models(
+        &mut current_document,
+        previous_document,
+        &source_document,
+        &mut metadata,
+    )?;
+    if validate_codex_document(&current_document).is_err() {
+        return Ok((record, false));
+    }
+    let next_digest = digest(&source_bytes);
+    let next_seen = source_models
+        .iter()
+        .map(|model| model.slug.clone())
+        .collect::<Vec<_>>();
+    metadata.root_source_digest = Some(next_digest);
+    metadata.root_seen_slugs = next_seen.clone();
+    let next_bytes = serde_json::to_vec_pretty(&current_document).map_err(CatalogError::Json)?;
+    let metadata_before = catalog_storage::read_metadata(fixed_path);
+    let catalog_changed = next_bytes != current_bytes;
+    let metadata_changed = metadata != metadata_before;
+    if catalog_changed {
+        write_atomic(fixed_path, &next_bytes)?;
+    }
+    if metadata_changed {
+        if let Err(error) = catalog_storage::write_metadata(fixed_path, &metadata) {
+            if catalog_changed {
+                let _ = write_atomic(fixed_path, &current_bytes);
+            }
+            return Err(error);
+        }
+    }
+    let previous_record = record.clone();
+    record.root_document = source_document;
+    record.root_slugs = next_seen;
+    if record.root_document != previous_record.root_document
+        || record.root_slugs != previous_record.root_slugs
+    {
+        if let Err(error) = write_record(recovery_path, &record) {
+            if catalog_changed {
+                let _ = write_atomic(fixed_path, &current_bytes);
+            }
+            if metadata_changed {
+                let _ = catalog_storage::write_metadata(fixed_path, &metadata_before);
+            }
+            return Err(error);
+        }
+    }
+    Ok((record, catalog_changed))
+}
+
+fn merge_root_models(
+    current_document: &mut Value,
+    previous_document: &Value,
+    next_document: &Value,
+    metadata: &mut CatalogMetadata,
+) -> Result<(), CatalogError> {
+    let current_models = current_document
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| CatalogError::InvalidSchema("缺少 models 数组".to_owned()))?;
+    let previous_models = previous_document
+        .get("models")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let next_models = next_document
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CatalogError::InvalidSchema("根目录缺少 models 数组".to_owned()))?;
+    for next_model in next_models {
+        let Some(slug) = next_model.get("slug").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(next_object) = next_model.as_object() else {
+            continue;
+        };
+        let previous_model = previous_models
+            .iter()
+            .find(|model| model.get("slug").and_then(Value::as_str) == Some(slug));
+        let Some(current_index) = current_models
+            .iter()
+            .position(|model| model.get("slug").and_then(Value::as_str) == Some(slug))
+        else {
+            current_models.push(next_model.clone());
+            continue;
+        };
+        let Some(current_object) = current_models[current_index].as_object_mut() else {
+            continue;
+        };
+        let previous_object = previous_model.and_then(Value::as_object);
+        let mut keys = std::collections::HashSet::new();
+        keys.extend(next_object.keys().cloned());
+        if let Some(previous_object) = previous_object {
+            keys.extend(previous_object.keys().cloned());
+        }
+        for key in keys {
+            if key == "slug" {
+                continue;
+            }
+            let old = previous_object.and_then(|object| object.get(&key));
+            let current = current_object.get(&key);
+            let next = next_object.get(&key);
+            if next == old {
+                continue;
+            }
+            if current == old {
+                match next {
+                    Some(value) => {
+                        current_object.insert(key.clone(), value.clone());
+                    }
+                    None => {
+                        current_object.remove(&key);
+                    }
+                }
+                set_root_field_source(metadata, slug, &key, "上游");
+            } else {
+                set_root_field_source(metadata, slug, &key, "冲突");
+                let conflicts = metadata.conflicts.entry(slug.to_owned()).or_default();
+                let marker = format!("{key}: 根目录更新与 Turbo 修改冲突，保留 Turbo 值");
+                if !conflicts.contains(&marker) {
+                    conflicts.push(marker);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_root_field_source(metadata: &mut CatalogMetadata, slug: &str, key: &str, source: &str) {
+    let field = match key {
+        "display_name" => "displayName",
+        "context_window" => "contextWindow",
+        "max_context_window" => "maxContextWindow",
+        "supported_reasoning_levels" => "supportedReasoningLevels",
+        "default_reasoning_level" => "defaultReasoningLevel",
+        "input_modalities" => "inputModalities",
+        "base_instructions" => "baseInstructions",
+        _ => key,
+    };
+    metadata
+        .field_sources
+        .entry(slug.to_owned())
+        .or_default()
+        .insert(field.to_owned(), source.to_owned());
 }
 
 fn remove_catalog_metadata(metadata: &mut CatalogMetadata, removed_slugs: &[String]) {
@@ -889,6 +1081,66 @@ mod tests {
             .ok_or("alpha missing after source refresh")?;
         assert!(!alpha.root_presence);
         assert!(alpha.root_missing);
+        Ok(())
+    }
+
+    #[test]
+    fn root_sync_adopts_untouched_fields_and_preserves_user_overrides() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let initial = ensure_catalog(root.path(), &config, &recovery)?;
+        let mut alpha = complete_model("alpha");
+        alpha.description = "user override".to_owned();
+        let mut beta = complete_model("beta");
+        beta.description = "b".to_owned();
+        let saved = save_catalog_models(
+            root.path(),
+            &config,
+            &recovery,
+            &[alpha, beta],
+            &initial.revision,
+        )?;
+
+        let mut root_document: Value = serde_json::from_slice(&fs::read(&source)?)?;
+        root_document["models"][0]["description"] = Value::String("root update".to_owned());
+        root_document["models"][1]["description"] = Value::String("root beta update".to_owned());
+        let root_bytes = serde_json::to_vec_pretty(&root_document)?;
+        fs::write(&source, &root_bytes)?;
+
+        let synced = ensure_catalog(root.path(), &config, &recovery)?;
+        let synced_alpha = synced
+            .models
+            .iter()
+            .find(|model| model.slug == "alpha")
+            .ok_or("alpha missing")?;
+        let synced_beta = synced
+            .models
+            .iter()
+            .find(|model| model.slug == "beta")
+            .ok_or("beta missing")?;
+        assert_eq!(synced_alpha.description, "user override");
+        assert_eq!(synced_beta.description, "root beta update");
+        assert!(
+            synced_alpha
+                .conflicts
+                .iter()
+                .any(|value| value.contains("description"))
+        );
+        assert_eq!(
+            synced.metadata.root_source_digest.as_deref(),
+            Some(digest(&root_bytes).as_str())
+        );
+        assert!(
+            synced
+                .metadata
+                .root_seen_slugs
+                .iter()
+                .any(|slug| slug == "beta")
+        );
+        assert!(saved.revision != synced.revision);
         Ok(())
     }
 

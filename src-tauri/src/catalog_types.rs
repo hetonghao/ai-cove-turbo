@@ -362,6 +362,10 @@ pub(crate) struct CatalogMetadata {
     pub(crate) etag: Option<String>,
     pub(crate) metadata_path: Option<String>,
     #[serde(default)]
+    pub(crate) root_source_digest: Option<String>,
+    #[serde(default)]
+    pub(crate) root_seen_slugs: Vec<String>,
+    #[serde(default)]
     pub(crate) field_sources: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default)]
     pub(crate) conflicts: BTreeMap<String, Vec<String>>,
@@ -386,6 +390,8 @@ pub(crate) struct OwnershipRecord {
     pub(crate) baseline_models: Vec<CatalogModel>,
     #[serde(default)]
     pub(crate) root_slugs: Vec<String>,
+    #[serde(default)]
+    pub(crate) root_document: Value,
     #[serde(default)]
     pub(crate) baseline_document: Value,
 }

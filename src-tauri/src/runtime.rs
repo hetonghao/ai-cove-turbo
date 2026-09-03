@@ -1218,6 +1218,8 @@ impl AppRuntime {
                 .iter()
                 .map(|model| (model.slug.clone(), model.field_sources.clone()))
                 .collect(),
+            root_source_digest: None,
+            root_seen_slugs: Vec::new(),
             conflicts: result
                 .models
                 .iter()
