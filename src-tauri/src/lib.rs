@@ -109,6 +109,7 @@ pub fn run() -> tauri::Result<()> {
             restart_codex,
             retry_takeover,
             set_ai_cove_upstream,
+            set_upstream_override,
             confirm_non_ai_cove,
             check_for_updates,
             install_update,
@@ -497,6 +498,15 @@ async fn set_ai_cove_upstream(runtime: State<'_, Arc<AppRuntime>>) -> Result<App
         .set_ai_cove_upstream()
         .await
         .map_err(|error| error.to_string())?;
+    Ok(runtime.status().await)
+}
+
+#[tauri::command]
+async fn set_upstream_override(
+    runtime: State<'_, Arc<AppRuntime>>,
+    upstream: String,
+) -> Result<AppStatus, String> {
+    runtime.set_upstream_override(&upstream).await?;
     Ok(runtime.status().await)
 }
 

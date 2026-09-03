@@ -17,6 +17,8 @@
   const CONNECTION_DRAG_THRESHOLD_PX = 36;
   const LIVE_TAIL_THRESHOLD_PX = 24;
   const AI_COVE_URL = "https://ai-cove.com";
+  const AI_COVE_UPSTREAM = "https://api.ai-cove.com/v1";
+  const UPSTREAM_TRIPLE_CLICK_WINDOW_MS = 600;
   const HTTP_DEGRADATION_WINDOW_MS = 5 * 60_000;
   const HTTP_DEGRADATION_MIN_SPAN_MS = 30_000;
   const HTTP_DEGRADATION_MIN_REQUESTS = 5;
@@ -76,6 +78,7 @@
     technicalDetail: "",
     provider: "—",
     upstream: "—",
+    originalUpstream: "—",
     aiCoveUpstream: true,
     aiCoveUpstreamFixAvailable: false,
     compressionEnabled: true,
@@ -167,6 +170,7 @@
     codexState: "active",
     provider: "ai-cove",
     upstream: "https://api.ai-cove.com/v1",
+    originalUpstream: "https://api.ai-cove.com/v1",
     compressionVerified: true,
     websocketVerified: true,
     websocketZstdVerified: true,
@@ -240,6 +244,9 @@
   let connectionPanelTrigger = null;
   let connectionDockOffset = 0;
   let aiCoveBubbleOpen = false;
+  let upstreamClickTimes = [];
+  let upstreamDialogTrigger = null;
+  let renderedUpstreamCandidateMarkup = "";
   let routeResetOpen = false;
   let routeResetTrigger = null;
   let updateBubbleOpen = !invoke;
@@ -753,6 +760,25 @@
     return String(values[key] ?? "");
   }
 
+  function isAiCoveUpstream(value) {
+    try {
+      const host = new URL(String(value)).hostname.toLowerCase().replace(/\.$/, "");
+      return host.endsWith(".ai-cove.com");
+    } catch {
+      return false;
+    }
+  }
+
+  function renderUpstreamMarker() {
+    const marker = $("[data-upstream-non-ai]");
+    if (!marker) return;
+    const upstream = String(state.upstream || "");
+    const visible = upstream !== "" && upstream !== "—" && !isAiCoveUpstream(upstream);
+    marker.title = "非 AI Cove";
+    marker.setAttribute("aria-label", "非 AI Cove");
+    setConditionalVisibility(marker, visible);
+  }
+
   function statusFor(key) {
     if (key.startsWith("service")) {
       const configState = String(state.configState).toLowerCase();
@@ -1069,7 +1095,7 @@
 
   function modelSourceLabel(model) {
     const source = model.fieldSources?.contextWindow || model.fieldSources?.maxContextWindow || "";
-    return source === "模板" ? "" : source;
+    return source === "模板" || source === "待确认" ? "" : source;
   }
 
   function modelSlugMarkup(model, modelLabel) {
@@ -1351,6 +1377,92 @@
     if (dialog === $("[data-model-editor]") && editorDraft) editorDraft = readModelEditor();
     if (dialog.open && dialog.close) dialog.close();
     dialog.hidden = true;
+  }
+
+  function upstreamCandidates() {
+    const original = String(state.originalUpstream || "").trim();
+    return [
+      { value: AI_COVE_UPSTREAM, label: "固定 AI Cove" },
+      ...(original && original !== AI_COVE_UPSTREAM
+        ? [{ value: original, label: "接管前的原始 Codex 上游" }]
+        : []),
+    ];
+  }
+
+  function renderUpstreamDialog() {
+    const candidates = $("[data-upstream-candidates]");
+    if (!candidates) return;
+    const markup = upstreamCandidates().map(({ value, label }) =>
+      `<button class="c-upstream-candidate" type="button" data-upstream-candidate="${escapeHtml(value)}"><span>${escapeHtml(label)}</span><code>${escapeHtml(value)}</code></button>`,
+    ).join("");
+    if (markup === renderedUpstreamCandidateMarkup) return;
+    candidates.innerHTML = markup;
+    renderedUpstreamCandidateMarkup = markup;
+  }
+
+  function openUpstreamDialog(trigger = null) {
+    const dialog = $("[data-upstream-dialog]");
+    if (!dialog) return;
+    upstreamClickTimes = [];
+    upstreamDialogTrigger = trigger;
+    const field = $("[data-upstream-field]");
+    const error = $("[data-upstream-error]");
+    if (field) field.value = state.upstream === "—" ? "" : String(state.upstream || "");
+    if (error) error.textContent = "";
+    renderUpstreamDialog();
+    dialog.hidden = false;
+    if (dialog.showModal) dialog.showModal();
+    else dialog.open = true;
+    field?.focus?.();
+    field?.select?.();
+  }
+
+  function closeUpstreamDialog({ restoreFocus = true } = {}) {
+    const dialog = $("[data-upstream-dialog]");
+    if (!dialog) return;
+    if (dialog.open && dialog.close) dialog.close();
+    dialog.hidden = true;
+    if (restoreFocus) upstreamDialogTrigger?.focus?.();
+    upstreamDialogTrigger = null;
+  }
+
+  async function saveUpstreamOverride() {
+    if (pendingAction) return;
+    const field = $("[data-upstream-field]");
+    const error = $("[data-upstream-error]");
+    const value = String(field?.value || "").trim();
+    if (!value) {
+      if (error) error.textContent = "请输入上游地址。";
+      return;
+    }
+    pendingAction = "save-upstream";
+    const save = $("[data-action=\"save-upstream\"]");
+    if (save) {
+      save.disabled = true;
+      save.textContent = "切换中…";
+    }
+    try {
+      if (invoke) applyStatus(await invoke("set_upstream_override", { upstream: value }));
+      else applyPreviewAction("set_upstream_override", { upstream: value });
+      closeUpstreamDialog();
+    } catch (saveError) {
+      if (error) error.textContent = saveError instanceof Error ? saveError.message : String(saveError);
+      state.technicalDetail = saveError instanceof Error ? saveError.message : String(saveError);
+    } finally {
+      pendingAction = "";
+      if (save) {
+        save.disabled = false;
+        save.textContent = "保存并切换";
+      }
+      renderState();
+    }
+  }
+
+  function registerUpstreamClick(trigger, eventTime) {
+    const now = typeof eventTime === "number" && Number.isFinite(eventTime) ? eventTime : Date.now();
+    upstreamClickTimes = upstreamClickTimes.filter((timestamp) => now - timestamp <= UPSTREAM_TRIPLE_CLICK_WINDOW_MS);
+    upstreamClickTimes.push(now);
+    if (upstreamClickTimes.length >= 3) openUpstreamDialog(trigger);
   }
 
   function openModelEditor(model, mode, sourceSlug = "") {
@@ -1753,6 +1865,8 @@
       const status = statusFor(key);
       if (status) target.dataset.status = status;
     });
+    renderUpstreamMarker();
+    renderUpstreamDialog();
     renderUpdateCurrentMark();
     const updateProgress = Math.max(0, Math.min(100, Number(state.updateProgress) || 0));
     all("[data-state-progress]").forEach((target) => {
@@ -2879,6 +2993,13 @@
       state.configState = "managed";
       state.serviceHealthy = true;
     }
+    if (command === "set_upstream_override") {
+      state.upstream = args.upstream;
+      state.aiCoveUpstream = isAiCoveUpstream(args.upstream);
+      state.configState = "managed";
+      state.serviceHealthy = true;
+      state.configMessage = "Preview：强制上游已生效，等待新的请求验证";
+    }
     if (command === "confirm_non_ai_cove") state.nonAiCoveConfirmed = true;
     if (command === "reset_route_metrics") {
       state.hybridWs = 0;
@@ -3362,6 +3483,7 @@
     editorDialog?.addEventListener?.("cancel", () => {
       if (editorDraft) editorDraft = readModelEditor();
     });
+    $("[data-upstream-dialog]")?.addEventListener?.("cancel", () => closeUpstreamDialog());
     const terminal = $(".c-terminal__window");
     terminal?.addEventListener("scroll", () => {
       liveTailFollowing = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight <= LIVE_TAIL_THRESHOLD_PX;
@@ -3369,9 +3491,35 @@
       renderLiveFollow();
     }, { passive: true });
     document.addEventListener("click", (event) => {
+      if (!event.target?.closest?.("[data-upstream-trigger]")) upstreamClickTimes = [];
       const configView = event.target.closest?.('[data-config-view][role="tab"]');
       if (configView) {
         selectConfigView(configView.dataset.configView, { focus: true });
+        return;
+      }
+      const upstreamClose = event.target.closest?.("[data-upstream-dialog-close]");
+      if (upstreamClose) {
+        closeUpstreamDialog();
+        return;
+      }
+      const upstreamCandidate = event.target.closest?.("[data-upstream-candidate]");
+      if (upstreamCandidate) {
+        const field = $("[data-upstream-field]");
+        if (field) {
+          field.value = upstreamCandidate.dataset.upstreamCandidate || "";
+          field.focus?.();
+          field.select?.();
+        }
+        return;
+      }
+      const upstreamSave = event.target.closest?.('[data-action="save-upstream"]');
+      if (upstreamSave) {
+        void saveUpstreamOverride();
+        return;
+      }
+      const upstreamTrigger = event.target?.closest?.("[data-upstream-trigger]");
+      if (upstreamTrigger) {
+        registerUpstreamClick(upstreamTrigger, event.timeStamp);
         return;
       }
       const dialogClose = event.target.closest?.("[data-model-dialog-close]");
@@ -3467,6 +3615,12 @@
     }, { passive: true });
     document.addEventListener("scroll", positionConnectionHoverCard, { passive: true, capture: true });
     document.addEventListener("keydown", (event) => {
+      const upstreamTrigger = event.target?.closest?.("[data-upstream-trigger]");
+      if (upstreamTrigger && ["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        registerUpstreamClick(upstreamTrigger, event.timeStamp);
+        return;
+      }
       if (event.key === "Escape" && aiCoveBubbleOpen) {
         setAiCoveBubbleOpen(false, { restoreFocus: true });
         return;

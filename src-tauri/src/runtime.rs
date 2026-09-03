@@ -29,7 +29,7 @@ use crate::{
         SessionHandoff, StaleRecovery, UpstreamCompatibility, managed_ownership, preflight,
         read_session_handoff, recover_stale, relinquish_websocket, remove_session_handoff, restore,
         set_ai_cove_upstream as replace_loopback_upstream, set_managed_websocket, take_over,
-        write_session_handoff,
+        upstream_compatibility, validate_upstream_override, write_session_handoff,
     },
     proxy::{
         CapabilityModelStatus, ConnectionSnapshot, Metrics, ModelPolicyStatus, ModelPolicyUpdate,
@@ -99,6 +99,7 @@ struct Preferences {
     dock_initialized: bool,
     last_port: Option<u16>,
     confirmed_non_ai_cove_upstream: Option<String>,
+    upstream_override: Option<String>,
 }
 
 const MODEL_SETTINGS_JOURNAL_VERSION: u8 = 1;
@@ -143,6 +144,7 @@ impl Default for Preferences {
             dock_initialized: false,
             last_port: None,
             confirmed_non_ai_cove_upstream: None,
+            upstream_override: None,
         }
     }
 }
@@ -158,6 +160,7 @@ pub(crate) struct AppStatus {
     pub(crate) config_message: String,
     pub(crate) provider: String,
     pub(crate) upstream: String,
+    pub(crate) original_upstream: String,
     pub(crate) ai_cove_upstream: bool,
     pub(crate) ai_cove_upstream_fix_available: bool,
     pub(crate) compression_enabled: bool,
@@ -218,6 +221,7 @@ impl AppStatus {
             config_message: "正在检查 Codex 配置".to_owned(),
             provider: "—".to_owned(),
             upstream: "—".to_owned(),
+            original_upstream: "—".to_owned(),
             ai_cove_upstream: false,
             ai_cove_upstream_fix_available: false,
             compression_enabled: preferences.compression_enabled,
@@ -413,15 +417,24 @@ impl AppRuntime {
                 });
             }
         }
-        let upstream = check.upstream.as_str().to_owned();
-        let ai_cove = check.compatibility == UpstreamCompatibility::AiCove;
+        let upstream_url = match self.configured_upstream(&check) {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                self.block(&error.to_string());
+                return;
+            }
+        };
+        let upstream = upstream_url.as_str().to_owned();
+        let ai_cove = upstream_compatibility(&upstream_url) == UpstreamCompatibility::AiCove;
         self.update_status(|status| {
             status.provider.clone_from(&check.provider);
             status.upstream.clone_from(&upstream);
+            status.original_upstream = check.upstream.as_str().to_owned();
             status.ai_cove_upstream = ai_cove;
         });
 
-        if !ai_cove && !self.non_ai_cove_confirmed(&upstream) {
+        let forced = self.has_upstream_override();
+        if !ai_cove && !forced && !self.non_ai_cove_confirmed(&upstream) {
             self.update_status(|status| {
                 status.config_state = "warning".to_owned();
                 status.config_message =
@@ -1271,6 +1284,154 @@ impl AppRuntime {
         self.initialize().await;
     }
 
+    fn has_upstream_override(&self) -> bool {
+        lock_mutex(&self.preferences).upstream_override.is_some()
+    }
+
+    fn configured_upstream(&self, check: &Preflight) -> Result<Url, ConfigError> {
+        lock_mutex(&self.preferences)
+            .upstream_override
+            .as_deref()
+            .map_or_else(|| Ok(check.upstream.clone()), validate_upstream_override)
+    }
+
+    async fn start_managed_proxy(
+        &self,
+        check: &Preflight,
+        upstream: Url,
+        recovery_path: &Path,
+    ) -> Result<(ProxyHandle, ManagedConfig), String> {
+        let ai_cove = upstream_compatibility(&upstream) == UpstreamCompatibility::AiCove;
+        let proxy = start_proxy_with_policy(
+            ProxyOptions {
+                upstream,
+                compression_enabled: Arc::clone(&self.compression_enabled),
+                websocket_enabled: Arc::clone(&self.websocket_enabled),
+                ai_cove_private_websocket_zstd: ai_cove,
+                metrics: Arc::clone(&self.metrics),
+                preferred_ports: self.preferred_ports(),
+                max_request_body_bytes: 128 * 1024 * 1024,
+            },
+            Some(self.paths.model_policy_path()),
+            Some(self.paths.config_path.clone()),
+            true,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let endpoint = proxy.endpoint().to_owned();
+        let websocket_enabled = self.websocket_enabled.load(Ordering::Relaxed);
+        let managed = match take_over(check, &endpoint, websocket_enabled, recovery_path) {
+            Ok(managed) => managed,
+            Err(error) => {
+                proxy.stop().await;
+                return Err(error.to_string());
+            }
+        };
+        Ok((proxy, managed))
+    }
+
+    pub(crate) async fn set_upstream_override(&self, raw: &str) -> Result<(), String> {
+        let upstream = validate_upstream_override(raw).map_err(|error| error.to_string())?;
+        let _guard = self.lifecycle_lock.lock().await;
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return Err("Turbo 正在退出，无法切换上游".to_owned());
+        }
+
+        let managed = lock_mutex(&self.managed).clone();
+        let (check, previous_endpoint) = if let Some(managed) = managed.as_ref() {
+            if managed_ownership(managed).map_err(|error| error.to_string())?
+                != ManagedOwnership::Owned
+            {
+                return Err("Codex 配置已被外部修改，请重新接管后再切换上游".to_owned());
+            }
+            (
+                managed
+                    .original_preflight()
+                    .map_err(|error| error.to_string())?,
+                read_lock(&self.status).endpoint.clone(),
+            )
+        } else {
+            (
+                preflight(&self.paths.config_path).map_err(|error| error.to_string())?,
+                "—".to_owned(),
+            )
+        };
+        let upstream_text = upstream.as_str().to_owned();
+        let ai_cove = upstream_compatibility(&upstream) == UpstreamCompatibility::AiCove;
+        let preferences = {
+            let mut preferences = lock_mutex(&self.preferences);
+            preferences.upstream_override = Some(upstream_text.clone());
+            if !ai_cove {
+                preferences.confirmed_non_ai_cove_upstream = Some(upstream_text.clone());
+            }
+            preferences.clone()
+        };
+        save_preferences(&self.paths.preferences_path(), &preferences)
+            .map_err(|error| error.to_string())?;
+        self.update_status(|status| {
+            status.config_state = "starting".to_owned();
+            status.config_message = "正在切换强制上游".to_owned();
+            status.upstream = upstream_text.clone();
+            status.original_upstream = check.upstream.as_str().to_owned();
+            status.ai_cove_upstream = ai_cove;
+            status.service_healthy = false;
+        });
+
+        let old_proxy = self.proxy.lock().await.take();
+        if let Some(proxy) = old_proxy {
+            proxy.stop().await;
+        }
+        let recovery_path = self.paths.recovery_path();
+        let (proxy, managed) = match self
+            .start_managed_proxy(&check, upstream, &recovery_path)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.block(&error);
+                return Err(error);
+            }
+        };
+        let endpoint = proxy.endpoint().to_owned();
+        let endpoint_changed = previous_endpoint != "—" && previous_endpoint != endpoint;
+        self.remember_port(&endpoint);
+        *lock_mutex(&self.managed) = Some(managed);
+        *self.proxy.lock().await = Some(proxy);
+        let codex_pid = codex_desktop_process_id();
+        self.reset_activation_baseline();
+        *lock_mutex(&self.codex_pid_before_restart) = codex_pid;
+        let websocket_enabled = self.websocket_enabled.load(Ordering::Relaxed);
+        self.update_status(|status| {
+            status.service_healthy = true;
+            status.endpoint = endpoint;
+            status.provider = check.provider.clone();
+            status.upstream = upstream_text.clone();
+            status.original_upstream = check.upstream.as_str().to_owned();
+            status.ai_cove_upstream = ai_cove;
+            status.config_state = "managed".to_owned();
+            status.config_message = "强制上游已生效，等待新的请求验证".to_owned();
+            status.codex_state = if codex_pid.is_none() {
+                "waiting_start".to_owned()
+            } else if endpoint_changed {
+                "restart_required".to_owned()
+            } else {
+                "waiting_request".to_owned()
+            };
+            status.restart_required = endpoint_changed && codex_pid.is_some();
+            status.desktop_restarted = false;
+            status.websocket_enabled = websocket_enabled;
+            status.websocket_state = if websocket_enabled {
+                "waiting".to_owned()
+            } else {
+                "disabled".to_owned()
+            };
+            status.websocket_verified = false;
+            status.websocket_zstd_verified = false;
+            status.compression_verified = false;
+        });
+        Ok(())
+    }
+
     pub(crate) async fn set_ai_cove_upstream(&self) -> Result<(), ConfigError> {
         replace_loopback_upstream(&self.paths.config_path)?;
         self.update_status(|status| {
@@ -1984,6 +2145,66 @@ supports_websockets = false
         assert!(restored.contains("https://api.ai-cove.com/v1"));
         assert!(restored.contains("supports_websockets = false"));
         assert!(!restored.contains("http://127.0.0.1:"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upstream_override_restarts_proxy_without_rewriting_codex_to_real_upstream()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_dir = root.path().join("home/.codex");
+        fs::create_dir_all(&config_dir)?;
+        let config_path = config_dir.join("config.toml");
+        let data_dir = root.path().join("data");
+        fs::write(
+            &config_path,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.ai-cove.com/v1"
+supports_websockets = false
+"#,
+        )?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: config_path.clone(),
+            data_dir: data_dir.clone(),
+        });
+
+        runtime.initialize().await;
+        let before = runtime.status().await;
+        runtime
+            .set_upstream_override("https://gateway.example/v1")
+            .await?;
+        let active = runtime.status().await;
+
+        assert!(active.service_healthy);
+        assert_eq!(active.upstream, "https://gateway.example/v1");
+        assert_eq!(active.original_upstream, "https://api.ai-cove.com/v1");
+        assert_eq!(active.endpoint, before.endpoint);
+        let managed_config = fs::read_to_string(&config_path)?;
+        assert!(managed_config.contains(&active.endpoint));
+        assert!(!managed_config.contains("https://gateway.example/v1"));
+        assert!(
+            fs::read_to_string(data_dir.join("preferences.json"))?
+                .contains("\"upstreamOverride\":\"https://gateway.example/v1\"")
+        );
+
+        runtime.shutdown().await?;
+        let restored = fs::read_to_string(&config_path)?;
+        assert!(restored.contains("https://api.ai-cove.com/v1"));
+        assert!(!restored.contains("https://gateway.example/v1"));
+
+        let restarted = AppRuntime::new(RuntimePaths {
+            config_path: config_path.clone(),
+            data_dir,
+        });
+        restarted.initialize().await;
+        let persisted = restarted.status().await;
+        assert!(persisted.service_healthy);
+        assert_eq!(persisted.upstream, "https://gateway.example/v1");
+        assert_eq!(persisted.original_upstream, "https://api.ai-cove.com/v1");
+        assert!(!fs::read_to_string(&config_path)?.contains("https://gateway.example/v1"));
+        restarted.shutdown().await?;
         Ok(())
     }
 

@@ -74,7 +74,7 @@
                   <header><span class="c-overline">ROUTE</span><h2 id="live-route-title">当前路径</h2></header>
                   <dl>
                     <div><dt>LOCAL</dt><dd><code data-state="endpoint">—</code></dd></div>
-                    <div><dt>UPSTREAM</dt><dd><code data-state="upstream">—</code></dd></div>
+                    <div class="c-route__upstream" data-upstream-trigger tabindex="0" role="button" aria-haspopup="dialog" aria-controls="upstream-override-dialog" aria-label="当前上游，连续点击三次可编辑"><dt>UPSTREAM</dt><dd><code data-state="upstream">—</code><span class="c-upstream-non-ai" data-upstream-non-ai role="img" aria-label="非 AI Cove" title="非 AI Cove" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5 14 4v3.5c0 3.2-2.1 5.8-6 7-3.9-1.2-6-3.8-6-7V4l6-2.5Z"/><path d="M8 4.5v3.2M8 10.5h.01"/></svg></span></dd></div>
                     <div><dt>PROVIDER</dt><dd><code data-state="provider">—</code></dd></div>
                     <div><dt>CONFIG</dt><dd><span class="c-state state-indicator" data-state="config-prerequisite" data-status="waiting">检查中</span></dd></div>
                   </dl>
@@ -292,6 +292,18 @@
             <p class="b-hint">从菜单栏或系统托盘重新打开 · 关闭窗口不会停止 Turbo</p>
           </div>
         </section>
+        <dialog class="b-model-dialog c-upstream-dialog" id="upstream-override-dialog" data-upstream-dialog aria-labelledby="upstream-override-title">
+          <form method="dialog" class="b-model-dialog__surface c-upstream-dialog__surface">
+            <header><div><p class="eyebrow">UPSTREAM OVERRIDE</p><h2 id="upstream-override-title">切换 Turbo 上游</h2><p>只改 Turbo 转发目标，Codex 仍连接本机。</p></div><button type="button" class="b-model-dialog__close" data-upstream-dialog-close aria-label="关闭上游设置">×</button></header>
+            <div class="c-upstream-dialog__body">
+              <div class="c-upstream-candidates" data-upstream-candidates aria-label="候选上游"><button class="c-upstream-candidate" type="button" data-upstream-candidate="https://api.ai-cove.com/v1"><span>固定 AI Cove</span><code>https://api.ai-cove.com/v1</code></button><button class="c-upstream-candidate" type="button" data-upstream-candidate="https://example.com/v1"><span>接管前的原始 Codex 上游</span><code>https://example.com/v1</code></button></div>
+              <label class="b-model-editor__field c-upstream-dialog__field"><span>上游地址</span><input data-upstream-field type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://gateway.example/v1" aria-describedby="upstream-override-hint" required /></label>
+              <p id="upstream-override-hint" class="c-upstream-dialog__hint">保存会中断当前进行中的请求；新请求会立即使用新地址。</p>
+            </div>
+            <p class="b-model-dialog__error" data-upstream-error role="alert"></p>
+            <footer><button type="button" data-upstream-dialog-close>取消</button><button type="button" data-action="save-upstream">保存并切换</button></footer>
+          </form>
+        </dialog>
       </main>
     </div>
 

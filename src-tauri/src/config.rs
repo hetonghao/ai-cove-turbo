@@ -44,6 +44,30 @@ pub(crate) struct ManagedConfig {
     managed_supports_websockets: Option<bool>,
 }
 
+impl ManagedConfig {
+    pub(crate) fn original_preflight(&self) -> Result<Preflight, ConfigError> {
+        let upstream = Url::parse(&self.original_base_url).map_err(ConfigError::InvalidBaseUrl)?;
+        let compatibility = upstream_compatibility(&upstream);
+        Ok(Preflight {
+            config_path: self.config_path.clone(),
+            effective_config_digest: self
+                .original_effective_config_digest
+                .clone()
+                .unwrap_or_else(|| {
+                    digest_effective_config(
+                        &self.provider,
+                        &upstream,
+                        self.original_supports_websockets,
+                    )
+                }),
+            provider: self.provider.clone(),
+            upstream,
+            supports_websockets: self.original_supports_websockets,
+            compatibility,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SessionHandoff {
     #[serde(default)]
@@ -113,6 +137,7 @@ pub(crate) enum ConfigError {
     MissingProvider(String),
     MissingBaseUrl(String),
     InvalidBaseUrl(url::ParseError),
+    InvalidUpstreamOverride(&'static str),
     LoopbackUpstream,
     InsecureUpstream,
     InvalidManagedEndpoint,
@@ -137,6 +162,9 @@ impl fmt::Display for ConfigError {
                 write!(formatter, "受管 Provider {provider} 缺少 base_url")
             }
             Self::InvalidBaseUrl(error) => write!(formatter, "Provider base_url 无效：{error}"),
+            Self::InvalidUpstreamOverride(reason) => {
+                write!(formatter, "强制上游地址无效：{reason}")
+            }
             Self::LoopbackUpstream => {
                 write!(formatter, "当前上游是本机回环地址，Turbo 已阻止代理回环")
             }
@@ -214,6 +242,41 @@ pub(crate) fn preflight(path: &Path) -> Result<Preflight, ConfigError> {
         supports_websockets,
         compatibility,
     })
+}
+
+pub(crate) fn validate_upstream_override(raw: &str) -> Result<Url, ConfigError> {
+    if raw.chars().any(char::is_control) {
+        return Err(ConfigError::InvalidUpstreamOverride("不能包含控制字符"));
+    }
+    let upstream = Url::parse(raw.trim()).map_err(ConfigError::InvalidBaseUrl)?;
+    if !matches!(upstream.scheme(), "http" | "https") {
+        return Err(ConfigError::InvalidUpstreamOverride("只支持 HTTP 或 HTTPS"));
+    }
+    if !upstream.username().is_empty() || upstream.password().is_some() {
+        return Err(ConfigError::InvalidUpstreamOverride("不能包含用户名或密码"));
+    }
+    let host = upstream
+        .host_str()
+        .ok_or(ConfigError::InvalidUpstreamOverride("必须包含主机名"))?;
+    let ip_host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || host.to_ascii_lowercase().ends_with(".local")
+        || ip_host
+            .parse::<IpAddr>()
+            .is_ok_and(is_disallowed_local_address)
+    {
+        return Err(ConfigError::InvalidUpstreamOverride("不允许回环或内网地址"));
+    }
+    Ok(upstream)
+}
+
+pub(crate) fn upstream_compatibility(upstream: &Url) -> UpstreamCompatibility {
+    if upstream.host_str().is_some_and(is_ai_cove_host) {
+        UpstreamCompatibility::AiCove
+    } else {
+        UpstreamCompatibility::OtherHttps
+    }
 }
 
 pub(crate) fn set_ai_cove_upstream(path: &Path) -> Result<(), ConfigError> {
@@ -525,6 +588,24 @@ fn is_loopback(url: &Url) -> bool {
     }
     host.parse::<IpAddr>()
         .is_ok_and(|address| address.is_loopback())
+}
+
+const fn is_disallowed_local_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            address.is_loopback()
+                || address.is_private()
+                || address.is_link_local()
+                || address.is_unspecified()
+        }
+        IpAddr::V6(address) => {
+            let first = address.segments()[0];
+            address.is_loopback()
+                || address.is_unspecified()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 fn is_ai_cove_host(host: &str) -> bool {
@@ -917,5 +998,32 @@ supports_websockets = false
         assert!(source.contains("api_key = \"keep-me\""));
         assert!(source.contains("supports_websockets = false"));
         Ok(())
+    }
+    #[test]
+    fn forced_upstream_validation_accepts_public_http_and_https() -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            validate_upstream_override(" http://gateway.example/v1 ")?.as_str(),
+            "http://gateway.example/v1"
+        );
+        assert_eq!(
+            validate_upstream_override("https://api.ai-cove.com/v1")?.as_str(),
+            "https://api.ai-cove.com/v1"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn forced_upstream_validation_rejects_credentials_and_local_addresses() {
+        for upstream in [
+            "https://user:secret@gateway.example/v1",
+            "https://127.0.0.1:8080/v1",
+            "https://10.0.0.4/v1",
+            "https://[fd00::1]/v1",
+            "https://localhost/v1",
+            "ftp://gateway.example/v1",
+        ] {
+            assert!(validate_upstream_override(upstream).is_err(), "{upstream}");
+        }
+        assert!(validate_upstream_override("https://gateway.example/v1\n").is_err());
     }
 }
