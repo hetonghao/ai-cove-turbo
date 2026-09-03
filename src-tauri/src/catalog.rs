@@ -649,8 +649,9 @@ fn sync_catalog_from_root_with_executable(
         && metadata_before.root_codex_version == metadata.root_codex_version
         && metadata_before.root_client_version == metadata.root_client_version
         && metadata_before.root_binary_digest == metadata.root_binary_digest;
-    let has_previous_root_state =
-        !record.root_fields.is_empty() || record.root_document.is_object();
+    let has_previous_root_state = !record.root_fields.is_empty()
+        || record.root_document.is_object()
+        || metadata_before.root_source_digest.is_some();
     if has_previous_root_state && root_metadata_stable {
         return Ok((record, false));
     }
