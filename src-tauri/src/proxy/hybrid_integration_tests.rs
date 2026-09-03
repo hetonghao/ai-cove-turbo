@@ -130,6 +130,28 @@ async fn send_continuation(
         .map_err(io::Error::other)
 }
 
+async fn send_gemini_history(
+    client: &mut ClientWebSocket,
+    previous_response_id: Option<&str>,
+) -> io::Result<()> {
+    let mut request = serde_json::json!({
+        "type": "response.create",
+        "model": "gemini-3.8-flash",
+        "input": [
+            {"type": "function_call", "call_id": "call-1"},
+            {"type": "message", "role": "assistant", "content": "working"},
+            {"type": "function_call_output", "call_id": "call-1", "output": "ok"}
+        ]
+    });
+    if let Some(previous_response_id) = previous_response_id {
+        request["previous_response_id"] = Value::String(previous_response_id.to_owned());
+    }
+    client
+        .send(Message::Text(request.to_string().into()))
+        .await
+        .map_err(io::Error::other)
+}
+
 async fn send_create_with_metadata(client: &mut ClientWebSocket) -> io::Result<()> {
     let request = serde_json::json!({
         "type": "response.create",
@@ -267,6 +289,51 @@ async fn local_101_stays_responsive_when_pool_prewarm_fails() -> io::Result<()> 
     server.fixture.wait_http(1).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     assert_counts_with_min_private(server.fixture.counts().await, 2, 0, 1);
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_gemini_initial_and_continuation_send_reordered_history() -> io::Result<()> {
+    // Given: a ready Hybrid WebSocket receives malformed Gemini tool history.
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    server.fixture.wait_ready(6).await?;
+
+    // When: initial and continuation response.create frames are sent through the real flow.
+    send_gemini_history(&mut client, None).await?;
+    server.fixture.wait_messages(1).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    send_gemini_history(&mut client, Some("response-1")).await?;
+    server.fixture.wait_messages(2).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+
+    // Then: both private upstream payloads contain function output before assistant message.
+    let payloads = server.fixture.private_payloads().await;
+    assert_eq!(payloads.len(), 2);
+    for payload in payloads {
+        let value: Value = serde_json::from_slice(&payload).map_err(io::Error::other)?;
+        let item_types = value
+            .get("input")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other("upstream input missing"))?
+            .iter()
+            .filter_map(|item| item.get("type").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            item_types,
+            vec!["function_call", "function_call_output", "message"]
+        );
+    }
+
     drop(client);
     proxy.stop().await;
     server.stop().await;

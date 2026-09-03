@@ -171,6 +171,8 @@ async fn start_response(
     if event_type != "response.create" {
         return legacy::start_legacy_response(client, session, payload, original_binary).await;
     }
+    let payload = super::super::gemini_history::normalize_gemini_function_history(&payload)
+        .unwrap_or(payload);
     let Ok(prepared) = http_request_payload(&payload) else {
         let _ = send_error(
             client,

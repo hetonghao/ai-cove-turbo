@@ -51,6 +51,8 @@ async fn forward_active_message(
         .await;
         return true;
     };
+    let payload = super::super::gemini_history::normalize_gemini_function_history(&payload)
+        .unwrap_or(payload);
     if event_type == "response.create" {
         if let Ok(prepared) = http_request_payload(&payload) {
             if !session.bind_thread_id(prepared.thread_id).await {

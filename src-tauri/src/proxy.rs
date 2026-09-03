@@ -31,6 +31,10 @@ use url::Url;
 #[path = "codex_auth.rs"]
 mod codex_auth;
 mod compression;
+mod gemini_history;
+#[cfg(test)]
+#[path = "proxy/gemini_history_tests.rs"]
+mod gemini_history_tests;
 mod hybrid;
 mod hybrid_pool;
 #[path = "model_policy.rs"]
@@ -1276,6 +1280,10 @@ async fn proxy_http_with_control(
     let raw_len = raw_body.len();
     let metadata = traffic::request_metadata(&parts.headers, &raw_body);
     state.metrics.observe_session_name_hint(&metadata);
+    let normalized = is_responses_path(&path)
+        .then(|| gemini_history::normalize_gemini_function_history(&raw_body))
+        .flatten();
+    let raw_body = normalized.map_or(raw_body, Bytes::from);
     let should_compress = state.compression_enabled.load(Ordering::Relaxed)
         && is_compressible_json(&parts.method, &parts.headers);
     let (outbound_body, compressed) = if should_compress {
@@ -2624,6 +2632,64 @@ data: {"type":"response.completed"}
         // Then: Turbo does not silently rewrite it into Responses.
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert!(captured.lock().await.is_none());
+
+        proxy.stop().await;
+        upstream_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_http_gemini_history_is_normalized_before_upstream() -> Result<(), Box<dyn Error>>
+    {
+        // Given: a direct Responses request has assistant content before a pending Gemini output.
+        let captured = CapturedRequest::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let app = Router::new()
+            .route("/v1/responses", post(upstream))
+            .with_state(Arc::clone(&captured));
+        let upstream_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let proxy = start_proxy(ProxyOptions {
+            upstream: Url::parse(&format!("http://{address}/v1"))?,
+            compression_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            websocket_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ai_cove_private_websocket_zstd: false,
+            metrics: Arc::new(Metrics::default()),
+            preferred_ports: vec![0],
+            max_request_body_bytes: 1024 * 1024,
+        })
+        .await?;
+        let body = r#"{"model":"gemini-3.8-flash","input":[{"type":"function_call","call_id":"call-1"},{"type":"message","role":"assistant","content":"working"},{"type":"function_call_output","call_id":"call-1","output":"ok"}]}"#;
+
+        // When: the public HTTP proxy forwards the request.
+        let response = reqwest::Client::new()
+            .post(format!("{}/responses", proxy.endpoint()))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await?;
+
+        // Then: the actual upstream body resolves the function call before assistant content.
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let (_, forwarded) = captured
+            .lock()
+            .await
+            .take()
+            .ok_or("upstream request missing")?;
+        let value: serde_json::Value = serde_json::from_slice(&forwarded)?;
+        let item_types = value
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("normalized input missing")?
+            .iter()
+            .filter_map(|item| item.get("type").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            item_types,
+            vec!["function_call", "function_call_output", "message"]
+        );
 
         proxy.stop().await;
         upstream_task.abort();

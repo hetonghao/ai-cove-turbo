@@ -160,6 +160,11 @@ impl Fixture {
             let Ok(decoded) = decode_private_message(&payload) else {
                 return false;
             };
+            self.state
+                .private_payloads
+                .lock()
+                .await
+                .push(decoded.payload.clone());
             self.record(|counts| counts.private_messages += 1).await;
             if self.handled_transport_fallback(websocket).await {
                 return false;
