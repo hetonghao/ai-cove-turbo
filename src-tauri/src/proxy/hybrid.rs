@@ -110,12 +110,19 @@ enum ActiveKind {
 
 struct Active {
     kind: ActiveKind,
+    http_traffic: Option<super::HttpTraffic>,
     http_fallback: Option<Vec<u8>>,
     output_forwarded: bool,
     cancel_requested: bool,
     commands: mpsc::Sender<WorkerCommand>,
     events: mpsc::Receiver<WorkerEvent>,
     task: JoinHandle<()>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResponseTransport {
+    Http,
+    WebSocket,
 }
 
 #[derive(Clone, Copy, Debug, Default)]

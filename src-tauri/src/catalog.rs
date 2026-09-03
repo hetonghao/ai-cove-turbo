@@ -47,6 +47,7 @@ pub(crate) fn preview_catalog_models(
     recovery_path: &Path,
     models: &[CatalogModel],
     expected_revision: &str,
+    removed_slugs: &[String],
 ) -> Result<(String, CatalogMetadata), CatalogError> {
     let fixed_path = fixed_catalog_path(home);
     let _record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
@@ -59,7 +60,8 @@ pub(crate) fn preview_catalog_models(
         return Err(CatalogError::ContentChanged);
     }
     let previous_metadata = catalog_storage::read_metadata(&fixed_path);
-    let (next_bytes, metadata) = prepare_catalog_models(&bytes, &previous_metadata, models)?;
+    let (next_bytes, metadata) =
+        prepare_catalog_models(&bytes, &previous_metadata, models, removed_slugs)?;
     Ok((digest(&next_bytes), metadata))
 }
 
@@ -287,6 +289,24 @@ pub(crate) fn save_catalog_models(
     models: &[CatalogModel],
     expected_revision: &str,
 ) -> Result<CatalogStatus, CatalogError> {
+    save_catalog_models_with_removals(
+        home,
+        config_path,
+        recovery_path,
+        models,
+        expected_revision,
+        &[],
+    )
+}
+
+pub(crate) fn save_catalog_models_with_removals(
+    home: &Path,
+    config_path: &Path,
+    recovery_path: &Path,
+    models: &[CatalogModel],
+    expected_revision: &str,
+    removed_slugs: &[String],
+) -> Result<CatalogStatus, CatalogError> {
     let fixed_path = fixed_catalog_path(home);
     let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
     let pointer = read_catalog_pointer(config_path)?;
@@ -298,7 +318,8 @@ pub(crate) fn save_catalog_models(
         return Err(CatalogError::ContentChanged);
     }
     let previous_metadata = catalog_storage::read_metadata(&fixed_path);
-    let (next_bytes, metadata) = prepare_catalog_models(&bytes, &previous_metadata, models)?;
+    let (next_bytes, metadata) =
+        prepare_catalog_models(&bytes, &previous_metadata, models, removed_slugs)?;
     write_atomic(&fixed_path, &next_bytes)?;
     if let Err(error) = catalog_storage::write_metadata(&fixed_path, &metadata) {
         let _ = write_atomic(&fixed_path, &bytes);
@@ -312,6 +333,7 @@ fn prepare_catalog_models(
     bytes: &[u8],
     previous_metadata: &CatalogMetadata,
     models: &[CatalogModel],
+    removed_slugs: &[String],
 ) -> Result<(Vec<u8>, CatalogMetadata), CatalogError> {
     let normalized_models = models
         .iter()
@@ -324,6 +346,7 @@ fn prepare_catalog_models(
         .and_then(Value::as_array_mut)
         .ok_or_else(|| CatalogError::InvalidSchema("缺少 models 数组".to_owned()))?;
     migrate_legacy_models(entries);
+    remove_catalog_entries(entries, removed_slugs);
     let needs_template = models.iter().any(|model| {
         !entries
             .iter()
@@ -358,12 +381,14 @@ fn prepare_catalog_models(
         {
             write_model_fields(existing, model);
         } else {
-            let Some(mut created) = template.clone() else {
+            let Some(template) = template.as_ref() else {
                 return Err(CatalogError::InvalidSchema(format!(
                     "新增模型缺少 {CODEX_TEMPLATE_SLUG} 基准模板"
                 )));
             };
+            let mut created = template.clone();
             write_model_fields(&mut created, model);
+            sanitize_new_model_template(&mut created, template, model);
             entries.push(created);
         }
     }
@@ -390,6 +415,7 @@ fn prepare_catalog_models(
     });
     validate_codex_document(&document)?;
     let mut metadata = previous_metadata.clone();
+    remove_catalog_metadata(&mut metadata, removed_slugs);
     for model in &normalized_models {
         metadata
             .field_sources
@@ -402,8 +428,109 @@ fn prepare_catalog_models(
                 .insert(model.slug.clone(), model.conflicts.clone());
         }
     }
-    let next_bytes = serde_json::to_vec_pretty(&document).map_err(CatalogError::Json)?;
-    Ok((next_bytes, metadata))
+    Ok((
+        serde_json::to_vec_pretty(&document).map_err(CatalogError::Json)?,
+        metadata,
+    ))
+}
+
+fn remove_catalog_entries(entries: &mut Vec<Value>, removed_slugs: &[String]) {
+    entries.retain(|entry| {
+        entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_none_or(|slug| !removed_slugs.iter().any(|removed| removed == slug))
+    });
+}
+
+fn remove_catalog_metadata(metadata: &mut CatalogMetadata, removed_slugs: &[String]) {
+    for slug in removed_slugs {
+        metadata.field_sources.remove(slug);
+        metadata.conflicts.remove(slug);
+    }
+}
+
+fn sanitize_new_model_template(model: &mut Value, template: &Value, target: &CatalogModel) {
+    let Some(object) = model.as_object_mut() else {
+        return;
+    };
+    object.remove("additional_speed_tiers");
+    object.remove("apply_patch_tool_type");
+    object.remove("availability_nux");
+    object.remove("upgrade");
+    if !CatalogModel::is_gpt_like_slug(&target.slug) {
+        object.remove("apply_patch_tool_type");
+        object.remove("additional_speed_tiers");
+        object.insert("service_tiers".to_owned(), serde_json::json!([]));
+        object.remove("default_service_tier");
+        object.insert(
+            "supports_reasoning_summary_parameter".to_owned(),
+            serde_json::Value::Bool(false),
+        );
+        object.insert(
+            "default_reasoning_summary".to_owned(),
+            serde_json::Value::String("none".to_owned()),
+        );
+    }
+    if let Some(instructions) = template.get("base_instructions").and_then(Value::as_str) {
+        object.insert(
+            "base_instructions".to_owned(),
+            Value::String(replace_template_model_name(instructions, template, target)),
+        );
+    }
+    if let Some(messages) = object
+        .get_mut("model_messages")
+        .and_then(Value::as_object_mut)
+    {
+        if let Some(instructions) = template
+            .get("model_messages")
+            .and_then(Value::as_object)
+            .and_then(|messages| messages.get("instructions_template"))
+            .and_then(Value::as_str)
+        {
+            messages.insert(
+                "instructions_template".to_owned(),
+                Value::String(replace_template_model_name(instructions, template, target)),
+            );
+        }
+    }
+}
+
+fn replace_template_model_name(text: &str, template: &Value, target: &CatalogModel) -> String {
+    let target_name = if target.display_name.trim().is_empty() {
+        target.slug.trim()
+    } else {
+        target.display_name.trim()
+    };
+    let sources = [
+        Some("GPT-5.6-Sol"),
+        Some("GPT-5.6 Sol"),
+        Some("gpt-5.6-sol"),
+        Some("GPT-5.6"),
+        Some("GPT-5"),
+        template.get("display_name").and_then(Value::as_str),
+        template.get("slug").and_then(Value::as_str),
+    ];
+    let mut result = text.to_owned();
+    let mut markers = Vec::new();
+    for (index, source) in sources.into_iter().enumerate() {
+        let Some(source) = source.filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        if !result.contains(source) {
+            continue;
+        }
+        let mut marker = format!("__AI_COVE_MODEL_NAME_{index}__");
+        while result.contains(&marker) || target_name.contains(&marker) {
+            marker.push('_');
+        }
+        result = result.replace(source, &marker);
+        markers.push(marker);
+    }
+    for marker in markers {
+        result = result.replace(&marker, target_name);
+    }
+    result
 }
 
 fn validate_codex_document(document: &Value) -> Result<(), CatalogError> {
@@ -787,6 +914,42 @@ mod tests {
     }
 
     #[test]
+    fn explicit_model_removal_does_not_leave_the_deleted_candidate_in_catalog()
+    -> Result<(), Box<dyn Error>> {
+        // Given: 当前目录包含 alpha、beta 和 Codex 模板。
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let current = ensure_catalog(root.path(), &config, &recovery)?;
+        let removed = vec!["alpha".to_owned()];
+
+        // When: 联合保存明确要求移除 alpha，并提交剩余的 beta。
+        let status = save_catalog_models_with_removals(
+            root.path(),
+            &config,
+            &recovery,
+            &[complete_model("beta")],
+            &current.revision,
+            &removed,
+        )?;
+
+        // Then: 返回状态和落盘目录都不再包含 alpha。
+        assert!(status.models.iter().all(|model| model.slug != "alpha"));
+        let written: Value = serde_json::from_slice(&fs::read(fixed_catalog_path(root.path()))?)?;
+        let models = written
+            .get("models")
+            .and_then(Value::as_array)
+            .ok_or("models missing")?;
+        assert!(
+            models
+                .iter()
+                .all(|model| model.get("slug") != Some(&Value::String("alpha".to_owned())))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn complete_model_save_upserts_without_dropping_unknown_fields() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let source = root.path().join("source.json");
@@ -972,13 +1135,43 @@ mod tests {
     fn new_model_uses_the_gpt_5_6_sol_entry_as_template() -> Result<(), Box<dyn Error>> {
         let bytes = br#"{"models":[{"slug":"gpt-5.6-sol","display_name":"Sol","description":"template","visibility":"list","priority":1,"context_window":125000,"max_context_window":250000,"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low","truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true,"template_only":"kept"}]}"#;
         let model = complete_model("gamma");
-        let (next, _) = prepare_catalog_models(bytes, &CatalogMetadata::default(), &[model])?;
+        let (next, _) = prepare_catalog_models(bytes, &CatalogMetadata::default(), &[model], &[])?;
         let document: Value = serde_json::from_slice(&next)?;
         let gamma = document["models"]
             .as_array()
             .and_then(|models| models.iter().find(|model| model["slug"] == "gamma"))
             .ok_or("gamma missing")?;
         assert_eq!(gamma["template_only"], "kept");
+        Ok(())
+    }
+
+    #[test]
+    fn new_model_does_not_inherit_template_only_identity_metadata() -> Result<(), Box<dyn Error>> {
+        let bytes = br#"{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","description":"template","visibility":"list","priority":1,"context_window":125000,"max_context_window":250000,"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low","truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true,"base_instructions":"BASE:GPT-5.6-Sol:keep","availability_nux":{"message":"template availability"},"model_messages":{"instructions_template":"INSTRUCTIONS:GPT-5:keep"}}]}"#;
+        let mut model = complete_model("deepseek-v4-flash");
+        model.display_name = "DeepSeek V4 Flash".to_owned();
+        let (next, _) = prepare_catalog_models(bytes, &CatalogMetadata::default(), &[model], &[])?;
+        let document: Value = serde_json::from_slice(&next)?;
+        let deepseek = document["models"]
+            .as_array()
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|model| model["slug"] == "deepseek-v4-flash")
+            })
+            .ok_or("deepseek model missing")?;
+        assert!(deepseek.get("availability_nux").is_none());
+        assert_eq!(deepseek["base_instructions"], "BASE:DeepSeek V4 Flash:keep");
+        assert_eq!(
+            deepseek["model_messages"]["instructions_template"],
+            "INSTRUCTIONS:DeepSeek V4 Flash:keep"
+        );
+        assert_eq!(deepseek["service_tiers"], serde_json::json!([]));
+        assert!(deepseek.get("default_service_tier").is_none());
+        assert_eq!(deepseek["supports_reasoning_summary_parameter"], false);
+        assert_eq!(deepseek["default_reasoning_summary"], "none");
+        assert!(deepseek.get("apply_patch_tool_type").is_none());
+        assert!(deepseek.get("additional_speed_tiers").is_none());
         Ok(())
     }
 
@@ -997,6 +1190,7 @@ mod tests {
             &recovery,
             std::slice::from_ref(&model),
             &current.revision,
+            &[],
         )?;
 
         let saved =

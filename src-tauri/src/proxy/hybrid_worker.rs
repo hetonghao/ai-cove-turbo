@@ -128,15 +128,18 @@ pub(super) async fn handle_worker_event(
             let Some(finished) = active.take() else {
                 return false;
             };
+            session.last_response_transport = Some(match finished.kind {
+                ActiveKind::Http => super::ResponseTransport::Http,
+                ActiveKind::WebSocket => super::ResponseTransport::WebSocket,
+            });
+            session.last_http_traffic = finished.http_traffic;
+            session.last_terminal_response_id = response_id.clone();
             if finished.kind == ActiveKind::WebSocket {
                 record_websocket_outcome(
                     session,
                     super::StatusCode::SWITCHING_PROTOCOLS.as_u16(),
                     None,
                 );
-                if response_id.is_some() {
-                    session.last_terminal_response_id = response_id;
-                }
                 session.ready = lease.map(|lease| *lease);
                 if session.ready.is_some() {
                     session.observe_idle().await;
@@ -202,6 +205,9 @@ async fn handle_cancelled_event(
     if was_websocket {
         record_websocket_outcome(session, 499, Some("request cancelled by client"));
     }
+    session.last_terminal_response_id = None;
+    session.last_response_transport = None;
+    session.last_http_traffic = None;
     session.ready = lease.map(|lease| *lease);
     if session.ready.is_some() {
         session.observe_idle().await;

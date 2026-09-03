@@ -1,10 +1,10 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -37,11 +37,14 @@ mod hybrid_pool;
 mod model_policy;
 pub(crate) use model_policy::{ModelPolicyStatus, ModelPolicyUpdate};
 pub(crate) use transport_capability::CapabilityModelStatus;
+#[cfg(test)]
+pub(crate) use transport_capability::CapabilityTransport;
 mod network_diagnostics;
 mod private_websocket;
 #[cfg(test)]
 #[path = "proxy/private_websocket_benchmark.rs"]
 pub(crate) mod private_websocket_benchmark;
+mod session_name_hint;
 mod timing;
 pub(crate) mod traffic;
 #[path = "transport_capability.rs"]
@@ -67,6 +70,7 @@ use private_websocket::{
 };
 
 const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 128 * 1024 * 1024;
+const SESSION_NAME_HINT_LIMIT: usize = 256;
 pub(crate) const MIN_COMPRESSION_INPUT_BYTES: usize = 1024;
 const PRIVATE_TLS_SESSION_CACHE_SIZE: usize = 256;
 const fn turbo_client_version() -> &'static str {
@@ -131,6 +135,7 @@ pub(crate) struct Metrics {
     maintenance_slow_cycles: AtomicU64,
     maintenance_probe_active: AtomicU64,
     maintenance_probe_max_concurrency: AtomicU64,
+    session_name_hints: Mutex<HashMap<String, String>>,
     traffic: traffic::TrafficStore,
     #[cfg(test)]
     traffic_recorded: tokio::sync::Notify,
@@ -167,6 +172,7 @@ pub(crate) struct MetricsSnapshot {
     pub(crate) hybrid_cold_start_http: u64,
     pub(crate) hybrid_recovery_http: u64,
     pub(crate) hybrid_policy_http: u64,
+    pub(crate) hybrid_capability_http: u64,
     pub(crate) hybrid_large_request_http: u64,
     pub(crate) direct_http: u64,
     pub(crate) compression_encode_count: u64,
@@ -216,6 +222,10 @@ impl HttpTraffic {
         result: traffic::TrafficResult::Success,
         route: traffic::TrafficRoute::HybridPolicyHttp,
     };
+    const HYBRID_CAPABILITY: Self = Self {
+        result: traffic::TrafficResult::Success,
+        route: traffic::TrafficRoute::HybridCapabilityHttp,
+    };
     const HYBRID_LARGE_REQUEST: Self = Self {
         result: traffic::TrafficResult::Success,
         route: traffic::TrafficRoute::HybridLargeRequestHttp,
@@ -240,6 +250,41 @@ impl Metrics {
 
     pub(crate) fn compact_traffic(&self, path: &Path) -> std::io::Result<()> {
         self.traffic.compact(path)
+    }
+
+    pub(crate) fn observe_session_name_hint(&self, metadata: &traffic::RequestMetadata) {
+        let (Some(thread_id), Some(name)) = (
+            metadata.thread_id.as_ref(),
+            metadata.temporary_name.as_ref(),
+        ) else {
+            return;
+        };
+        if thread_id.is_empty() || name.is_empty() {
+            return;
+        }
+        let Ok(mut hints) = self.session_name_hints.lock() else {
+            return;
+        };
+        if hints.contains_key(thread_id) {
+            return;
+        }
+        hints.insert(thread_id.clone(), name.clone());
+        if hints.len() > SESSION_NAME_HINT_LIMIT
+            && let Some(key) = hints.keys().find(|key| key.as_str() != thread_id).cloned()
+        {
+            hints.remove(&key);
+        }
+    }
+
+    pub(crate) fn take_session_name_hints(&self) -> HashMap<String, String> {
+        match self.session_name_hints.lock() {
+            Ok(mut hints) => std::mem::take(&mut *hints),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        }
+    }
+
+    pub(crate) fn reset_route_metrics(&self) {
+        self.traffic.reset_displayed_route_counts();
     }
 
     pub(crate) fn snapshot(&self) -> MetricsSnapshot {
@@ -274,6 +319,7 @@ impl Metrics {
             hybrid_cold_start_http: route_counts.hybrid_cold_start_http,
             hybrid_recovery_http: route_counts.hybrid_recovery_http,
             hybrid_policy_http: route_counts.hybrid_policy_http,
+            hybrid_capability_http: route_counts.hybrid_capability_http,
             hybrid_large_request_http: route_counts.hybrid_large_request_http,
             direct_http: route_counts.direct_http,
             compression_encode_count: compression.encode_count,
@@ -765,6 +811,7 @@ pub(crate) struct ProxyHandle {
     prewarm_state: Arc<std::sync::Mutex<String>>,
     model_policy: Arc<model_policy::ModelPolicyStore>,
     capability_cache: Arc<transport_capability::CapabilityCache>,
+    capability_probe: CapabilityProbe,
 }
 
 impl ProxyHandle {
@@ -808,6 +855,23 @@ impl ProxyHandle {
         &self,
     ) -> std::collections::HashMap<String, CapabilityModelStatus> {
         self.capability_cache.statuses()
+    }
+
+    pub(crate) fn capability_reason(&self) -> Option<String> {
+        self.capability_cache.reason()
+    }
+
+    pub(crate) fn refresh_capabilities(&self, models: &[String]) {
+        self.capability_probe.refresh(models);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_capability_for_test(
+        &self,
+        model: &str,
+        transport: transport_capability::CapabilityTransport,
+    ) {
+        self.capability_cache.set_for_test(model, transport);
     }
 
     pub(crate) async fn stop(mut self) {
@@ -854,10 +918,62 @@ struct ProxyState {
     max_request_body_bytes: usize,
     model_policy: Arc<model_policy::ModelPolicyStore>,
     capability_cache: Arc<transport_capability::CapabilityCache>,
-    capability_headers: HeaderMap,
+    capability_probe: CapabilityProbe,
 }
 
 type WebSocketClient = Client<HttpsConnector<HttpConnector>, Empty<Bytes>>;
+
+#[derive(Clone, Debug)]
+struct CapabilityProbe {
+    enabled: bool,
+    client: reqwest::Client,
+    upstream: Url,
+    headers: HeaderMap,
+    cache: Arc<transport_capability::CapabilityCache>,
+    snapshot_path: PathBuf,
+    scope: String,
+}
+
+impl CapabilityProbe {
+    fn refresh(&self, models: &[String]) {
+        let mut models = models.to_vec();
+        models.sort_unstable();
+        models.dedup();
+        if !self.enabled
+            || models.is_empty()
+            || !self.cache.needs_refresh(&models)
+            || !self.cache.begin_refresh()
+        {
+            return;
+        }
+        let cache = Arc::clone(&self.cache);
+        let client = self.client.clone();
+        let upstream = self.upstream.clone();
+        let headers = self.headers.clone();
+        let snapshot_path = self.snapshot_path.clone();
+        let scope = self.scope.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                transport_capability::fetch_batch(&client, &upstream, &headers, &models),
+            )
+            .await
+            .map_or(Err("request_timeout"), |result| result);
+            match result {
+                Ok(response) => {
+                    cache.apply(&response, transport_capability::ttl());
+                    let snapshot = cache.snapshot_response();
+                    let _ = transport_capability::persist_snapshot_for_scope(
+                        &snapshot_path,
+                        &snapshot,
+                        &scope,
+                    );
+                }
+                Err(reason) => cache.mark_attempt(&models, Some(reason.to_owned())),
+            }
+        });
+    }
+}
 
 #[cfg(test)]
 pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, ProxyError> {
@@ -889,11 +1005,13 @@ pub(crate) async fn start_proxy_with_policy(
     let private_tls_config = PrivateTlsConfig::new(Arc::new(private_tls_config));
     let hybrid_pool =
         hybrid_pool::HybridPool::new(private_tls_config.clone(), Arc::clone(&options.metrics));
-    let model_policy = Arc::new(model_policy::ModelPolicyStore::new(
-        model_policy_path
-            .unwrap_or_else(|| std::path::PathBuf::from("ai_cove_turbo_model_policy.json")),
-    ));
-    let capability_cache = Arc::new(transport_capability::CapabilityCache::default());
+    let model_policy_path =
+        model_policy_path.unwrap_or_else(|| PathBuf::from("ai_cove_turbo_model_policy.json"));
+    let capability_snapshot_path = model_policy_path.parent().map_or_else(
+        || PathBuf::from(transport_capability::CAPABILITY_SNAPSHOT_FILE),
+        |parent| parent.join(transport_capability::CAPABILITY_SNAPSHOT_FILE),
+    );
+    let model_policy = Arc::new(model_policy::ModelPolicyStore::new(model_policy_path));
     let startup_auth_headers = if options.ai_cove_private_websocket_zstd {
         codex_auth::effective_auth_headers(codex_config_path.as_deref()).map(|mut headers| {
             headers.insert(
@@ -909,16 +1027,39 @@ pub(crate) async fn start_proxy_with_policy(
     } else {
         None
     };
+    let capability_scope = startup_auth_headers.as_ref().map_or_else(
+        || transport_capability::scope_key(&options.upstream, &HeaderMap::new()),
+        |headers| transport_capability::scope_key(&options.upstream, headers),
+    );
+    let capability_cache = Arc::new(if options.ai_cove_private_websocket_zstd {
+        transport_capability::CapabilityCache::load_for_scope(
+            &capability_snapshot_path,
+            &capability_scope,
+        )
+    } else {
+        transport_capability::CapabilityCache::default()
+    });
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(ProxyError::Client)?;
+    let upstream = options.upstream;
+    let capability_probe = CapabilityProbe {
+        enabled: options.ai_cove_private_websocket_zstd,
+        client: client.clone(),
+        upstream: upstream.clone(),
+        headers: startup_auth_headers.clone().unwrap_or_default(),
+        cache: Arc::clone(&capability_cache),
+        snapshot_path: capability_snapshot_path.clone(),
+        scope: capability_scope,
+    };
     let state = ProxyState {
-        upstream: options.upstream,
+        upstream,
         compression_enabled: options.compression_enabled,
         websocket_enabled: options.websocket_enabled,
         ai_cove_private_websocket_zstd: options.ai_cove_private_websocket_zstd,
         metrics: options.metrics,
-        client: reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(ProxyError::Client)?,
+        client,
         websocket_client: Client::builder(TokioExecutor::new()).build(websocket_connector),
         hybrid_pool: hybrid_pool.clone(),
         max_request_body_bytes: if options.max_request_body_bytes == 0 {
@@ -928,7 +1069,7 @@ pub(crate) async fn start_proxy_with_policy(
         },
         model_policy: Arc::clone(&model_policy),
         capability_cache: Arc::clone(&capability_cache),
-        capability_headers: startup_auth_headers.clone().unwrap_or_default(),
+        capability_probe: capability_probe.clone(),
     };
     let bootstrap = if enable_bootstrap_prewarm
         && state.ai_cove_private_websocket_zstd
@@ -1003,6 +1144,7 @@ pub(crate) async fn start_proxy_with_policy(
         prewarm_state,
         model_policy,
         capability_cache,
+        capability_probe,
     })
 }
 
@@ -1133,6 +1275,7 @@ async fn proxy_http_with_control(
     };
     let raw_len = raw_body.len();
     let metadata = traffic::request_metadata(&parts.headers, &raw_body);
+    state.metrics.observe_session_name_hint(&metadata);
     let should_compress = state.compression_enabled.load(Ordering::Relaxed)
         && is_compressible_json(&parts.method, &parts.headers);
     let (outbound_body, compressed) = if should_compress {
@@ -1442,7 +1585,7 @@ mod tests {
         extract::{OriginalUri, State},
         http::{HeaderMap, StatusCode},
         response::Response,
-        routing::post,
+        routing::{get, post},
     };
     use futures_util::{SinkExt, StreamExt};
     use tokio::{
@@ -3454,6 +3597,76 @@ data: {"type":"response.completed"}
         assert_eq!(snapshot.http_fallbacks, 0);
         assert!(snapshot.compression_verified);
         assert_eq!(snapshot.websocket_handshakes, 0);
+
+        proxy.stop().await;
+        upstream_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capability_refresh_populates_status_before_first_response_request()
+    -> Result<(), Box<dyn Error>> {
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let upstream_address = upstream_listener.local_addr()?;
+        let upstream_app = Router::new().route(
+            "/v1/transport/capabilities",
+            get(|| async {
+                let mut response = Response::new(Body::from(
+                    serde_json::json!({
+                        "success": true,
+                        "version": 1,
+                        "object": "transport_capabilities",
+                        "data": [{
+                            "model": "probe-model",
+                            "allowed": true,
+                            "http": true,
+                            "responses_websocket": false,
+                            "reason_code": "no_responses_websocket_channel"
+                        }]
+                    })
+                    .to_string(),
+                ));
+                response.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/json"),
+                );
+                response
+            }),
+        );
+        let upstream_task = tokio::spawn(async move {
+            let _ = axum::serve(upstream_listener, upstream_app).await;
+        });
+        let directory = tempfile::tempdir()?;
+        let proxy = start_proxy_with_policy(
+            ProxyOptions {
+                upstream: Url::parse(&format!("http://{upstream_address}/v1"))?,
+                compression_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                websocket_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                ai_cove_private_websocket_zstd: true,
+                metrics: Arc::new(Metrics::default()),
+                preferred_ports: vec![0],
+                max_request_body_bytes: 1024 * 1024,
+            },
+            Some(directory.path().join("policy.json")),
+            None,
+            false,
+        )
+        .await?;
+
+        proxy.refresh_capabilities(&["probe-model".to_owned()]);
+        for _ in 0..20 {
+            if proxy.capability_statuses().contains_key("probe-model") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            proxy
+                .capability_statuses()
+                .get("probe-model")
+                .map(|status| status.transport.as_str()),
+            Some("http")
+        );
 
         proxy.stop().await;
         upstream_task.abort();

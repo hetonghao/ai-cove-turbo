@@ -1,6 +1,133 @@
 use super::*;
 
 #[tokio::test]
+async fn explicit_http_policy_takes_precedence_over_websocket_capability() -> io::Result<()> {
+    // Given: an explicit HTTP policy and a cached WebSocket capability.
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let directory = tempfile::tempdir()?;
+    let policy_path = directory.path().join("policy.json");
+    std::fs::write(
+        &policy_path,
+        br#"{"version":1,"default_transport":"auto","models":{"test":{"transport":"http"}}}"#,
+    )?;
+    let (proxy, metrics) = start_test_proxy_with_policy(&server, Some(policy_path)).await?;
+    proxy.set_capability_for_test("test", CapabilityTransport::WebSocket);
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    server.fixture.wait_ready(6).await?;
+
+    // When: the first response is submitted.
+    send_create(&mut client).await?;
+    server.fixture.wait_http(1).await?;
+
+    // Then: Turbo uses policy HTTP and never sends an upstream WS application frame.
+    let first = next_event_value(&mut client).await?;
+    let first_id = first
+        .pointer("/response/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("HTTP response id missing"))?;
+    send_continuation(&mut client, first_id).await?;
+    server.fixture.wait_http(2).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    let counts = server.fixture.counts().await;
+    assert!(counts.private_handshakes >= 6);
+    assert_eq!(counts.private_messages, 0);
+    assert_eq!(counts.http_requests, 2);
+    assert_eq!(metrics.snapshot().hybrid_policy_http, 2);
+    assert_eq!(metrics.snapshot().hybrid_capability_http, 0);
+
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_http_only_capability_skips_upstream_websocket_application_attempt() -> io::Result<()>
+{
+    // Given: Auto policy and a cached HttpOnly capability for the requested model.
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("test", CapabilityTransport::HttpOnly);
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    server.fixture.wait_ready(6).await?;
+
+    // When: the first independent response is submitted with Auto policy.
+    send_create(&mut client).await?;
+    server.fixture.wait_http(1).await?;
+
+    // Then: Turbo uses the existing HTTP worker without an upstream WS application frame.
+    let completed = next_event_value(&mut client).await?;
+    assert_eq!(
+        completed.get("type"),
+        Some(&Value::from("response.completed"))
+    );
+    assert_counts(server.fixture.counts().await, 6, 0, 1);
+    let routes = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
+        .map_err(io::Error::other)?;
+    assert!(routes.as_array().is_some_and(|events| {
+        events
+            .iter()
+            .any(|event| event.get("route") == Some(&Value::from("hybridCapabilityHttp")))
+    }));
+
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_response_continuation_stays_on_http_and_preserves_response_id() -> io::Result<()> {
+    // Given: Auto policy resolves the model to HttpOnly.
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("test", CapabilityTransport::HttpOnly);
+    let (mut client, _) = connect_local(&proxy).await?;
+    server.fixture.wait_ready(6).await?;
+
+    // When: the first HTTP response is followed by its previous_response_id continuation.
+    send_create(&mut client).await?;
+    let first = next_event_value(&mut client).await?;
+    let first_id = first
+        .pointer("/response/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("HTTP response id missing"))?;
+    assert_eq!(first_id, "http-response-1");
+    send_continuation(&mut client, first_id).await?;
+    server.fixture.wait_http(2).await?;
+
+    // Then: the continuation remains HTTP and receives a new terminal response ID.
+    let second = next_event_value(&mut client).await?;
+    assert_eq!(
+        second.pointer("/response/id").and_then(Value::as_str),
+        Some("http-response-2")
+    );
+    let counts = server.fixture.counts().await;
+    assert!(counts.private_handshakes >= 6);
+    assert_eq!(counts.private_messages, 0);
+    assert_eq!(counts.http_requests, 2);
+
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn active_ws_not_submitted_fallback_completes_over_http_on_same_client() -> io::Result<()> {
     // Given: one request has completed on a ready private WebSocket.
     let server = FixtureServer::start(FixtureConfig {
@@ -9,6 +136,7 @@ async fn active_ws_not_submitted_fallback_completes_over_http_on_same_client() -
     })
     .await?;
     let (proxy, metrics) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("gpt-5.3-codex", CapabilityTransport::WebSocket);
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
     server.fixture.wait_ready(6).await?;
@@ -43,6 +171,14 @@ async fn active_ws_not_submitted_fallback_completes_over_http_on_same_client() -
                     && event.get("sessionId") == Some(&Value::from("session-123"))
             }))
     );
+
+    // And: a later independent request re-evaluates the unchanged capability and returns to WS.
+    send_create_with_metadata(&mut client).await?;
+    server.fixture.wait_messages(3).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.hybrid_recovery_http, 1);
+    assert_eq!(snapshot.hybrid_ws, 2);
 
     drop(client);
     proxy.stop().await;

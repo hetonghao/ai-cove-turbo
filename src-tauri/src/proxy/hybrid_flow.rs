@@ -14,7 +14,7 @@ use super::{
     Active, ClientWebSocket, Session,
     common::{close_client, event_type, reject_thread_switch, send_error},
     http, idle, legacy,
-    sse::{HttpFallback, http_request_payload},
+    sse::{HttpFallback, continuation_payload, http_request_payload},
     websocket,
 };
 
@@ -192,6 +192,8 @@ async fn start_response(
     }
     let mut metadata = traffic::request_metadata(&session.client_headers, &payload);
     metadata.thread_id = session.thread_id.clone().or(metadata.thread_id);
+    metadata.temporary_name = prepared.temporary_name.clone();
+    session.state.metrics.observe_session_name_hint(&metadata);
     session.request_metadata = Some(metadata);
     session.response_started = true;
     let previous_response_id = prepared.previous_response_id;
@@ -199,19 +201,58 @@ async fn start_response(
         session.policy = session.state.model_policy.reload();
     }
     let fallback = prepared.fallback;
-    let large_http_request = payload.len() >= session.max_websocket_request_bytes
-        && matches!(&fallback, HttpFallback::Request(_));
-    let wait_for_drain_reconnect =
-        !large_http_request && std::mem::take(&mut session.drain_reconnect_pending);
-    if !large_http_request {
+    if previous_response_id.is_some()
+        && session.last_response_transport != Some(super::ResponseTransport::Http)
+    {
         checkout_handoff_websocket(session, previous_response_id.as_deref()).await;
     }
     if reject_missing_continuation(client, session, true, previous_response_id.as_deref()).await {
         return true;
     }
-    if previous_response_id.is_none() && policy_requires_http(session, &payload).await {
-        start_http_only_response(session, active, fallback);
+    if previous_response_id.is_none() {
+        session.refresh_capability(&payload);
+    }
+    if previous_response_id.is_some()
+        && session.last_response_transport == Some(super::ResponseTransport::Http)
+    {
+        let Ok(http_payload) = continuation_payload(&payload) else {
+            let _ = send_error(
+                client,
+                "invalid_request",
+                "response.create continuation cannot be sent over HTTP",
+            )
+            .await;
+            return true;
+        };
+        start_http_response(
+            session,
+            active,
+            http_payload,
+            session
+                .last_http_traffic
+                .unwrap_or(HttpTraffic::HYBRID_CAPABILITY),
+        );
         return true;
+    }
+    if previous_response_id.is_none() {
+        let explicit_http = policy_requires_http(session, &payload);
+        let capability_http = !explicit_http && session.auto_uses_http(&payload);
+        if explicit_http || capability_http {
+            let traffic = if explicit_http {
+                HttpTraffic::HYBRID_POLICY
+            } else {
+                HttpTraffic::HYBRID_CAPABILITY
+            };
+            start_http_only_response(session, active, fallback, traffic);
+            return true;
+        }
+    }
+    let large_http_request = payload.len() >= session.max_websocket_request_bytes
+        && matches!(&fallback, HttpFallback::Request(_));
+    let wait_for_drain_reconnect =
+        !large_http_request && std::mem::take(&mut session.drain_reconnect_pending);
+    if !large_http_request && previous_response_id.is_none() {
+        checkout_handoff_websocket(session, previous_response_id.as_deref()).await;
     }
     if !large_http_request {
         checkout_response_websocket(
@@ -275,23 +316,26 @@ fn start_http_only_response(
     session: &Session,
     active: &mut Option<Active>,
     fallback: HttpFallback,
+    traffic: HttpTraffic,
 ) {
     let HttpFallback::Request(http_payload) = fallback else {
         return;
     };
-    *active = Some(http::start_http_worker(
-        session,
-        http_payload,
-        HttpTraffic::HYBRID_POLICY,
-    ));
+    start_http_response(session, active, http_payload, traffic);
 }
 
-async fn policy_requires_http(session: &Session, payload: &[u8]) -> bool {
-    let capability_hint = session.capability_hint(payload).await;
-    session
-        .policy
-        .transport_for_payload_with_hint(payload, capability_hint)
-        == Transport::Http
+fn start_http_response(
+    session: &Session,
+    active: &mut Option<Active>,
+    payload: Vec<u8>,
+    traffic: HttpTraffic,
+) {
+    *active = Some(http::start_http_worker(session, payload, traffic));
+}
+
+fn policy_requires_http(session: &Session, payload: &[u8]) -> bool {
+    // 实际路由只由用户配置的模型策略决定。
+    session.policy.transport_for_payload(payload) == Transport::Http
 }
 
 async fn checkout_handoff_websocket(session: &mut Session, previous_response_id: Option<&str>) {

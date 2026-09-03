@@ -37,10 +37,11 @@ pub(super) async fn upstream_request(
     if upgrade {
         return upgrade_response(&fixture, &mut request, private).await;
     }
-    let Ok(_) = to_bytes(request.into_body(), 64 * 1024 * 1024).await else {
+    let Ok(_body) = to_bytes(request.into_body(), 64 * 1024 * 1024).await else {
         return Response::new(Body::empty());
     };
     fixture.record(|counts| counts.http_requests += 1).await;
+    let http_index = fixture.counts().await.http_requests;
     if fixture.config.delay_http {
         fixture.state.release_http.notified().await;
     }
@@ -52,7 +53,15 @@ pub(super) async fn upstream_request(
         *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
         return response;
     }
-    let mut response = Response::new(Body::from("data: {\"type\":\"response.completed\"}\n\n"));
+    let response_id = serde_json::json!({
+        "type": "response.completed",
+        "response": {"id": format!("http-response-{http_index}")},
+    });
+    let mut response = Response::new(Body::from(format!(
+        "data: {}\n\n",
+        serde_json::to_string(&response_id)
+            .unwrap_or_else(|_| "{\"type\":\"response.completed\"}".to_owned())
+    )));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("text/event-stream"),

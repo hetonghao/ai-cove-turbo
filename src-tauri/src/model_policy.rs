@@ -9,8 +9,6 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
-use super::transport_capability::CapabilityHint;
-
 const POLICY_VERSION: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,25 +131,6 @@ impl ModelPolicy {
         self.transport_for(model.as_deref())
     }
 
-    pub(super) fn transport_for_payload_with_hint(
-        &self,
-        payload: &[u8],
-        hint: Option<CapabilityHint>,
-    ) -> Transport {
-        let policy = self.transport_for_payload(payload);
-        if policy == Transport::Http {
-            return policy;
-        }
-        let Some(hint) = hint else {
-            return policy;
-        };
-        if hint.responses_websocket_available || !hint.http_available {
-            Transport::Auto
-        } else {
-            Transport::Http
-        }
-    }
-
     pub(super) fn model_from_payload(payload: &[u8]) -> Option<String> {
         serde_json::from_slice::<serde_json::Value>(payload)
             .ok()
@@ -267,7 +246,6 @@ fn parse_transport(value: &str) -> Option<Transport> {
 #[cfg(test)]
 mod tests {
     use super::{ModelPolicy, ModelPolicyStore, ModelPolicyUpdate, Transport};
-    use crate::proxy::transport_capability::CapabilityHint;
     use std::fs;
 
     #[test]
@@ -295,18 +273,11 @@ mod tests {
     }
 
     #[test]
-    fn expired_or_unavailable_capability_hint_falls_back_to_auto() {
+    fn auto_policy_remains_auto_without_capability_override() {
         let policy = ModelPolicy::default();
-        let hint = CapabilityHint {
-            http_available: true,
-            responses_websocket_available: false,
-        };
+
         assert_eq!(
-            policy.transport_for_payload_with_hint(br#"{"model":"gpt"}"#, Some(hint)),
-            Transport::Http
-        );
-        assert_eq!(
-            policy.transport_for_payload_with_hint(br#"{"model":"gpt"}"#, None),
+            policy.transport_for_payload(br#"{"model":"gpt"}"#),
             Transport::Auto
         );
     }

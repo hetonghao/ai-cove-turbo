@@ -8,6 +8,7 @@
     hybridColdStartHttp: "首轮 HTTP",
     hybridRecoveryHttp: "回退 HTTP",
     hybridPolicyHttp: "策略 HTTP",
+    hybridCapabilityHttp: "能力 HTTP",
     hybridLargeRequestHttp: "大请求 HTTP",
     directHttp: "压缩 HTTP",
   };
@@ -89,6 +90,7 @@
     websocketState: "waiting",
     prewarmState: "disabled",
     modelPolicy: { defaultTransport: "auto", models: {}, reason: null },
+    transportCapabilityReason: null,
     websocketHandshakes: 0,
     websocketMessages: 0,
     websocketRawBytes: 0,
@@ -98,6 +100,7 @@
     hybridColdStartHttp: 0,
     hybridRecoveryHttp: 0,
     hybridPolicyHttp: 0,
+    hybridCapabilityHttp: 0,
     directHttp: 0,
     autostartEnabled: true,
     dockVisible: true,
@@ -181,6 +184,7 @@
     hybridWs: 9,
     hybridColdStartHttp: 1,
     hybridRecoveryHttp: 2,
+    hybridCapabilityHttp: 1,
     directHttp: 3,
     requests: 24,
     rawBytes: 1_840_000,
@@ -725,6 +729,7 @@
       "hybrid-cold-start-http": numberFormatter.format(Number(state.hybridColdStartHttp) || 0),
       "hybrid-recovery-http": numberFormatter.format(Number(state.hybridRecoveryHttp) || 0),
       "hybrid-policy-http": numberFormatter.format(Number(state.hybridPolicyHttp) || 0),
+      "hybrid-capability-http": numberFormatter.format(Number(state.hybridCapabilityHttp) || 0),
       "direct-http": numberFormatter.format(Number(state.directHttp) || 0),
       autostart: state.autostartEnabled ? "开" : "关",
       dock: state.dockVisible ? "开" : "关",
@@ -1074,12 +1079,19 @@
 
   function capabilityBadge(slug) {
     const capability = state.transportCapabilities?.[slug];
-    if (!capability) return '<span class="state-indicator" data-status="verified">压缩 HTTP</span>';
-    const unavailable = capability.reasonCode === "model_not_allowed";
+    const autoPolicy = (policyModels()[slug] || "auto") === "auto";
+    const wsTooltip = "来自于 AI Cove 的模型能力：支持 Hybrid WebSocket 加速，建议配置传输方式：自动。";
+    const httpTooltip = "来自于 AI Cove 的模型能力：支持 压缩 HTTP，建议配置传输方式：HTTP。";
+    if (!capability) return `<span class="state-indicator" data-status="verified" title="${httpTooltip}" data-tooltip="${httpTooltip}">${autoPolicy ? "自动 → 压缩 HTTP" : "压缩 HTTP"}</span>`;
+    const unavailable = capability.allowed === false || capability.reasonCode === "model_not_allowed";
+    const isWs = capability.transport === "websocket";
     const label = unavailable
       ? "不可用"
-      : capability.transport === "websocket" ? "WS 可用" : "压缩 HTTP";
-    return `<span class="state-indicator" data-status="${unavailable ? "blocked" : "verified"}" title="${escapeHtml(capability.reasonCode || "")}">${label}</span>`;
+      : isWs ? "WS 可用" : autoPolicy ? "自动 → 压缩 HTTP" : "压缩 HTTP";
+    const tooltip = unavailable
+      ? (capability.reasonCode || "")
+      : isWs ? wsTooltip : httpTooltip;
+    return `<span class="state-indicator" data-status="${unavailable ? "blocked" : "verified"}" title="${escapeHtml(tooltip)}" data-tooltip="${escapeHtml(tooltip)}">${label}</span>`;
   }
 
   function modelContextLabel(model) {
@@ -1182,7 +1194,9 @@
       message.textContent = catalog.state === "conflict"
         ? "Codex 配置中的目录指针已被外部修改，模型候选仍保持当前接管状态。"
         : catalog.state === "error" ? "模型候选目录未能保存，请重试并查看技术详情。"
-          : modelCatalogActionMessage || (state.modelPolicy?.reason ? `传输策略读取失败，已保留上次有效策略：${state.modelPolicy.reason}。` : "");
+          : modelCatalogActionMessage
+            || (state.modelPolicy?.reason ? `传输策略读取失败，已保留上次有效策略：${state.modelPolicy.reason}。` : "")
+            || (state.transportCapabilityReason ? `模型能力刷新失败，已保留上次有效能力：${state.transportCapabilityReason}。` : "");
     }
     if (restart) {
       restart.hidden = !catalog.restartRequired;
@@ -1663,7 +1677,7 @@
     renderControls();
     try {
       if (invoke) {
-        const saved = await invoke("save_model_settings", { models: nextModels, expectedRevision: state.catalog.revision, policy: nextPolicy });
+        const saved = await invoke("save_model_settings", { models: nextModels, expectedRevision: state.catalog.revision, policy: nextPolicy, removeSlugs: [slug] });
         if (saved?.catalog) state.catalog = saved.catalog;
         state.modelPolicy = saved?.modelPolicy || state.modelPolicy;
         if (saved?.error) throw new Error(saved.error);
@@ -3041,6 +3055,7 @@
       state.hybridWs = 0;
       state.hybridColdStartHttp = 0;
       state.hybridRecoveryHttp = 0;
+      state.hybridCapabilityHttp = 0;
       state.directHttp = 0;
       state.configMessage = "Preview：路径统计已重置";
     }

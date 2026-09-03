@@ -74,6 +74,7 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
       { id: 4, timestampMs: 73_000, status: 200, path: "/v1/cold-start", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "success", route: "hybridColdStartHttp" },
       { id: 5, timestampMs: 74_000, status: 200, path: "/v1/recovery", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "fallback", route: "hybridRecoveryHttp" },
       { id: 8, timestampMs: 74_500, status: 200, path: "/v1/policy", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "success", route: "hybridPolicyHttp" },
+      { id: 10, timestampMs: 74_650, status: 200, path: "/v1/capability", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "success", route: "hybridCapabilityHttp" },
       { id: 9, timestampMs: 74_750, status: 200, path: "/v1/large", rawBytes: 100, sentBytes: 50, transport: "HTTP", result: "success", route: "hybridLargeRequestHttp" },
       { id: 6, timestampMs: 75_000, status: 1002, path: "/v1/ws-idle", rawBytes: 0, sentBytes: 0, transport: "WS", result: "error", route: "hybridWs", failurePhase: "hybridIdle", failureReason: "unexpected idle upstream binary message" },
       { id: 7, timestampMs: 76_000, status: 1012, path: "/v1/ws-restart", rawBytes: 0, sentBytes: 0, transport: "WS", result: "error", route: "hybridWs", failurePhase: "hybridIdle", failureReason: "service restarting" },
@@ -144,12 +145,13 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   const failedRow = requestRows.find((row) => row.includes("/v1/ws-error")) ?? "";
   const recoveredRow = requestRows.find((row) => row.includes("/v1/ws-idle")) ?? "";
   const restartRow = requestRows.find((row) => row.includes("/v1/ws-restart")) ?? "";
-  assert.equal(requestRows.length, 9);
+  assert.equal(requestRows.length, 10);
   assert.match(requestRows.find((row) => row.includes("/v1/direct")) ?? "", />压缩 HTTP<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/hybrid-ws")) ?? "", />Hybrid WS<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/cold-start")) ?? "", />首轮 HTTP<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/recovery")) ?? "", />回退 HTTP<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/policy")) ?? "", />策略 HTTP<\/span>/);
+  assert.match(requestRows.find((row) => row.includes("/v1/capability")) ?? "", />能力 HTTP<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/large")) ?? "", />大请求 HTTP<\/span>/);
   assert.match(failedRow, /c-request-status c-request-status--error">101<\/span>/);
   assert.match(failedRow, /c-transport c-transport--error">.*Hybrid WS.*请求失败/);
@@ -165,7 +167,7 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
     assert.equal((row.match(/<td>/g) ?? []).length, 6);
     assert.doesNotMatch(row, /c-request-color|颜色/);
   });
-  assert.equal(liveCount.textContent, "9");
+  assert.equal(liveCount.textContent, "10");
   assert.equal(statElements[0].textContent, "5");
   assert.equal(statElements[1].textContent, "300 B");
   assert.equal(statElements[2].textContent, "150 B");

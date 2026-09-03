@@ -17,6 +17,7 @@ const SESSION_NAME_MAX_ATTEMPTS: u8 = 4;
 #[derive(Debug)]
 pub(super) struct SessionNameEntry {
     pub(super) info: Option<CodexThreadInfo>,
+    pub(super) temporary_name: Option<String>,
     pub(super) has_success: bool,
     pub(super) attempts: u8,
     pub(super) exhausted: bool,
@@ -31,6 +32,7 @@ impl SessionNameEntry {
     pub(super) const fn new(now: Instant) -> Self {
         Self {
             info: None,
+            temporary_name: None,
             has_success: false,
             attempts: 0,
             exhausted: false,
@@ -158,7 +160,7 @@ impl SessionNameState {
     }
 }
 
-fn has_name(info: &CodexThreadInfo) -> bool {
+pub(super) fn has_name(info: &CodexThreadInfo) -> bool {
     info.name
         .as_deref()
         .is_some_and(|name| !name.trim().is_empty())

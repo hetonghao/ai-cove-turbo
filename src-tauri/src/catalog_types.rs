@@ -89,6 +89,17 @@ impl Default for CatalogModel {
 }
 
 impl CatalogModel {
+    pub(crate) fn is_gpt_like_slug(slug: &str) -> bool {
+        let lower = slug.to_ascii_lowercase();
+        lower.starts_with("gpt-")
+            || lower.starts_with("o1")
+            || lower.starts_with("o3")
+            || lower.starts_with("o4")
+            || lower.starts_with("ox-")
+            || lower.starts_with("codex-")
+            || lower == "chatgpt-4o-latest"
+    }
+
     pub(crate) fn with_safe_defaults(mut self) -> Self {
         if self.description.trim().is_empty() {
             self.description = format!("Codex model {}", self.slug);
@@ -96,7 +107,7 @@ impl CatalogModel {
                 .insert("description".to_owned(), "模板".to_owned());
         }
         if self.input_modalities.is_empty() {
-            self.input_modalities.push("text".to_owned());
+            self.input_modalities = vec!["text".to_owned(), "image".to_owned()];
             self.field_sources
                 .insert("inputModalities".to_owned(), "模板".to_owned());
         }
@@ -136,7 +147,20 @@ impl CatalogModel {
             self.field_sources
                 .insert("minimalClientVersion".to_owned(), "模板".to_owned());
         }
-        if !self.supports_reasoning_summary_parameter {
+        if !Self::is_gpt_like_slug(&self.slug) {
+            self.supports_reasoning_summary_parameter = false;
+            self.default_reasoning_summary = Some("none".to_owned());
+            self.service_tiers = Vec::new();
+            self.default_service_tier = None;
+            self.field_sources
+                .insert("supportsReasoningSummaryParameter".to_owned(), "模板".to_owned());
+            self.field_sources
+                .insert("defaultReasoningSummary".to_owned(), "模板".to_owned());
+            self.field_sources
+                .insert("serviceTiers".to_owned(), "模板".to_owned());
+            self.field_sources
+                .insert("defaultServiceTier".to_owned(), "模板".to_owned());
+        } else if !self.supports_reasoning_summary_parameter {
             if self.default_reasoning_summary.as_deref() != Some("none") {
                 self.default_reasoning_summary = Some("none".to_owned());
                 self.field_sources
@@ -254,7 +278,7 @@ impl CatalogModel {
             truncation_policy: Some(default_truncation_policy()),
             shell_type: default_shell_type(),
             support_verbosity: true,
-            input_modalities: vec!["text".to_owned()],
+            input_modalities: vec!["text".to_owned(), "image".to_owned()],
             supported_reasoning_levels: Vec::new(),
             default_reasoning_level: None,
             supports_reasoning_summary_parameter: false,

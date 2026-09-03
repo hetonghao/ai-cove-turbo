@@ -231,7 +231,8 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     if (command === "save_model_settings") {
       if (failSave) throw new Error("save failed");
       if (args.models.some((model) => !model.contextWindow || !model.maxContextWindow || !model.supportedReasoningLevels?.length || Number(model.autoCompactTokenLimit) > Number(model.contextWindow) * 0.9)) throw new Error("invalid context settings rejected");
-      const models = status.catalog.models.map((model) => args.models.find((candidate) => candidate.slug === model.slug) || model);
+      const removed = new Set(args.removeSlugs || []);
+      const models = status.catalog.models.filter((model) => !removed.has(model.slug)).map((model) => args.models.find((candidate) => candidate.slug === model.slug) || model);
       return { catalog: { ...status.catalog, models, restartRequired: true, loaded: false, revision: "revision-2" }, modelPolicy: args.policy };
     }
     if (command === "update_model_policy") {
@@ -275,6 +276,17 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     catalogMarkup() { return catalogMarkup; },
     async click(action) {
       listeners.get("click")?.({ target: [...actions, ...menuActions].find((target) => target.dataset.action === action) });
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+    async deleteModel(slug) {
+      const rowTarget = row(slug);
+      const trigger = element({ action: "delete-model", modelDelete: "" });
+      trigger.closest = (selector) => selector === "[data-action]" || selector === "[data-model-delete]" || selector === "[data-model-delete], [data-model-delete-popover]" ? trigger : selector === "[data-model-slug]" ? rowTarget : null;
+      listeners.get("click")?.({ target: trigger });
+      await new Promise((resolve) => setImmediate(resolve));
+      const confirm = element({ action: "confirm-model-delete" });
+      confirm.closest = (selector) => selector === "[data-action]" ? confirm : null;
+      listeners.get("click")?.({ target: confirm });
       await new Promise((resolve) => setImmediate(resolve));
     },
     editModel(slug = "alpha") {
@@ -470,6 +482,26 @@ test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界",
   assert.equal(failed.disabled("save-model-settings"), false);
 });
 
+test("确认删除模型候选后列表移除目标并向后端传递删除意图", async () => {
+  // Given: 目录中有两个完整模型候选，删除其中一个不会触发能力校验错误。
+  const harness = await catalogHarness({
+    models: [
+      { slug: "alpha", displayName: "Alpha", description: "a", visibility: "list", priority: 1, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
+      { slug: "beta", displayName: "Beta", description: "b", visibility: "list", priority: 2, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
+    ],
+  });
+
+  // When: 用户打开删除确认并点击确认。
+  await harness.deleteModel("alpha");
+
+  // Then: 保存请求明确移除 alpha，且当前列表只剩 beta。
+  const save = harness.calls.find((call) => call.command === "save_model_settings");
+  assert.ok(save, JSON.stringify(harness.calls));
+  assert.equal(JSON.stringify(save.args.removeSlugs), JSON.stringify(["alpha"]));
+  assert.doesNotMatch(harness.catalogMarkup(), /data-model-slug="alpha"/);
+  assert.match(harness.catalogMarkup(), /data-model-slug="beta"/);
+});
+
 test("模型弹窗保存独立于列表草稿并保留原上下文", async () => {
   const harness = await catalogHarness();
   harness.toggleVisibility("alpha");
@@ -569,7 +601,7 @@ test("模型传输策略编辑保存并显示能力摘要", async () => {
   const harness = await catalogHarness();
   assert.match(harness.list.innerHTML, /WS 可用/);
   assert.match(harness.list.innerHTML, /压缩 HTTP/);
-  assert.match(harness.list.innerHTML, /title="no_responses_websocket_channel"/);
+  assert.match(harness.list.innerHTML, /来自于 AI Cove 的模型能力：支持 压缩 HTTP，建议配置传输方式：HTTP。/);
   assert.match(harness.list.innerHTML, /b-transport-toggle/);
   assert.match(harness.list.innerHTML, /data-model-transport="auto" aria-pressed="true"/);
   assert.match(harness.list.innerHTML, /data-model-transport="http" aria-pressed="false"/);
@@ -590,7 +622,7 @@ test("模型传输策略编辑保存并显示能力摘要", async () => {
 
 test("允许模型但尚未确认传输通道时统一升格为 HTTP", async () => {
   const harness = await catalogHarness({
-    capabilityOverrides: { alpha: { transport: "unknown", reasonCode: "no_http_channel" } },
+    capabilityOverrides: { alpha: { transport: "http", reasonCode: "no_http_channel" } },
   });
   assert.match(harness.list.innerHTML, /压缩 HTTP/);
   assert.doesNotMatch(harness.list.innerHTML, /能力未知/);

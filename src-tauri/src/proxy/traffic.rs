@@ -40,6 +40,7 @@ pub(crate) enum TrafficRoute {
     HybridColdStartHttp,
     HybridRecoveryHttp,
     HybridPolicyHttp,
+    HybridCapabilityHttp,
     HybridLargeRequestHttp,
     DirectHttp,
 }
@@ -51,6 +52,7 @@ pub(crate) struct TrafficRouteCounts {
     pub(crate) hybrid_cold_start_http: u64,
     pub(crate) hybrid_recovery_http: u64,
     pub(crate) hybrid_policy_http: u64,
+    pub(crate) hybrid_capability_http: u64,
     pub(crate) hybrid_large_request_http: u64,
     pub(crate) direct_http: u64,
 }
@@ -62,10 +64,18 @@ impl TrafficRouteCounts {
             TrafficRoute::HybridColdStartHttp => &mut self.hybrid_cold_start_http,
             TrafficRoute::HybridRecoveryHttp => &mut self.hybrid_recovery_http,
             TrafficRoute::HybridPolicyHttp => &mut self.hybrid_policy_http,
+            TrafficRoute::HybridCapabilityHttp => &mut self.hybrid_capability_http,
             TrafficRoute::HybridLargeRequestHttp => &mut self.hybrid_large_request_http,
             TrafficRoute::DirectHttp => &mut self.direct_http,
         };
         *counter = counter.saturating_add(1);
+    }
+
+    const fn reset_displayed(&mut self) {
+        self.hybrid_ws = 0;
+        self.hybrid_cold_start_http = 0;
+        self.hybrid_recovery_http = 0;
+        self.direct_http = 0;
     }
 }
 
@@ -109,6 +119,8 @@ pub(crate) struct RequestEvent {
     session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     connection_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) temporary_name: Option<String>,
 }
 
 impl RequestEvent {
@@ -130,6 +142,7 @@ pub(crate) struct RequestMetadata {
     pub(crate) thread_id: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) connection_id: Option<String>,
+    pub(crate) temporary_name: Option<String>,
 }
 
 pub(crate) fn request_metadata(headers: &axum::http::HeaderMap, payload: &[u8]) -> RequestMetadata {
@@ -179,6 +192,13 @@ pub(crate) fn request_metadata(headers: &axum::http::HeaderMap, payload: &[u8]) 
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned),
         connection_id: None,
+        temporary_name: (payload.len() <= 1_048_576)
+            .then(|| {
+                value
+                    .as_ref()
+                    .and_then(super::session_name_hint::from_value)
+            })
+            .flatten(),
     }
 }
 
@@ -443,7 +463,12 @@ impl TrafficStore {
             model: metadata.as_ref().and_then(|item| item.model.clone()),
             thread_id: metadata.as_ref().and_then(|item| item.thread_id.clone()),
             session_id: metadata.as_ref().and_then(|item| item.session_id.clone()),
-            connection_id: metadata.and_then(|item| item.connection_id),
+            connection_id: metadata
+                .as_ref()
+                .and_then(|item| item.connection_id.clone()),
+            temporary_name: metadata
+                .as_ref()
+                .and_then(|item| item.temporary_name.clone()),
         };
         let mut state = lock(&self.state);
         state.next_id = state.next_id.saturating_add(1);
@@ -513,6 +538,12 @@ impl TrafficStore {
 
     pub(crate) fn route_counts(&self) -> TrafficRouteCounts {
         lock(&self.state).route_counts
+    }
+
+    pub(crate) fn reset_displayed_route_counts(&self) {
+        let mut state = lock(&self.state);
+        state.route_counts.reset_displayed();
+        state.mark_dirty(0);
     }
 
     pub(crate) fn snapshot(&self) -> TrafficSnapshot {

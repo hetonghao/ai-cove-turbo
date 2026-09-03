@@ -22,7 +22,7 @@ mod state;
 
 #[cfg(test)]
 use state::{SESSION_NAME_BATCH_MIN_INTERVAL, SESSION_NAME_MAX_BATCH};
-use state::{SessionNameEntry, SessionNameState};
+use state::{SessionNameEntry, SessionNameState, has_name};
 
 pub(crate) const SESSION_NAME_REFRESH_INTERVAL: Duration = Duration::from_secs(20 * 60);
 const SESSION_NAME_TICK: Duration = Duration::from_secs(60);
@@ -88,6 +88,15 @@ impl SessionNameCache {
                 changed = true;
                 SessionNameEntry::new(now)
             });
+            if entry.temporary_name.is_none()
+                && let Some(name) = requests
+                    .iter()
+                    .filter(|request| request.thread_id() == Some(thread_id.as_str()))
+                    .find_map(|request| request.temporary_name.as_deref())
+            {
+                entry.temporary_name = Some(name.to_owned());
+                changed = true;
+            }
             if !entry.request_visible {
                 entry.request_visible = true;
                 changed = true;
@@ -96,6 +105,34 @@ impl SessionNameCache {
         for (thread_id, entry) in &mut state.entries {
             if entry.request_visible && !request_ids.contains(thread_id) {
                 entry.request_visible = false;
+                changed = true;
+            }
+        }
+        changed |= state.prune();
+        drop(state);
+        if changed {
+            self.wake.notify_one();
+        }
+    }
+
+    pub(crate) async fn observe_hints(&self, hints: &HashMap<String, String>) {
+        let mut changed = false;
+        let now = Instant::now();
+        let mut state = self.state.lock().await;
+        for (thread_id, name) in hints {
+            if !is_codex_thread_id(thread_id) || name.trim().is_empty() {
+                continue;
+            }
+            let entry = state.entries.entry(thread_id.clone()).or_insert_with(|| {
+                changed = true;
+                SessionNameEntry::new(now)
+            });
+            if entry.temporary_name.is_none() {
+                entry.temporary_name = Some(name.clone());
+                changed = true;
+            }
+            if !entry.request_visible {
+                entry.request_visible = true;
                 changed = true;
             }
         }
@@ -160,7 +197,22 @@ impl SessionNameCache {
             .entries
             .iter()
             .filter(|(_, entry)| entry.connection_visible || entry.request_visible)
-            .map(|(thread_id, entry)| (thread_id.clone(), entry.info.clone()))
+            .map(|(thread_id, entry)| {
+                let info = entry.info.clone().or_else(|| {
+                    entry.temporary_name.as_ref().map(|name| CodexThreadInfo {
+                        name: Some(name.clone()),
+                        parent_name: None,
+                        is_subagent: false,
+                    })
+                });
+                let info = info.map(|mut info| {
+                    if !has_name(&info) {
+                        info.name.clone_from(&entry.temporary_name);
+                    }
+                    info
+                });
+                (thread_id.clone(), info)
+            })
             .collect()
     }
 

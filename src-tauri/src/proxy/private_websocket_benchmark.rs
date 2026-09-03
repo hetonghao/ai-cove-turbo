@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::Body,
     extract::{Request as AxumRequest, State},
-    http::{Response, StatusCode},
+    http::{HeaderMap, Response, StatusCode},
     routing::get,
 };
 use futures_util::StreamExt;
@@ -40,6 +40,16 @@ pub(crate) async fn start(upstream: Url, metrics: Arc<Metrics>) -> Result<ProxyH
     let endpoint = format!("http://{address}/v1");
     let tls_config = private_tls_config()?;
     let hybrid_pool = super::hybrid_pool::HybridPool::new(tls_config.clone(), Arc::clone(&metrics));
+    let capability_cache = Arc::new(super::transport_capability::CapabilityCache::default());
+    let capability_probe = super::CapabilityProbe {
+        enabled: false,
+        client: reqwest::Client::new(),
+        upstream: upstream.clone(),
+        headers: HeaderMap::new(),
+        cache: Arc::clone(&capability_cache),
+        snapshot_path: std::path::PathBuf::from("transport-capabilities.json"),
+        scope: String::new(),
+    };
     let app = Router::new()
         .route("/healthz", get(super::health))
         .fallback(handle_upgrade)
@@ -69,9 +79,8 @@ pub(crate) async fn start(upstream: Url, metrics: Arc<Metrics>) -> Result<ProxyH
         model_policy: std::sync::Arc::new(super::model_policy::ModelPolicyStore::new(
             std::path::PathBuf::from("ai_cove_turbo_model_policy.json"),
         )),
-        capability_cache: std::sync::Arc::new(
-            super::transport_capability::CapabilityCache::default(),
-        ),
+        capability_cache,
+        capability_probe,
     })
 }
 

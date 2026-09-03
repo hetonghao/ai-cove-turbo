@@ -4,7 +4,7 @@ use super::{
 use crate::proxy::ConnectionSnapshot;
 use crate::session_names::state::handle_failure;
 
-use std::{path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use tokio::time::{self, Instant};
 
@@ -103,6 +103,73 @@ async fn connection_cleanup_stops_refresh_but_keeps_recent_request_name() {
     );
     let state = cache.state.lock().await;
     assert!(!state.entries[&thread_id].eligible());
+}
+
+#[tokio::test]
+async fn snapshot_uses_temporary_name_until_codex_name_arrives() {
+    let cache = SessionNameCache::new(PathBuf::from("/missing/state_5.sqlite"));
+    let thread_id = "019fc8b1-a38c-7e70-9169-d6d76a7fcedc".to_owned();
+    let mut request: crate::proxy::traffic::RequestEvent =
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "timestampMs": 1,
+            "status": 200,
+            "path": "/v1/responses",
+            "rawBytes": 1,
+            "sentBytes": 1,
+            "transport": "HTTP",
+            "result": "success",
+            "threadId": thread_id,
+        }))
+        .expect("request event");
+    request.temporary_name = Some("首条用户请求".to_owned());
+    cache.observe_requests(&[request]).await;
+
+    let snapshot = cache.snapshot().await;
+    assert_eq!(
+        snapshot[&thread_id]
+            .as_ref()
+            .and_then(|info| info.name.as_deref()),
+        Some("首条用户请求")
+    );
+
+    let mut state = cache.state.lock().await;
+    state.entries.get_mut(&thread_id).expect("entry").info =
+        Some(crate::codex_thread_title::CodexThreadInfo {
+            name: Some("正式会话名".to_owned()),
+            parent_name: None,
+            is_subagent: false,
+        });
+    drop(state);
+
+    let snapshot = cache.snapshot().await;
+    assert_eq!(
+        snapshot[&thread_id]
+            .as_ref()
+            .and_then(|info| info.name.as_deref()),
+        Some("正式会话名")
+    );
+}
+
+#[tokio::test]
+async fn hint_is_visible_before_request_finishes() {
+    let cache = SessionNameCache::new(PathBuf::from("/missing/state_5.sqlite"));
+    let thread_id = "019fc8b1-a38c-7e70-9169-d6d76a7fcedc".to_owned();
+
+    cache
+        .observe_hints(&HashMap::from([(
+            thread_id.clone(),
+            "正在处理的首条请求".to_owned(),
+        )]))
+        .await;
+
+    let snapshot = cache.snapshot().await;
+    assert_eq!(
+        snapshot[&thread_id]
+            .as_ref()
+            .and_then(|info| info.name.as_deref()),
+        Some("正在处理的首条请求")
+    );
 }
 
 #[tokio::test(start_paused = true)]

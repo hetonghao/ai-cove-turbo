@@ -12,10 +12,14 @@ pub(super) struct PreparedResponseCreate {
     pub(super) has_request_source: bool,
     pub(super) thread_id: Option<String>,
     pub(super) previous_response_id: Option<String>,
+    pub(super) temporary_name: Option<String>,
 }
 
 pub(super) fn http_request_payload(payload: &[u8]) -> Result<PreparedResponseCreate, String> {
     let mut value: Value = serde_json::from_slice(payload).map_err(|error| error.to_string())?;
+    let temporary_name = (payload.len() <= 1_048_576)
+        .then(|| super::super::session_name_hint::from_value(&value))
+        .flatten();
     let object = value
         .as_object_mut()
         .ok_or_else(|| "response.create must be a JSON object".to_owned())?;
@@ -60,6 +64,7 @@ pub(super) fn http_request_payload(payload: &[u8]) -> Result<PreparedResponseCre
             has_request_source,
             thread_id,
             previous_response_id,
+            temporary_name,
         });
     }
     object.remove("type");
@@ -70,8 +75,19 @@ pub(super) fn http_request_payload(payload: &[u8]) -> Result<PreparedResponseCre
             has_request_source,
             thread_id,
             previous_response_id: None,
+            temporary_name,
         })
         .map_err(|error| error.to_string())
+}
+
+pub(super) fn continuation_payload(payload: &[u8]) -> Result<Vec<u8>, String> {
+    let mut value: Value = serde_json::from_slice(payload).map_err(|error| error.to_string())?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "response.create must be a JSON object".to_owned())?;
+    object.remove("type");
+    object.insert("stream".to_owned(), Value::Bool(true));
+    serde_json::to_vec(&value).map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Default)]

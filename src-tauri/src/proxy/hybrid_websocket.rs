@@ -49,6 +49,7 @@ pub(super) fn start_websocket_worker(
     ));
     Active {
         kind: ActiveKind::WebSocket,
+        http_traffic: None,
         http_fallback: match fallback {
             HttpFallback::Request(payload) => Some(payload),
             HttpFallback::WebSocketRequired => None,

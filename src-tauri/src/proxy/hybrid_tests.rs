@@ -4,7 +4,7 @@ use tokio_tungstenite::tungstenite::{Message, protocol::frame::coding::CloseCode
 use super::{
     flow, http,
     sse::{
-        HttpFallback, SseParser, http_request_payload, idle_event_diagnostic,
+        HttpFallback, SseParser, continuation_payload, http_request_payload, idle_event_diagnostic,
         is_internal_idle_request_error, is_terminal_event,
     },
 };
@@ -97,6 +97,27 @@ fn converts_response_create_into_streaming_http_payload() -> std::io::Result<()>
     assert_eq!(
         value.get("model").and_then(serde_json::Value::as_str),
         Some("test")
+    );
+    assert_eq!(prepared.temporary_name.as_deref(), Some("test"));
+    Ok(())
+}
+
+#[test]
+fn continuation_http_payload_preserves_previous_response_id() -> std::io::Result<()> {
+    let payload = continuation_payload(
+        br#"{"type":"response.create","model":"test","previous_response_id":"response-1","input":"next"}"#,
+    )
+    .map_err(std::io::Error::other)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&payload).map_err(std::io::Error::other)?;
+
+    assert_eq!(value.get("stream"), Some(&serde_json::Value::Bool(true)));
+    assert!(value.get("type").is_none());
+    assert_eq!(
+        value
+            .get("previous_response_id")
+            .and_then(serde_json::Value::as_str),
+        Some("response-1")
     );
     Ok(())
 }

@@ -12,7 +12,7 @@ use super::super::timing::HttpTimingControl;
 use super::{
     Active, WorkerCommand, WorkerEvent,
     common::{context_length_exceeded_message, text_message},
-    sse::{SseParser, is_terminal_event},
+    sse::{SseParser, is_terminal_event, success_terminal_response_id},
 };
 use crate::proxy::{HttpRequestMetric, HttpTraffic, ProxyState, traffic};
 
@@ -24,13 +24,19 @@ pub(super) fn start_http_worker(
     let raw_bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
     let (command_tx, command_rx) = mpsc::channel(8);
     let (event_tx, event_rx) = mpsc::channel(8);
+    let mut metadata = session
+        .request_metadata
+        .clone()
+        .unwrap_or_else(|| traffic::request_metadata(&session.client_headers, &payload));
+    metadata.thread_id = session.thread_id.clone().or(metadata.thread_id);
+    session.state.metrics.observe_session_name_hint(&metadata);
     let context = WorkerContext {
         state: session.state.clone(),
         control: Arc::new(HttpTimingControl::default()),
         path: session.path.clone(),
         started_at: Instant::now(),
         raw_bytes,
-        metadata: traffic::request_metadata(&session.client_headers, &payload),
+        metadata,
         request: build_http_request(
             session.client_headers.clone(),
             session.request_uri.clone(),
@@ -41,6 +47,7 @@ pub(super) fn start_http_worker(
     let task = tokio::spawn(run_http_worker(context, command_rx, event_tx));
     Active {
         kind: super::ActiveKind::Http,
+        http_traffic: Some(traffic),
         http_fallback: None,
         output_forwarded: false,
         cancel_requested: false,
@@ -250,6 +257,9 @@ pub(super) async fn send_sse_events(
 ) -> Result<bool, ()> {
     for payload in parser.take_events() {
         let terminal = is_terminal_event(&payload);
+        let response_id = terminal
+            .then(|| success_terminal_response_id(&payload))
+            .flatten();
         if payload != b"[DONE]" {
             let message = text_message(payload)?;
             events
@@ -261,7 +271,7 @@ pub(super) async fn send_sse_events(
             events
                 .send(WorkerEvent::Terminal {
                     lease: None,
-                    response_id: None,
+                    response_id,
                 })
                 .await
                 .map_err(|_| ())?;

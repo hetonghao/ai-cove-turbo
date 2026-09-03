@@ -171,6 +171,7 @@ fn persisted_route_counts_round_trip() -> Result<(), Box<dyn Error>> {
         TrafficRoute::HybridColdStartHttp,
         TrafficRoute::HybridRecoveryHttp,
         TrafficRoute::HybridPolicyHttp,
+        TrafficRoute::HybridCapabilityHttp,
         TrafficRoute::HybridLargeRequestHttp,
         TrafficRoute::DirectHttp,
     ] {
@@ -189,10 +190,45 @@ fn persisted_route_counts_round_trip() -> Result<(), Box<dyn Error>> {
             hybrid_cold_start_http: 1,
             hybrid_recovery_http: 1,
             hybrid_policy_http: 1,
+            hybrid_capability_http: 1,
             hybrid_large_request_http: 1,
             direct_http: 1,
         }
     );
+    Ok(())
+}
+
+#[test]
+fn reset_displayed_route_counts_preserves_hidden_large_request_count() -> Result<(), Box<dyn Error>>
+{
+    let root = tempdir()?;
+    let path = root.path().join("traffic.jsonl");
+    let store = TrafficStore::default();
+    for route in [
+        TrafficRoute::HybridWs,
+        TrafficRoute::HybridColdStartHttp,
+        TrafficRoute::HybridRecoveryHttp,
+        TrafficRoute::HybridPolicyHttp,
+        TrafficRoute::HybridCapabilityHttp,
+        TrafficRoute::HybridLargeRequestHttp,
+        TrafficRoute::DirectHttp,
+    ] {
+        let mut outcome = record(21_000, 0);
+        outcome.route = Some(route);
+        store.record(outcome);
+    }
+    store.save(&path)?;
+
+    store.reset_displayed_route_counts();
+    store.save(&path)?;
+    let counts = TrafficStore::load_at(&path, 21_000).route_counts();
+
+    assert_eq!(counts.hybrid_ws, 0);
+    assert_eq!(counts.hybrid_cold_start_http, 0);
+    assert_eq!(counts.hybrid_recovery_http, 0);
+    assert_eq!(counts.hybrid_policy_http, 1);
+    assert_eq!(counts.hybrid_large_request_http, 1);
+    assert_eq!(counts.direct_http, 0);
     Ok(())
 }
 
@@ -290,6 +326,7 @@ fn request_details_preserve_model_and_connection_context() -> Result<(), Box<dyn
             thread_id: Some("thread-123".to_owned()),
             session_id: Some("7".to_owned()),
             connection_id: Some("42".to_owned()),
+            ..RequestMetadata::default()
         }),
     );
 
@@ -311,6 +348,26 @@ fn request_details_preserve_model_and_connection_context() -> Result<(), Box<dyn
     );
     assert_eq!(event.get("sessionId"), Some(&serde_json::json!("7")));
     assert_eq!(event.get("connectionId"), Some(&serde_json::json!("42")));
+    Ok(())
+}
+
+#[test]
+fn temporary_session_name_stays_out_of_persisted_request_events() -> Result<(), Box<dyn Error>> {
+    let mut metadata = RequestMetadata::default();
+    metadata.thread_id = Some("thread-123".to_owned());
+    metadata.temporary_name = Some("临时名称".to_owned());
+    let store = TrafficStore::default();
+    store.record_with_timing_and_metadata(record(21_000, 100), None, None, Some(metadata));
+
+    let event = serde_json::to_value(
+        store
+            .snapshot_at(21_000)
+            .recent_requests
+            .into_iter()
+            .next()
+            .ok_or("request event missing")?,
+    )?;
+    assert!(event.get("temporaryName").is_none());
     Ok(())
 }
 

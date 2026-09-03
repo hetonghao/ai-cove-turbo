@@ -4,16 +4,18 @@ use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use url::Url;
 
 use super::super::{
-    ProxyState,
+    HttpTraffic, ProxyState,
     hybrid_pool::{
         ConnectionActivity, ConnectionObservation, HybridScope, Lease, LeaseRetirement,
         SessionHandle,
     },
     model_policy::ModelPolicy,
     traffic::RequestMetadata,
-    transport_capability::CapabilityHint,
 };
-use super::{Active, ActiveKind, ClientWebSocket, WebSocketSendReceipt, WorkerEvent, flow, worker};
+use super::{
+    Active, ActiveKind, ClientWebSocket, ResponseTransport, WebSocketSendReceipt, WorkerEvent,
+    flow, worker,
+};
 
 enum ActiveSelection {
     Client(Option<Result<Message, WebSocketError>>),
@@ -37,6 +39,8 @@ pub(super) struct Session {
     pub(super) request_metadata: Option<RequestMetadata>,
     pub(super) connection_id: Option<String>,
     pub(super) last_terminal_response_id: Option<String>,
+    pub(super) last_response_transport: Option<ResponseTransport>,
+    pub(super) last_http_traffic: Option<HttpTraffic>,
     pub(super) response_started: bool,
     pub(super) drain_reconnect_pending: bool,
     pub(super) policy: ModelPolicy,
@@ -74,6 +78,8 @@ impl Session {
             request_metadata: None,
             connection_id: None,
             last_terminal_response_id: None,
+            last_response_transport: None,
+            last_http_traffic: None,
             response_started: false,
             drain_reconnect_pending: false,
             policy,
@@ -123,53 +129,52 @@ impl Session {
             self.handle.discard_unleased(retirement).await;
         }
         self.last_terminal_response_id = None;
+        self.last_response_transport = None;
+        self.last_http_traffic = None;
         self.websocket_first_frame_at = None;
         self.websocket_first_token_at = None;
         self.observed_activity = None;
     }
 
-    pub(super) async fn capability_hint(&self, payload: &[u8]) -> Option<CapabilityHint> {
+    pub(super) fn refresh_capability(&self, payload: &[u8]) {
         if !self
             .state
             .upstream
             .host_str()
             .is_some_and(|host| host == "ai-cove.com" || host.ends_with(".ai-cove.com"))
         {
-            return None;
+            return;
         }
-        let model = ModelPolicy::model_from_payload(payload)?;
-        if let Some(hint) = self.state.capability_cache.hint(&model) {
-            return Some(hint);
+        let Some(model) = ModelPolicy::model_from_payload(payload) else {
+            return;
+        };
+        if !self.state.capability_cache.needs_refresh_for(&model) {
+            return;
         }
         let mut models = self.policy.model_slugs();
         if !models.iter().any(|candidate| candidate == &model) {
-            models.push(model.clone());
+            models.push(model);
         }
         models.sort_unstable();
         models.dedup();
-        if !self.state.capability_cache.needs_refresh(&models) {
-            return None;
+        self.state.capability_probe.refresh(&models);
+    }
+
+    pub(super) fn auto_uses_http(&self, payload: &[u8]) -> bool {
+        let Some(model) = ModelPolicy::model_from_payload(payload) else {
+            return self.is_ai_cove_upstream();
+        };
+        if let Some(transport) = self.state.capability_cache.known_transport_for(&model) {
+            return transport == super::super::transport_capability::CapabilityTransport::HttpOnly;
         }
-        let headers = self.state.capability_headers.clone();
-        let result = super::super::transport_capability::fetch_batch(
-            &self.state.client,
-            &self.state.upstream,
-            &headers,
-            &models,
-        )
-        .await;
-        match result {
-            Ok(response) => {
-                self.state
-                    .capability_cache
-                    .apply(&response, super::super::transport_capability::ttl());
-            }
-            Err(reason) => self
-                .state
-                .capability_cache
-                .mark_attempt(&models, Some(reason.to_owned())),
-        }
-        self.state.capability_cache.hint(&model)
+        self.is_ai_cove_upstream()
+    }
+
+    fn is_ai_cove_upstream(&self) -> bool {
+        self.state
+            .upstream
+            .host_str()
+            .is_some_and(|host| host == "ai-cove.com" || host.ends_with(".ai-cove.com"))
     }
 
     pub(super) async fn retire_idle_upstream(&mut self, retirement: LeaseRetirement) {
@@ -236,10 +241,12 @@ async fn cleanup(session: &mut Session, active: &mut Option<Active>) {
             session.handle.release_unleased().await;
         }
     }
-    if let (Some(thread_id), Some(response_id)) = (
-        session.thread_id.clone(),
-        session.last_terminal_response_id.clone(),
-    ) && let Some(mut lease) = session.ready.take()
+    if session.last_response_transport == Some(ResponseTransport::WebSocket)
+        && let (Some(thread_id), Some(response_id)) = (
+            session.thread_id.clone(),
+            session.last_terminal_response_id.clone(),
+        )
+        && let Some(mut lease) = session.ready.take()
     {
         if lease.park(thread_id, response_id).await.is_ok() {
             session.handle.detach_after_park();

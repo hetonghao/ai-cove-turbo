@@ -14,7 +14,7 @@ use url::Url;
 pub(crate) const AI_COVE_UPSTREAM: &str = "https://api.ai-cove.com/v1";
 const AI_COVE_HOST_SUFFIX: &str = ".ai-cove.com";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UpstreamCompatibility {
     AiCove,
     OtherHttps,
@@ -45,6 +45,11 @@ pub(crate) struct ManagedConfig {
 }
 
 impl ManagedConfig {
+    pub(crate) fn discovery_upstream(&self) -> Result<(Url, UpstreamCompatibility), ConfigError> {
+        let upstream = normalize_upstream(&self.original_base_url, &self.provider)?;
+        Ok((upstream.clone(), upstream_compatibility(&upstream)))
+    }
+
     pub(crate) fn original_preflight(&self) -> Result<Preflight, ConfigError> {
         let upstream = Url::parse(&self.original_base_url).map_err(ConfigError::InvalidBaseUrl)?;
         let compatibility = upstream_compatibility(&upstream);
@@ -139,7 +144,11 @@ pub(crate) enum ConfigError {
     InvalidBaseUrl(url::ParseError),
     InvalidUpstreamOverride(&'static str),
     LoopbackUpstream,
-    InsecureUpstream,
+    InsecureUpstream {
+        provider: String,
+        upstream: String,
+        ai_cove: bool,
+    },
     InvalidManagedEndpoint,
     Write(std::io::Error),
     TrafficWrite(std::io::Error),
@@ -168,7 +177,10 @@ impl fmt::Display for ConfigError {
             Self::LoopbackUpstream => {
                 write!(formatter, "当前上游是本机回环地址，Turbo 已阻止代理回环")
             }
-            Self::InsecureUpstream => write!(formatter, "Turbo 只接管 HTTPS 上游"),
+            Self::InsecureUpstream { upstream, .. } => write!(
+                formatter,
+                "当前上游 {upstream} 使用 HTTP，请改为 HTTPS 后重试接管"
+            ),
             Self::InvalidManagedEndpoint => write!(formatter, "Turbo 本地端点必须是 HTTP 回环地址"),
             Self::Write(error) => write!(formatter, "无法原子更新 Codex 配置：{error}"),
             Self::TrafficWrite(error) => write!(formatter, "无法持久化 Turbo 流量统计：{error}"),
@@ -210,7 +222,7 @@ pub(crate) fn preflight(path: &Path) -> Result<Preflight, ConfigError> {
         .get("base_url")
         .and_then(toml_edit::Item::as_str)
         .ok_or_else(|| ConfigError::MissingBaseUrl(provider.clone()))?;
-    let upstream = Url::parse(raw_upstream).map_err(ConfigError::InvalidBaseUrl)?;
+    let upstream = normalize_upstream(raw_upstream, &provider)?;
     let supports_websockets = match provider_table.get("supports_websockets") {
         Some(item) => Some(
             item.as_bool()
@@ -221,18 +233,7 @@ pub(crate) fn preflight(path: &Path) -> Result<Preflight, ConfigError> {
     let effective_config_digest =
         digest_effective_config(&provider, &upstream, supports_websockets);
 
-    if is_loopback(&upstream) {
-        return Err(ConfigError::LoopbackUpstream);
-    }
-    if upstream.scheme() != "https" {
-        return Err(ConfigError::InsecureUpstream);
-    }
-
-    let compatibility = if upstream.host_str().is_some_and(is_ai_cove_host) {
-        UpstreamCompatibility::AiCove
-    } else {
-        UpstreamCompatibility::OtherHttps
-    };
+    let compatibility = upstream_compatibility(&upstream);
 
     Ok(Preflight {
         config_path: path.to_path_buf(),
@@ -242,6 +243,21 @@ pub(crate) fn preflight(path: &Path) -> Result<Preflight, ConfigError> {
         supports_websockets,
         compatibility,
     })
+}
+
+fn normalize_upstream(raw: &str, provider: &str) -> Result<Url, ConfigError> {
+    let upstream = Url::parse(raw).map_err(ConfigError::InvalidBaseUrl)?;
+    if is_loopback(&upstream) {
+        return Err(ConfigError::LoopbackUpstream);
+    }
+    if upstream.scheme() != "https" {
+        return Err(ConfigError::InsecureUpstream {
+            provider: provider.to_owned(),
+            upstream: raw.to_owned(),
+            ai_cove: upstream.host_str().is_some_and(is_ai_cove_host),
+        });
+    }
+    Ok(upstream)
 }
 
 pub(crate) fn validate_upstream_override(raw: &str) -> Result<Url, ConfigError> {
@@ -683,6 +699,60 @@ base_url = "https://example.com/v1"
     }
 
     #[test]
+    fn preflight_reports_http_ai_cove_upstream_with_actionable_details()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let path = root.path().join("config_副本.toml");
+        fs::write(
+            &path,
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nbase_url = \"http://long-api.ai-cove.com\"\n",
+        )?;
+
+        let error = preflight(&path).expect_err("HTTP upstream must remain blocked");
+        match error {
+            ConfigError::InsecureUpstream {
+                provider,
+                upstream,
+                ai_cove,
+            } => {
+                assert_eq!(provider, "custom");
+                assert_eq!(upstream, "http://long-api.ai-cove.com");
+                assert!(ai_cove);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn forced_upstream_validation_accepts_public_http_and_https() -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            validate_upstream_override(" http://gateway.example/v1 ")?.as_str(),
+            "http://gateway.example/v1"
+        );
+        assert_eq!(
+            validate_upstream_override("https://api.ai-cove.com/v1")?.as_str(),
+            "https://api.ai-cove.com/v1"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn forced_upstream_validation_rejects_credentials_and_local_addresses() {
+        for upstream in [
+            "https://user:secret@gateway.example/v1",
+            "https://127.0.0.1:8080/v1",
+            "https://10.0.0.4/v1",
+            "https://[fd00::1]/v1",
+            "https://localhost/v1",
+            "ftp://gateway.example/v1",
+        ] {
+            assert!(validate_upstream_override(upstream).is_err(), "{upstream}");
+        }
+        assert!(validate_upstream_override("https://gateway.example/v1\n").is_err());
+    }
+
+    #[test]
     fn takeover_and_restore_manage_base_url_and_websocket_independently()
     -> Result<(), Box<dyn Error>> {
         let home = tempdir()?;
@@ -723,6 +793,29 @@ base_url = "https://example.com/v1"
         assert!(restored.contains("supports_websockets = false"));
         assert!(restored.contains("base_url = \"https://example.com/v1\""));
         assert!(!recovery_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn managed_discovery_uses_original_https_upstream_after_takeover() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempdir()?;
+        let config_path = root.path().join("config.toml");
+        let recovery_path = root.path().join("recovery.json");
+        fs::write(
+            &config_path,
+            "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://api.ai-cove.com/v1\"\n",
+        )?;
+        let managed = take_over(
+            &preflight(&config_path)?,
+            "http://127.0.0.1:44175/v1",
+            true,
+            &recovery_path,
+        )?;
+
+        let (upstream, compatibility) = managed.discovery_upstream()?;
+        assert_eq!(upstream.as_str(), "https://api.ai-cove.com/v1");
+        assert_eq!(compatibility, UpstreamCompatibility::AiCove);
         Ok(())
     }
 
@@ -998,32 +1091,5 @@ supports_websockets = false
         assert!(source.contains("api_key = \"keep-me\""));
         assert!(source.contains("supports_websockets = false"));
         Ok(())
-    }
-    #[test]
-    fn forced_upstream_validation_accepts_public_http_and_https() -> Result<(), Box<dyn Error>> {
-        assert_eq!(
-            validate_upstream_override(" http://gateway.example/v1 ")?.as_str(),
-            "http://gateway.example/v1"
-        );
-        assert_eq!(
-            validate_upstream_override("https://api.ai-cove.com/v1")?.as_str(),
-            "https://api.ai-cove.com/v1"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn forced_upstream_validation_rejects_credentials_and_local_addresses() {
-        for upstream in [
-            "https://user:secret@gateway.example/v1",
-            "https://127.0.0.1:8080/v1",
-            "https://10.0.0.4/v1",
-            "https://[fd00::1]/v1",
-            "https://localhost/v1",
-            "ftp://gateway.example/v1",
-        ] {
-            assert!(validate_upstream_override(upstream).is_err(), "{upstream}");
-        }
-        assert!(validate_upstream_override("https://gateway.example/v1\n").is_err());
     }
 }

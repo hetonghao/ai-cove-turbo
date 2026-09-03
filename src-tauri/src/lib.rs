@@ -91,6 +91,7 @@ pub fn run() -> tauri::Result<()> {
         .plugin(updater.build())
         .invoke_handler(tauri::generate_handler![
             get_app_status,
+            reset_route_metrics,
             get_connection_snapshot,
             update_model_policy,
             get_codex_thread_info,
@@ -303,6 +304,15 @@ async fn get_app_status(runtime: State<'_, Arc<AppRuntime>>) -> Result<AppStatus
 }
 
 #[tauri::command]
+async fn reset_route_metrics(runtime: State<'_, Arc<AppRuntime>>) -> Result<AppStatus, String> {
+    runtime
+        .reset_route_metrics()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(runtime.status().await)
+}
+
+#[tauri::command]
 async fn get_connection_snapshot(
     runtime: State<'_, Arc<AppRuntime>>,
 ) -> Result<ConnectionSnapshot, String> {
@@ -365,9 +375,15 @@ async fn save_model_settings(
     models: Vec<catalog::CatalogModel>,
     expected_revision: String,
     policy: proxy::ModelPolicyUpdate,
+    remove_slugs: Option<Vec<String>>,
 ) -> Result<runtime::ModelSettingsSaveStatus, String> {
     runtime
-        .save_model_settings(models, expected_revision, policy)
+        .save_model_settings(
+            models,
+            expected_revision,
+            policy,
+            remove_slugs.unwrap_or_default(),
+        )
         .await
 }
 
@@ -488,7 +504,7 @@ async fn restart_codex(runtime: State<'_, Arc<AppRuntime>>) -> Result<AppStatus,
 
 #[tauri::command]
 async fn retry_takeover(runtime: State<'_, Arc<AppRuntime>>) -> Result<AppStatus, String> {
-    runtime.retry_takeover().await;
+    runtime.retry_takeover().await?;
     Ok(runtime.status().await)
 }
 

@@ -172,6 +172,7 @@ pub(crate) struct AppStatus {
     pub(crate) prewarm_state: String,
     pub(crate) model_policy: ModelPolicyStatus,
     pub(crate) transport_capabilities: std::collections::HashMap<String, CapabilityModelStatus>,
+    pub(crate) transport_capability_reason: Option<String>,
     pub(crate) websocket_handshakes: u64,
     pub(crate) websocket_raw_bytes: u64,
     pub(crate) websocket_sent_bytes: u64,
@@ -181,6 +182,7 @@ pub(crate) struct AppStatus {
     pub(crate) hybrid_cold_start_http: u64,
     pub(crate) hybrid_recovery_http: u64,
     pub(crate) hybrid_policy_http: u64,
+    pub(crate) hybrid_capability_http: u64,
     pub(crate) hybrid_large_request_http: u64,
     pub(crate) direct_http: u64,
     pub(crate) recent_requests: Vec<RequestEvent>,
@@ -241,6 +243,7 @@ impl AppStatus {
                 reason: None,
             },
             transport_capabilities: std::collections::HashMap::new(),
+            transport_capability_reason: None,
             websocket_handshakes: 0,
             websocket_raw_bytes: 0,
             websocket_sent_bytes: 0,
@@ -250,6 +253,7 @@ impl AppStatus {
             hybrid_cold_start_http: 0,
             hybrid_recovery_http: 0,
             hybrid_policy_http: 0,
+            hybrid_capability_http: 0,
             hybrid_large_request_http: 0,
             direct_http: 0,
             recent_requests: Vec::new(),
@@ -380,10 +384,30 @@ impl AppRuntime {
         let check = match preflight(&self.paths.config_path) {
             Ok(check) => check,
             Err(error) => {
-                let ai_cove_fix_available = matches!(&error, ConfigError::LoopbackUpstream);
-                self.block(&error.to_string());
-                if ai_cove_fix_available {
-                    self.update_status(|status| status.ai_cove_upstream_fix_available = true);
+                if let ConfigError::InsecureUpstream {
+                    provider,
+                    upstream,
+                    ai_cove,
+                } = &error
+                {
+                    self.update_status(|status| {
+                        status.service_healthy = false;
+                        status.config_state = "needs_https".to_owned();
+                        status.config_message = error.to_string();
+                        status.endpoint = "—".to_owned();
+                        status.provider.clone_from(provider);
+                        status.upstream.clone_from(upstream);
+                        status.ai_cove_upstream = *ai_cove;
+                        status.codex_state = "checking".to_owned();
+                        status.restart_required = false;
+                        status.ai_cove_upstream_fix_available = false;
+                    });
+                } else {
+                    let ai_cove_fix_available = matches!(&error, ConfigError::LoopbackUpstream);
+                    self.block(&error.to_string());
+                    if ai_cove_fix_available {
+                        self.update_status(|status| status.ai_cove_upstream_fix_available = true);
+                    }
                 }
                 return;
             }
@@ -443,39 +467,18 @@ impl AppRuntime {
             return;
         }
 
-        let preferred_ports = self.preferred_ports();
-        let proxy = match start_proxy_with_policy(
-            ProxyOptions {
-                upstream: check.upstream.clone(),
-                compression_enabled: Arc::clone(&self.compression_enabled),
-                websocket_enabled: Arc::clone(&self.websocket_enabled),
-                ai_cove_private_websocket_zstd: ai_cove,
-                metrics: Arc::clone(&self.metrics),
-                preferred_ports,
-                max_request_body_bytes: 128 * 1024 * 1024,
-            },
-            Some(self.paths.model_policy_path()),
-            Some(self.paths.config_path.clone()),
-            true,
-        )
-        .await
+        let (proxy, managed) = match self
+            .start_managed_proxy(&check, upstream_url, &recovery_path)
+            .await
         {
-            Ok(proxy) => proxy,
+            Ok(result) => result,
             Err(error) => {
-                self.block(&error.to_string());
+                self.block(&error);
                 return;
             }
         };
         let endpoint = proxy.endpoint().to_owned();
         let websocket_enabled = self.websocket_enabled.load(Ordering::Relaxed);
-        let managed = match take_over(&check, &endpoint, websocket_enabled, &recovery_path) {
-            Ok(managed) => managed,
-            Err(error) => {
-                proxy.stop().await;
-                self.block(&error.to_string());
-                return;
-            }
-        };
 
         self.remember_port(&endpoint);
         *lock_mutex(&self.managed) = Some(managed);
@@ -562,10 +565,14 @@ impl AppRuntime {
         status.hybrid_cold_start_http = metrics.hybrid_cold_start_http;
         status.hybrid_recovery_http = metrics.hybrid_recovery_http;
         status.hybrid_policy_http = metrics.hybrid_policy_http;
+        status.hybrid_capability_http = metrics.hybrid_capability_http;
         status.hybrid_large_request_http = metrics.hybrid_large_request_http;
         status.direct_http = metrics.direct_http;
         self.session_names
             .observe_requests(&traffic.recent_requests)
+            .await;
+        self.session_names
+            .observe_hints(&self.metrics.take_session_name_hints())
             .await;
         status.recent_requests = traffic.recent_requests;
         status.session_names = self.session_names.snapshot().await;
@@ -593,25 +600,43 @@ impl AppRuntime {
         status
     }
 
+    pub(crate) async fn reset_route_metrics(&self) -> io::Result<()> {
+        self.metrics.reset_route_metrics();
+        persist_traffic_once(Arc::clone(&self.metrics), self.paths.traffic_path(), false).await
+    }
+
     async fn refresh_transport_status(&self, status: &mut AppStatus) {
+        let capability_models = lock_mutex(&self.catalog)
+            .models
+            .iter()
+            .map(|model| model.slug.clone())
+            .collect::<Vec<_>>();
         let values = {
             let proxy = self.proxy.lock().await;
             proxy.as_ref().map(|proxy| {
+                proxy.refresh_capabilities(&capability_models);
                 (
                     proxy.prewarm_state(),
                     proxy.model_policy_status(),
                     proxy.capability_statuses(),
+                    proxy.capability_reason(),
                 )
             })
         };
-        let Some((prewarm_state, model_policy, transport_capabilities)) = values else {
+        let Some((
+            prewarm_state,
+            model_policy,
+            transport_capabilities,
+            transport_capability_reason,
+        )) = values
+        else {
             status.prewarm_state = "disabled".to_owned();
-            status.transport_capabilities.clear();
             return;
         };
         status.prewarm_state = prewarm_state;
         status.model_policy = model_policy;
         status.transport_capabilities = transport_capabilities;
+        status.transport_capability_reason = transport_capability_reason;
     }
 
     pub(crate) async fn connection_snapshot(&self) -> ConnectionSnapshot {
@@ -924,6 +949,7 @@ impl AppRuntime {
         models: Vec<CatalogModel>,
         expected_revision: String,
         policy: ModelPolicyUpdate,
+        removed_slugs: Vec<String>,
     ) -> Result<ModelSettingsSaveStatus, String> {
         let _write_guard = self.catalog_write_lock.lock().await;
         let home = self
@@ -939,6 +965,7 @@ impl AppRuntime {
             &self.paths.catalog_recovery_path(),
             &models,
             &expected_revision,
+            &removed_slugs,
         ) {
             Ok(preview) => preview,
             Err(error) => {
@@ -953,12 +980,13 @@ impl AppRuntime {
             let _ = remove_file_if_present(&context.journal_path);
             return Err(format!("model_settings_journal_failed:{error}"));
         }
-        let catalog = match catalog::save_catalog_models(
+        let catalog = match catalog::save_catalog_models_with_removals(
             &home,
             &self.paths.config_path,
             &self.paths.catalog_recovery_path(),
             &models,
             &expected_revision,
+            &removed_slugs,
         ) {
             Ok(catalog) => catalog,
             Err(error) => {
@@ -1121,16 +1149,24 @@ impl AppRuntime {
     pub(crate) async fn discover_model_catalog(
         &self,
     ) -> Result<DiscoveryResult, catalog_discovery::DiscoveryError> {
-        let check = preflight(&self.paths.config_path)
-            .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?;
-        if check.compatibility != UpstreamCompatibility::AiCove {
+        let managed = lock_mutex(&self.managed).clone();
+        let (upstream, compatibility) = if let Some(managed) = managed.as_ref() {
+            managed
+                .discovery_upstream()
+                .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?
+        } else {
+            let check = preflight(&self.paths.config_path)
+                .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?;
+            (check.upstream, check.compatibility)
+        };
+        if compatibility != UpstreamCompatibility::AiCove {
             return Err(catalog_discovery::DiscoveryError::InvalidUpstream);
         }
         let headers = effective_auth_headers(Some(&self.paths.config_path))
             .ok_or(catalog_discovery::DiscoveryError::MissingCredentials)?;
         let mut result = catalog_discovery::fetch(
             &reqwest::Client::new(),
-            &check.upstream,
+            &upstream,
             &headers,
             env!("CARGO_PKG_VERSION"),
         )
@@ -1443,8 +1479,18 @@ impl AppRuntime {
         Ok(())
     }
 
-    pub(crate) async fn retry_takeover(&self) {
+    pub(crate) async fn retry_takeover(&self) -> Result<(), String> {
         self.initialize().await;
+        {
+            let status = read_lock(&self.status);
+            if matches!(
+                status.config_state.as_str(),
+                "blocked" | "error" | "conflict" | "needs_https"
+            ) {
+                return Err(status.config_message.clone());
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn resume_after_failed_update(&self) {
@@ -2073,6 +2119,8 @@ mod tests {
 
     use tempfile::tempdir;
 
+    use crate::proxy::CapabilityTransport;
+
     use super::*;
 
     #[test]
@@ -2097,6 +2145,76 @@ mod tests {
         let saved = load_preferences(&path);
         assert!(!saved.dock_visible);
         assert!(saved.dock_initialized);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retry_takeover_reports_a_failed_initialization() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: root.path().join("config.toml"),
+            data_dir: root.path().join("data"),
+        });
+
+        let result = runtime.retry_takeover().await;
+
+        assert!(result.is_err());
+        assert_eq!(read_lock(&runtime.status).config_state, "blocked");
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refresh_transport_status_keeps_last_capabilities_when_proxy_unavailable() {
+        let root = tempdir().expect("temporary runtime root");
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: root.path().join("config.toml"),
+            data_dir: root.path().join("data"),
+        });
+        let mut status = AppStatus::starting(&Preferences::default());
+        status.transport_capabilities.insert(
+            "gpt-5.6-sol".to_owned(),
+            CapabilityModelStatus {
+                allowed: true,
+                transport: CapabilityTransport::WebSocket,
+                reason_code: "ok".to_owned(),
+            },
+        );
+
+        runtime.refresh_transport_status(&mut status).await;
+
+        assert_eq!(
+            status
+                .transport_capabilities
+                .get("gpt-5.6-sol")
+                .map(|capability| capability.transport.as_str()),
+            Some("websocket")
+        );
+    }
+
+    #[tokio::test]
+    async fn http_ai_cove_upstream_reports_the_required_configuration_change()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_path = root.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nbase_url = \"http://long-api.ai-cove.com\"\n",
+        )?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path,
+            data_dir: root.path().join("data"),
+        });
+
+        let result = runtime.retry_takeover().await;
+        let status = runtime.status().await;
+
+        assert!(result.is_err());
+        assert_eq!(status.config_state, "needs_https");
+        assert_eq!(status.provider, "custom");
+        assert_eq!(status.upstream, "http://long-api.ai-cove.com");
+        assert!(status.config_message.contains("HTTPS"));
+        runtime.shutdown().await?;
         Ok(())
     }
 
@@ -2316,6 +2434,7 @@ supports_websockets = false
                     default_transport: "auto".to_owned(),
                     models: std::collections::HashMap::new(),
                 },
+                Vec::new(),
             )
             .await?;
 
@@ -2441,6 +2560,7 @@ supports_websockets = false
             &recovery,
             std::slice::from_ref(&model),
             &initial.revision,
+            &[],
         )?;
         let mut context = runtime.prepare_model_settings_journal(&home, &initial.revision)?;
         context.journal.catalog_after_revision = Some(catalog_after);

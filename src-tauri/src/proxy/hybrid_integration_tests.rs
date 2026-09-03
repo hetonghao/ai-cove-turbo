@@ -1,4 +1,4 @@
-use std::{io, sync::Arc, time::Duration};
+use std::{io, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::http::{HeaderValue, header};
 use futures_util::{FutureExt, SinkExt, StreamExt};
@@ -11,7 +11,9 @@ use tokio_tungstenite::{
 use url::Url;
 
 use super::integration_state::{CountsSnapshot, FixtureConfig, FixtureServer, PrivateBehavior};
-use crate::proxy::{Metrics, ProxyHandle, ProxyOptions, start_proxy};
+use crate::proxy::{
+    CapabilityTransport, Metrics, ProxyHandle, ProxyOptions, start_proxy, start_proxy_with_policy,
+};
 
 type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -31,8 +33,15 @@ mod session_isolation_tests;
 mod transport_fallback_tests;
 
 async fn start_test_proxy(server: &FixtureServer) -> io::Result<(ProxyHandle, Arc<Metrics>)> {
+    start_test_proxy_with_policy(server, None).await
+}
+
+async fn start_test_proxy_with_policy(
+    server: &FixtureServer,
+    policy_path: Option<PathBuf>,
+) -> io::Result<(ProxyHandle, Arc<Metrics>)> {
     let metrics = Arc::new(Metrics::default());
-    let proxy = start_proxy(ProxyOptions {
+    let options = ProxyOptions {
         upstream: server.fixture.upstream.clone(),
         compression_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         websocket_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -40,8 +49,11 @@ async fn start_test_proxy(server: &FixtureServer) -> io::Result<(ProxyHandle, Ar
         metrics: Arc::clone(&metrics),
         preferred_ports: vec![0],
         max_request_body_bytes: 64 * 1024 * 1024,
-    })
-    .await
+    };
+    let proxy = match policy_path {
+        Some(path) => start_proxy_with_policy(options, Some(path), None, false).await,
+        None => start_proxy(options).await,
+    }
     .map_err(io::Error::other)?;
     Ok((proxy, metrics))
 }
@@ -98,6 +110,22 @@ async fn send_create(client: &mut ClientWebSocket) -> io::Result<()> {
         .send(Message::Text(
             r#"{"type":"response.create","model":"test","input":"test"}"#.into(),
         ))
+        .await
+        .map_err(io::Error::other)
+}
+
+async fn send_continuation(
+    client: &mut ClientWebSocket,
+    previous_response_id: &str,
+) -> io::Result<()> {
+    let request = serde_json::json!({
+        "type": "response.create",
+        "model": "test",
+        "previous_response_id": previous_response_id,
+        "input": "next",
+    });
+    client
+        .send(Message::Text(request.to_string().into()))
         .await
         .map_err(io::Error::other)
 }
