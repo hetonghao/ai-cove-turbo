@@ -8,7 +8,7 @@
     hybridColdStartHttp: "首轮 HTTP",
     hybridRecoveryHttp: "回退 HTTP",
     hybridPolicyHttp: "策略 HTTP",
-    hybridCapabilityHttp: "能力 HTTP",
+    hybridCapabilityHttp: "压缩 HTTP",
     hybridLargeRequestHttp: "大请求 HTTP",
     directHttp: "压缩 HTTP",
   };
@@ -627,7 +627,8 @@
         ?? Array.from(numbers.entries()).find(([id]) => observedConnectionKey(id) === observedConnectionKey(text))?.[1];
       if (mapped) return sequenceNumber(mapped);
     }
-    return "—";
+    const isHttp = request?.transport === "HTTP" || (Boolean(request?.route) && request.route !== "hybridWs");
+    return isHttp ? "—（无需长连接）" : "—";
   }
 
   function requestDetailRows(request, exception) {
@@ -639,10 +640,12 @@
       : info?.name || (threadId ? sessionTitle(threadId) : "—");
     const isSubagent = Boolean(info?.isSubagent || request?.isSubagent || request?.is_subagent || request?.parentName || request?.parent_name);
     const parentName = info?.parentName || request?.parentName || request?.parent_name || "-";
+    const routeName = request?.route === "hybridCapabilityHttp" ? "自动 → 压缩 HTTP" : null;
     const rows = [
       ...(isSubagent ? [["所属父会话", parentName]] : []),
       ["会话名称", sessionName],
       ["模型", request?.model || request?.modelSlug || "—"],
+      ...(routeName ? [["路由", routeName]] : []),
       ["会话/连接", `${requestSessionSequence(threadId)} · ${requestConnectionSequence(request, threadId)}`],
       ["首帧/耗时", `${telemetry.formatDuration(request?.firstFrameMs ?? request?.first_frame_ms)} / ${telemetry.formatDuration(request?.durationMs ?? request?.duration_ms)}`],
     ];
@@ -730,7 +733,7 @@
       "hybrid-recovery-http": numberFormatter.format(Number(state.hybridRecoveryHttp) || 0),
       "hybrid-policy-http": numberFormatter.format(Number(state.hybridPolicyHttp) || 0),
       "hybrid-capability-http": numberFormatter.format(Number(state.hybridCapabilityHttp) || 0),
-      "direct-http": numberFormatter.format(Number(state.directHttp) || 0),
+      "direct-http": numberFormatter.format((Number(state.directHttp) || 0) + (Number(state.hybridCapabilityHttp) || 0)),
       autostart: state.autostartEnabled ? "开" : "关",
       dock: state.dockVisible ? "开" : "关",
       restart: pendingAction === "restart-codex" || state.codexState === "restarting"

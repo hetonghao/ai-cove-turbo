@@ -1645,6 +1645,31 @@ test("子会话请求详情先显示父会话和会话名称，再显示监控�
   assert.doesNotMatch(detail, /04 · 07/);
 });
 
+test("走 HTTP 的请求在 hover 气泡中显示无需长连接且能力降级归入压缩 HTTP", async () => {
+  const { requestStream } = await liveTailHarness({
+    recentRequests: [{
+      id: 1,
+      timestampMs: 1_000,
+      status: 200,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "HTTP",
+      route: "hybridCapabilityHttp",
+      result: "success",
+      threadId: "thread-test",
+      durationMs: 1_800,
+    }],
+  });
+  const html = requestStream.innerHTML;
+  // 传输列显示为压缩 HTTP
+  assert.match(html, /<span class="c-transport__detail"[^>]*>压缩 HTTP<\/span>/);
+  // hover 气泡中显示 自动 → 压缩 HTTP
+  assert.match(html, /<dt>路由<\/dt><dd>自动 → 压缩 HTTP<\/dd>/);
+  // 连接序号优化显示为无需长连接
+  assert.match(html, /<dt>会话\/连接<\/dt><dd>— · —（无需长连接）<\/dd>/);
+});
+
 test("请求详情在监控快照到达后使用已建立的会话和连接序号", async () => {
   const live = await liveTailHarness({
     enableTooltipRefresh: true,

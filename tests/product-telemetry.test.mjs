@@ -25,6 +25,19 @@ test("首字和耗时按毫秒或秒格式化，缺失值保留占位符", async
   assert.equal(window.TurboTelemetry.formatDuration(undefined), "—");
 });
 
+test("流量超过 1000 MB 自动升级到 GB，保留两位小数", async () => {
+  const telemetrySource = await readFile(new URL("../src/telemetry.js", import.meta.url), "utf8");
+  const window = {};
+  vm.runInNewContext(telemetrySource, { Intl, Math, Number, Object, window });
+
+  assert.equal(window.TurboTelemetry.formatBytes(500), "500 B");
+  assert.equal(window.TurboTelemetry.formatBytes(1_000), "1 KB");
+  assert.equal(window.TurboTelemetry.formatBytes(1_500), "1.5 KB");
+  assert.equal(window.TurboTelemetry.formatBytes(50_000_000), "50.00 MB");
+  assert.equal(window.TurboTelemetry.formatBytes(1_000_000_000), "1.00 GB");
+  assert.equal(window.TurboTelemetry.formatBytes(9_830_480_000), "9.83 GB");
+});
+
 test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆盖 101 状态", async () => {
   // Given: get_app_status 返回成功和失败的 101 请求，以及固定六桶的一分钟窗口。
   const telemetrySource = await readFile(new URL("../src/telemetry.js", import.meta.url), "utf8");
@@ -151,7 +164,10 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   assert.match(requestRows.find((row) => row.includes("/v1/cold-start")) ?? "", />首轮 HTTP<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/recovery")) ?? "", />回退 HTTP<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/policy")) ?? "", />策略 HTTP<\/span>/);
-  assert.match(requestRows.find((row) => row.includes("/v1/capability")) ?? "", />能力 HTTP<\/span>/);
+  const capabilityRow = requestRows.find((row) => row.includes("/v1/capability")) ?? "";
+  assert.match(capabilityRow, />压缩 HTTP<\/span>/);
+  assert.match(capabilityRow, /<dt>路由<\/dt><dd>自动 → 压缩 HTTP<\/dd>/);
+  assert.match(capabilityRow, /<dt>会话\/连接<\/dt><dd>— · —（无需长连接）<\/dd>/);
   assert.match(requestRows.find((row) => row.includes("/v1/large")) ?? "", />大请求 HTTP<\/span>/);
   assert.match(failedRow, /c-request-status c-request-status--error">101<\/span>/);
   assert.match(failedRow, /c-transport c-transport--error">.*Hybrid WS.*请求失败/);
