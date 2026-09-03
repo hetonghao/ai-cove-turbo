@@ -6,7 +6,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -297,6 +297,7 @@ pub(crate) struct AppRuntime {
     catalog: Mutex<CatalogStatus>,
     catalog_write_lock: AsyncMutex<()>,
     catalog_last_sync_ms: AtomicU64,
+    catalog_sync_running: AtomicBool,
     compression_enabled: Arc<AtomicBool>,
     websocket_enabled: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
@@ -311,6 +312,7 @@ pub(crate) struct AppRuntime {
     shutting_down: AtomicBool,
     session_names: Arc<SessionNameCache>,
     session_name_task: AsyncMutex<Option<SessionNameTask>>,
+    self_ref: OnceLock<Weak<Self>>,
 }
 
 #[derive(Debug)]
@@ -332,7 +334,7 @@ impl AppRuntime {
         let catalog_status = catalog::starting_status(&home);
         status.catalog = catalog_status.clone();
         let metrics = Arc::new(Metrics::load_traffic(&paths.traffic_path()));
-        Arc::new(Self {
+        let runtime = Arc::new(Self {
             paths,
             compression_enabled: Arc::new(AtomicBool::new(preferences.compression_enabled)),
             websocket_enabled: Arc::new(AtomicBool::new(preferences.websocket_enabled)),
@@ -341,6 +343,7 @@ impl AppRuntime {
             catalog: Mutex::new(catalog_status),
             catalog_write_lock: AsyncMutex::new(()),
             catalog_last_sync_ms: AtomicU64::new(0),
+            catalog_sync_running: AtomicBool::new(false),
             metrics,
             managed: Mutex::new(None),
             proxy: AsyncMutex::new(None),
@@ -353,7 +356,10 @@ impl AppRuntime {
             shutting_down: AtomicBool::new(false),
             session_names,
             session_name_task: AsyncMutex::new(None),
-        })
+            self_ref: OnceLock::new(),
+        });
+        let _ = runtime.self_ref.set(Arc::downgrade(&runtime));
+        runtime
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1815,15 +1821,29 @@ impl AppRuntime {
     }
 
     fn refresh_catalog(&self) {
-        let Ok(_write_guard) = self.catalog_write_lock.try_lock() else {
-            return;
-        };
         let now = unix_time_ms();
         let previous = self.catalog_last_sync_ms.load(Ordering::Relaxed);
         if !catalog_sync_due(previous, now) {
             return;
         }
+        if self.catalog_sync_running.swap(true, Ordering::AcqRel) {
+            return;
+        }
         self.catalog_last_sync_ms.store(now, Ordering::Relaxed);
+        let Some(runtime) = self.self_ref.get().and_then(Weak::upgrade) else {
+            self.catalog_sync_running.store(false, Ordering::Release);
+            return;
+        };
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            runtime.refresh_catalog_sync();
+            runtime.catalog_sync_running.store(false, Ordering::Release);
+        });
+    }
+
+    fn refresh_catalog_sync(&self) {
+        let Ok(_write_guard) = self.catalog_write_lock.try_lock() else {
+            return;
+        };
         let current = lock_mutex(&self.catalog).clone();
         if current.state == "restored" {
             return;
@@ -2905,6 +2925,20 @@ supports_websockets = false
         assert!(catalog_sync_due(0, 1));
         assert!(!catalog_sync_due(10_000, 14_999));
         assert!(catalog_sync_due(10_000, 15_000));
+    }
+
+    #[test]
+    fn catalog_refresh_is_single_flight() {
+        let root = tempdir().expect("temporary runtime root");
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: root.path().join("config.toml"),
+            data_dir: root.path().join("data"),
+        });
+        runtime.catalog_sync_running.store(true, Ordering::Release);
+
+        runtime.refresh_catalog();
+
+        assert!(runtime.catalog_sync_running.load(Ordering::Acquire));
     }
 
     #[tokio::test]
