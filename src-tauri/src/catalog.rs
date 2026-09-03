@@ -1316,7 +1316,7 @@ fn sanitize_new_model_template(model: &mut Value, template: &Value, target: &Cat
                 .as_ref()
                 .and_then(Value::as_str)
                 .is_none_or(|value| value.trim().is_empty());
-            if missing || existing.as_ref() == Some(&instructions) {
+            if missing {
                 if let Some(instructions) = instructions.as_str() {
                     messages.insert(
                         "instructions_template".to_owned(),
