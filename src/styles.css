@@ -4933,8 +4933,12 @@ button:disabled {
   font-size: 1rem;
 }
 
+[data-model-discovery] .b-model-dialog__surface {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
 .b-model-discovery__filter {
-  padding: 14px 20px 0;
+  padding: 14px 20px 8px;
 }
 
 .b-model-discovery__filter input {
