@@ -295,7 +295,7 @@ mod tests {
         }]}))
         .expect("codex model list");
         let model = models.first().expect("model");
-        assert_eq!(model.input_modalities, vec!["text", "image"]);
+        assert_eq!(model.input_modalities, vec!["text"]);
         assert_eq!(model.default_reasoning_summary.as_deref(), Some("none"));
         assert_eq!(
             model.field_sources.get("defaultReasoningSummary"),

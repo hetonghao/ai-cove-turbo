@@ -59,6 +59,9 @@ pub(crate) fn preview_catalog_models(
     if digest(&bytes) != expected_revision {
         return Err(CatalogError::ContentChanged);
     }
+    if let Some(slug) = protected_root_slug(&_record, removed_slugs) {
+        return Err(CatalogError::ProtectedModel(slug));
+    }
     let previous_metadata = catalog_storage::read_metadata(&fixed_path);
     let (next_bytes, metadata) =
         prepare_catalog_models(&bytes, &previous_metadata, models, removed_slugs)?;
@@ -133,6 +136,10 @@ pub(crate) fn ensure_catalog(
             .as_ref()
             .map(|path| path.display().to_string()),
         source_path,
+        root_slugs: baseline_models
+            .iter()
+            .map(|model| model.slug.clone())
+            .collect(),
         baseline_models,
         baseline_document,
     };
@@ -317,6 +324,9 @@ pub(crate) fn save_catalog_models_with_removals(
     if digest(&bytes) != expected_revision {
         return Err(CatalogError::ContentChanged);
     }
+    if let Some(slug) = protected_root_slug(&record, removed_slugs) {
+        return Err(CatalogError::ProtectedModel(slug));
+    }
     let previous_metadata = catalog_storage::read_metadata(&fixed_path);
     let (next_bytes, metadata) =
         prepare_catalog_models(&bytes, &previous_metadata, models, removed_slugs)?;
@@ -441,6 +451,35 @@ fn remove_catalog_entries(entries: &mut Vec<Value>, removed_slugs: &[String]) {
             .and_then(Value::as_str)
             .is_none_or(|slug| !removed_slugs.iter().any(|removed| removed == slug))
     });
+}
+
+fn protected_root_slug(record: &OwnershipRecord, removed_slugs: &[String]) -> Option<String> {
+    let root_slugs = record
+        .source_path
+        .as_ref()
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| parse_models(&bytes).ok())
+        .map(|models| {
+            models
+                .into_iter()
+                .map(|model| model.slug)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            if record.root_slugs.is_empty() {
+                record
+                    .baseline_models
+                    .iter()
+                    .map(|model| model.slug.clone())
+                    .collect()
+            } else {
+                record.root_slugs.clone()
+            }
+        });
+    removed_slugs
+        .iter()
+        .find(|slug| root_slugs.iter().any(|root_slug| root_slug == *slug))
+        .cloned()
 }
 
 fn remove_catalog_metadata(metadata: &mut CatalogMetadata, removed_slugs: &[String]) {
@@ -738,6 +777,122 @@ mod tests {
     }
 
     #[test]
+    fn relative_catalog_pointer_resolves_from_codex_config_directory() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempdir()?;
+        let config_dir = root.path().join("home/.codex");
+        fs::create_dir_all(&config_dir)?;
+        let source = config_dir.join("models.json");
+        fs::write(&source, r#"{"models":[]}"#)?;
+        let config = config_dir.join("config.toml");
+        fs::write(
+            &config,
+            "model_provider = \"custom\"\nmodel_catalog_json = \"models.json\"\n",
+        )?;
+
+        let recovery = root.path().join("recovery.json");
+        let home = root.path().join("home");
+        let status = ensure_catalog(&home, &config, &recovery)?;
+
+        assert_eq!(
+            status.source_path,
+            Some(source.to_string_lossy().into_owned())
+        );
+        assert_eq!(status.models.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_template_cannot_be_deleted() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let current = ensure_catalog(root.path(), &config, &recovery)?;
+
+        let result = save_catalog_models_with_removals(
+            root.path(),
+            &config,
+            &recovery,
+            &[],
+            &current.revision,
+            &[CODEX_TEMPLATE_SLUG.to_owned()],
+        );
+
+        assert!(
+            matches!(result, Err(CatalogError::ProtectedModel(slug)) if slug == CODEX_TEMPLATE_SLUG)
+        );
+        assert!(fs::read_to_string(fixed_catalog_path(root.path()))?.contains(CODEX_TEMPLATE_SLUG));
+        Ok(())
+    }
+
+    #[test]
+    fn every_current_root_model_is_protected_from_deletion() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let current = ensure_catalog(root.path(), &config, &recovery)?;
+
+        let result = save_catalog_models_with_removals(
+            root.path(),
+            &config,
+            &recovery,
+            &[],
+            &current.revision,
+            &["alpha".to_owned()],
+        );
+
+        assert!(matches!(result, Err(CatalogError::ProtectedModel(slug)) if slug == "alpha"));
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_status_marks_root_and_added_models() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let current = ensure_catalog(root.path(), &config, &recovery)?;
+        let saved = save_catalog_models(
+            root.path(),
+            &config,
+            &recovery,
+            &[complete_model("gamma")],
+            &current.revision,
+        )?;
+
+        let alpha = saved
+            .models
+            .iter()
+            .find(|model| model.slug == "alpha")
+            .ok_or("alpha missing")?;
+        let gamma = saved
+            .models
+            .iter()
+            .find(|model| model.slug == "gamma")
+            .ok_or("gamma missing")?;
+        assert!(alpha.root_presence);
+        assert!(!alpha.root_missing);
+        assert!(!gamma.root_presence);
+        assert!(gamma.root_missing);
+
+        fs::write(
+            &source,
+            r#"{"models":[{"slug":"beta","display_name":"Beta","visibility":"hide","priority":1},{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","priority":0}]}"#,
+        )?;
+        let refreshed = read_catalog(root.path(), &config, &recovery, true, false, false)?;
+        let alpha = refreshed
+            .models
+            .iter()
+            .find(|model| model.slug == "alpha")
+            .ok_or("alpha missing after source refresh")?;
+        assert!(!alpha.root_presence);
+        assert!(alpha.root_missing);
+        Ok(())
+    }
+
+    #[test]
     fn external_source_refreshes_an_existing_fixed_catalog_before_takeover()
     -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
@@ -916,26 +1071,30 @@ mod tests {
     #[test]
     fn explicit_model_removal_does_not_leave_the_deleted_candidate_in_catalog()
     -> Result<(), Box<dyn Error>> {
-        // Given: 当前目录包含 alpha、beta 和 Codex 模板。
         let root = tempdir()?;
         let source = root.path().join("source.json");
         let (config, _) = fixture(root.path(), Some(&source));
         let recovery = root.path().join("recovery.json");
         let current = ensure_catalog(root.path(), &config, &recovery)?;
-        let removed = vec!["alpha".to_owned()];
+        let seeded = save_catalog_models(
+            root.path(),
+            &config,
+            &recovery,
+            &[complete_model("gamma")],
+            &current.revision,
+        )?;
+        let removed = vec!["gamma".to_owned()];
 
-        // When: 联合保存明确要求移除 alpha，并提交剩余的 beta。
         let status = save_catalog_models_with_removals(
             root.path(),
             &config,
             &recovery,
             &[complete_model("beta")],
-            &current.revision,
+            &seeded.revision,
             &removed,
         )?;
 
-        // Then: 返回状态和落盘目录都不再包含 alpha。
-        assert!(status.models.iter().all(|model| model.slug != "alpha"));
+        assert!(status.models.iter().all(|model| model.slug != "gamma"));
         let written: Value = serde_json::from_slice(&fs::read(fixed_catalog_path(root.path()))?)?;
         let models = written
             .get("models")
@@ -944,7 +1103,7 @@ mod tests {
         assert!(
             models
                 .iter()
-                .all(|model| model.get("slug") != Some(&Value::String("alpha".to_owned())))
+                .all(|model| model.get("slug") != Some(&Value::String("gamma".to_owned())))
         );
         Ok(())
     }

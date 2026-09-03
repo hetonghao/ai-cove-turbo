@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -25,9 +25,12 @@ pub(super) fn status_from_file(
     let bytes = fs::read(fixed_path).map_err(CatalogError::Read)?;
     let document: Value = serde_json::from_slice(&bytes).map_err(CatalogError::Json)?;
     let metadata = read_metadata(fixed_path);
+    let root_slugs = root_slugs(record);
     let models = parse_models(&bytes)?
         .into_iter()
         .map(|mut model| {
+            model.root_presence = root_slugs.contains(&model.slug);
+            model.root_missing = !model.root_presence;
             if let Some(sources) = metadata.field_sources.get(&model.slug) {
                 model.field_sources.clone_from(sources);
             }
@@ -57,6 +60,26 @@ pub(super) fn status_from_file(
         revision: digest(&bytes),
         metadata,
     })
+}
+
+fn root_slugs(record: &OwnershipRecord) -> HashSet<String> {
+    record
+        .source_path
+        .as_ref()
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| parse_models(&bytes).ok())
+        .map(|models| models.into_iter().map(|model| model.slug).collect())
+        .unwrap_or_else(|| {
+            if record.root_slugs.is_empty() {
+                record
+                    .baseline_models
+                    .iter()
+                    .map(|model| model.slug.clone())
+                    .collect()
+            } else {
+                record.root_slugs.iter().cloned().collect()
+            }
+        })
 }
 
 pub(super) fn parse_models(bytes: &[u8]) -> Result<Vec<CatalogModel>, CatalogError> {
@@ -126,6 +149,8 @@ pub(super) fn model_from_value(model: &Value, slug: String) -> CatalogModel {
             .get("supported_in_api")
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        root_presence: false,
+        root_missing: true,
         field_sources: BTreeMap::default(),
         conflicts: Vec::new(),
         slug,
@@ -401,10 +426,18 @@ fn insert_optional_string(
 pub(super) fn read_catalog_pointer(config_path: &Path) -> Result<Option<PathBuf>, CatalogError> {
     let source = fs::read_to_string(config_path).map_err(CatalogError::Read)?;
     let document = source.parse::<DocumentMut>().map_err(CatalogError::Toml)?;
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
     Ok(document
         .get("model_catalog_json")
         .and_then(Item::as_str)
-        .map(PathBuf::from))
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                config_dir.join(path)
+            }
+        }))
 }
 
 pub(super) fn write_catalog_pointer(

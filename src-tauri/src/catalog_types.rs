@@ -77,6 +77,10 @@ pub(crate) struct CatalogModel {
     #[serde(default)]
     pub(crate) supported_in_api: bool,
     #[serde(default)]
+    pub(crate) root_presence: bool,
+    #[serde(default)]
+    pub(crate) root_missing: bool,
+    #[serde(default)]
     pub(crate) field_sources: BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) conflicts: Vec<String>,
@@ -107,7 +111,7 @@ impl CatalogModel {
                 .insert("description".to_owned(), "模板".to_owned());
         }
         if self.input_modalities.is_empty() {
-            self.input_modalities = vec!["text".to_owned(), "image".to_owned()];
+            self.input_modalities = vec!["text".to_owned()];
             self.field_sources
                 .insert("inputModalities".to_owned(), "模板".to_owned());
         }
@@ -152,8 +156,10 @@ impl CatalogModel {
             self.default_reasoning_summary = Some("none".to_owned());
             self.service_tiers = Vec::new();
             self.default_service_tier = None;
-            self.field_sources
-                .insert("supportsReasoningSummaryParameter".to_owned(), "模板".to_owned());
+            self.field_sources.insert(
+                "supportsReasoningSummaryParameter".to_owned(),
+                "模板".to_owned(),
+            );
             self.field_sources
                 .insert("defaultReasoningSummary".to_owned(), "模板".to_owned());
             self.field_sources
@@ -278,7 +284,7 @@ impl CatalogModel {
             truncation_policy: Some(default_truncation_policy()),
             shell_type: default_shell_type(),
             support_verbosity: true,
-            input_modalities: vec!["text".to_owned(), "image".to_owned()],
+            input_modalities: vec!["text".to_owned()],
             supported_reasoning_levels: Vec::new(),
             default_reasoning_level: None,
             supports_reasoning_summary_parameter: false,
@@ -295,6 +301,8 @@ impl CatalogModel {
             base_instructions: None,
             minimal_client_version: None,
             supported_in_api: true,
+            root_presence: false,
+            root_missing: true,
             field_sources,
             conflicts: Vec::new(),
             slug,
@@ -377,6 +385,8 @@ pub(crate) struct OwnershipRecord {
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) baseline_models: Vec<CatalogModel>,
     #[serde(default)]
+    pub(crate) root_slugs: Vec<String>,
+    #[serde(default)]
     pub(crate) baseline_document: Value,
 }
 
@@ -390,6 +400,7 @@ pub(crate) enum CatalogError {
     SourceUnavailable,
     OwnershipConflict,
     InvalidModel(String),
+    ProtectedModel(String),
     ContentChanged,
 }
 
@@ -406,6 +417,7 @@ impl fmt::Display for CatalogError {
                 write!(formatter, "Codex 的 model_catalog_json 已被外部修改")
             }
             Self::InvalidModel(slug) => write!(formatter, "模型目录更新包含未知模型：{slug}"),
+            Self::ProtectedModel(slug) => write!(formatter, "模型 {} 受保护，不能删除", slug),
             Self::ContentChanged => write!(formatter, "模型目录已被外部修改，请重新加载后保存"),
         }
     }
