@@ -39,6 +39,15 @@ pub(crate) fn read_metadata(home: &Path) -> CatalogMetadata {
     catalog_storage::read_metadata(&fixed_catalog_path(home))
 }
 
+#[derive(Clone, Copy)]
+struct CatalogSyncOptions<'a> {
+    expected_revision: &'a str,
+    restart_required: bool,
+    loaded: bool,
+    request_verified: bool,
+    bundled_executable: Option<&'a Path>,
+}
+
 pub(crate) fn sync_catalog(
     home: &Path,
     config_path: &Path,
@@ -47,6 +56,26 @@ pub(crate) fn sync_catalog(
     restart_required: bool,
     loaded: bool,
     request_verified: bool,
+) -> Result<CatalogStatus, CatalogError> {
+    sync_catalog_with_executable(
+        home,
+        config_path,
+        recovery_path,
+        CatalogSyncOptions {
+            expected_revision,
+            restart_required,
+            loaded,
+            request_verified,
+            bundled_executable: None,
+        },
+    )
+}
+
+fn sync_catalog_with_executable(
+    home: &Path,
+    config_path: &Path,
+    recovery_path: &Path,
+    options: CatalogSyncOptions<'_>,
 ) -> Result<CatalogStatus, CatalogError> {
     let fixed_path = fixed_catalog_path(home);
     let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
@@ -57,20 +86,39 @@ pub(crate) fn sync_catalog(
     if pointer.as_deref() != Some(fixed_path.as_path()) {
         return Err(CatalogError::OwnershipConflict);
     }
+    let reinitialized = if fixed_path.exists() {
+        read_fixed_catalog(&fixed_path)?;
+        false
+    } else {
+        clone_root_catalog(config_path, &fixed_path, options.bundled_executable)?;
+        true
+    };
     let current_bytes = fs::read(&fixed_path).map_err(CatalogError::Read)?;
-    if !expected_revision.is_empty() && digest(&current_bytes) != expected_revision {
+    if !reinitialized
+        && !options.expected_revision.is_empty()
+        && digest(&current_bytes) != options.expected_revision
+    {
         return Err(CatalogError::ContentChanged);
     }
-    let (record, catalog_changed) = sync_catalog_from_root(&fixed_path, recovery_path, record)?;
+    let (record, catalog_changed) = sync_catalog_from_root_with_executable(
+        &fixed_path,
+        recovery_path,
+        record,
+        options.bundled_executable,
+    )?;
     status_from_file(
         &fixed_path,
         &record,
-        restart_required || catalog_changed,
-        if catalog_changed { false } else { loaded },
+        options.restart_required || catalog_changed,
         if catalog_changed {
             false
         } else {
-            request_verified
+            options.loaded
+        },
+        if catalog_changed {
+            false
+        } else {
+            options.request_verified
         },
     )
 }
@@ -130,6 +178,15 @@ pub(crate) fn ensure_catalog(
     config_path: &Path,
     recovery_path: &Path,
 ) -> Result<CatalogStatus, CatalogError> {
+    ensure_catalog_with_executable(home, config_path, recovery_path, None)
+}
+
+fn ensure_catalog_with_executable(
+    home: &Path,
+    config_path: &Path,
+    recovery_path: &Path,
+    bundled_executable: Option<&Path>,
+) -> Result<CatalogStatus, CatalogError> {
     let fixed_path = fixed_catalog_path(home);
     if let Some(record) = read_record(recovery_path)? {
         if record.fixed_path != fixed_path || record.config_path != config_path {
@@ -139,7 +196,17 @@ pub(crate) fn ensure_catalog(
         if pointer.as_deref() != Some(fixed_path.as_path()) {
             return Err(CatalogError::OwnershipConflict);
         }
-        let (record, catalog_changed) = sync_catalog_from_root(&fixed_path, recovery_path, record)?;
+        if fixed_path.exists() {
+            read_fixed_catalog(&fixed_path)?;
+        } else {
+            clone_root_catalog(config_path, &fixed_path, bundled_executable)?;
+        }
+        let (record, catalog_changed) = sync_catalog_from_root_with_executable(
+            &fixed_path,
+            recovery_path,
+            record,
+            bundled_executable,
+        )?;
         return status_from_file(
             &fixed_path,
             &record,
@@ -152,19 +219,26 @@ pub(crate) fn ensure_catalog(
     let current_pointer = read_catalog_pointer(config_path)?;
     let source_path = match current_pointer.as_ref() {
         Some(source) if source != &fixed_path => {
-            let bytes = fs::read(source).map_err(CatalogError::Read)?;
-            parse_models(&bytes)?;
-            write_atomic(&fixed_path, &bytes)?;
-            Some(source.clone())
+            if let Some(bytes) = read_usable_catalog(source) {
+                write_atomic(&fixed_path, &bytes)?;
+                Some(source.clone())
+            } else {
+                clone_root_catalog(config_path, &fixed_path, bundled_executable)?;
+                None
+            }
         }
-        Some(_) | None if fixed_path.exists() => None,
-        Some(source) => {
-            let bytes = fs::read(source).map_err(CatalogError::Read)?;
-            parse_models(&bytes)?;
-            write_atomic(&fixed_path, &bytes)?;
-            Some(source.clone())
+        Some(_) => {
+            if !read_fixed_catalog(&fixed_path)? {
+                clone_root_catalog(config_path, &fixed_path, bundled_executable)?;
+            }
+            None
         }
-        None => return Err(CatalogError::SourceUnavailable),
+        None => {
+            if read_usable_catalog(&fixed_path).is_none() {
+                clone_root_catalog(config_path, &fixed_path, bundled_executable)?;
+            }
+            None
+        }
     };
     if source_path.is_none() && fixed_path.exists() {
         let bytes = fs::read(&fixed_path).map_err(CatalogError::Read)?;
@@ -199,6 +273,40 @@ pub(crate) fn ensure_catalog(
         }
     }
     status_from_file(&fixed_path, &record, changed_config, false, false)
+}
+
+fn read_usable_catalog(path: &Path) -> Option<Vec<u8>> {
+    let bytes = fs::read(path).ok()?;
+    let models = parse_models(&bytes).ok()?;
+    (!models.is_empty()).then_some(bytes)
+}
+
+fn read_fixed_catalog(path: &Path) -> Result<bool, CatalogError> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let models = parse_models(&bytes)?;
+            if models.is_empty() {
+                return Err(CatalogError::InvalidSchema("模型目录为空".to_owned()));
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(CatalogError::Read(error)),
+    }
+}
+
+fn clone_root_catalog(
+    config_path: &Path,
+    fixed_path: &Path,
+    bundled_executable: Option<&Path>,
+) -> Result<(), CatalogError> {
+    let snapshot =
+        root_snapshot(config_path, bundled_executable).ok_or(CatalogError::SourceUnavailable)?;
+    if snapshot.models.is_empty() {
+        return Err(CatalogError::SourceUnavailable);
+    }
+    let bytes = serde_json::to_vec_pretty(&snapshot.document).map_err(CatalogError::Json)?;
+    write_atomic(fixed_path, &bytes)
 }
 
 pub(crate) fn reclaim_catalog(
@@ -605,14 +713,6 @@ fn protected_root_slug(metadata: &CatalogMetadata, removed_slugs: &[String]) -> 
         .flatten()
 }
 
-fn sync_catalog_from_root(
-    fixed_path: &Path,
-    recovery_path: &Path,
-    record: OwnershipRecord,
-) -> Result<(OwnershipRecord, bool), CatalogError> {
-    sync_catalog_from_root_with_executable(fixed_path, recovery_path, record, None)
-}
-
 fn sync_catalog_from_root_with_executable(
     fixed_path: &Path,
     recovery_path: &Path,
@@ -620,7 +720,7 @@ fn sync_catalog_from_root_with_executable(
     bundled_executable: Option<&Path>,
 ) -> Result<(OwnershipRecord, bool), CatalogError> {
     let read_at = now_ms_string();
-    let Some(snapshot) = root_snapshot(&record, bundled_executable) else {
+    let Some(snapshot) = root_snapshot(&record.config_path, bundled_executable) else {
         let mut metadata = catalog_storage::read_metadata(fixed_path);
         metadata.root_available = false;
         metadata.root_unavailable_reason = Some("root_catalog_unavailable".to_owned());
@@ -823,10 +923,7 @@ struct RootSnapshot {
     binary_digest: Option<String>,
 }
 
-fn root_snapshot(
-    record: &OwnershipRecord,
-    bundled_executable: Option<&Path>,
-) -> Option<RootSnapshot> {
+fn root_snapshot(config_path: &Path, bundled_executable: Option<&Path>) -> Option<RootSnapshot> {
     let candidates = bundled_executable.map_or_else(
         || {
             vec![
@@ -840,8 +937,7 @@ fn root_snapshot(
         |executable| vec![executable],
     );
     for executable in candidates {
-        let Some(source_bytes) = bundled_catalog_bytes(executable, record.config_path.parent())
-        else {
+        let Some(source_bytes) = bundled_catalog_bytes(executable, config_path.parent()) else {
             continue;
         };
         let Ok(source_document) = serde_json::from_slice::<Value>(&source_bytes) else {
@@ -856,7 +952,7 @@ fn root_snapshot(
             .map(str::to_owned);
         return Some(RootSnapshot {
             codex_version: catalog_version,
-            cli_version: codex_version(executable, record.config_path.parent()),
+            cli_version: codex_version(executable, config_path.parent()),
             document: source_document,
             models: source_models,
             source_type: "bundled_cli".to_owned(),
@@ -1008,7 +1104,7 @@ fn bundled_catalog_bytes(executable: &Path, current_dir: Option<&Path>) -> Optio
         let mut output = Vec::new();
         stdout.read_to_end(&mut output).ok().map(|_| output)
     });
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -1660,6 +1756,24 @@ mod tests {
         (config, source)
     }
 
+    #[cfg(unix)]
+    fn bundled_executable(root: &Path, catalog: &str) -> Result<PathBuf, Box<dyn Error>> {
+        let root_catalog = root.join("root-catalog.json");
+        fs::write(&root_catalog, catalog)?;
+        let executable = root.join("codex");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s' codex-test; else cat \"{}\"; fi\n",
+                root_catalog.display()
+            ),
+        )?;
+        let mut permissions = fs::metadata(&executable)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions)?;
+        Ok(executable)
+    }
+
     #[test]
     fn external_source_is_copied_and_fixed_pointer_is_owned() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
@@ -1678,16 +1792,219 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
-    fn fixed_catalog_reuse_does_not_require_a_source_file() -> Result<(), Box<dyn Error>> {
+    fn first_launch_clones_bundled_root_catalog_into_fixed_path() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let (config, _) = fixture(root.path(), None);
+        let executable = bundled_executable(
+            root.path(),
+            r#"{"models":[{"slug":"root-alpha","display_name":"Root Alpha","visibility":"list","priority":1}]}"#,
+        )?;
+
+        let recovery = root.path().join("recovery.json");
+        let status =
+            ensure_catalog_with_executable(root.path(), &config, &recovery, Some(&executable))?;
+
+        assert_eq!(
+            status.models.first().map(|model| model.slug.as_str()),
+            Some("root-alpha")
+        );
+        assert_eq!(status.source_path, None);
+        assert_eq!(
+            read_catalog_pointer(&config)?.as_deref(),
+            Some(fixed_catalog_path(root.path()).as_path())
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(fixed_catalog_path(root.path()))?)?,
+            serde_json::json!({
+                "models": [{
+                    "slug": "root-alpha",
+                    "display_name": "Root Alpha",
+                    "visibility": "list",
+                    "priority": 1
+                }]
+            })
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixed_pointer_to_missing_catalog_falls_back_to_bundled_root() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let fixed = fixed_catalog_path(root.path());
+        let (config, _) = fixture(root.path(), Some(&fixed));
+        let executable = bundled_executable(
+            root.path(),
+            r#"{"models":[{"slug":"root-alpha","display_name":"Root Alpha","visibility":"list","priority":1}]}"#,
+        )?;
+        let recovery = root.path().join("recovery.json");
+
+        let status =
+            ensure_catalog_with_executable(root.path(), &config, &recovery, Some(&executable))?;
+
+        assert_eq!(
+            status.models.first().map(|model| model.slug.as_str()),
+            Some("root-alpha")
+        );
+        assert!(fixed.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_fixed_catalog_with_existing_recovery_is_reinitialized() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        ensure_catalog(root.path(), &config, &recovery)?;
+        let fixed = fixed_catalog_path(root.path());
+        fs::remove_file(&fixed)?;
+        let executable = bundled_executable(
+            root.path(),
+            r#"{"models":[{"slug":"root-alpha","display_name":"Root Alpha","visibility":"list","priority":1}]}"#,
+        )?;
+
+        let status =
+            ensure_catalog_with_executable(root.path(), &config, &recovery, Some(&executable))?;
+
+        assert_eq!(
+            status.models.first().map(|model| model.slug.as_str()),
+            Some("root-alpha")
+        );
+        assert!(fixed.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_sync_reinitializes_missing_fixed_catalog() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let initial = ensure_catalog(root.path(), &config, &recovery)?;
+        let fixed = fixed_catalog_path(root.path());
+        fs::remove_file(&fixed)?;
+        let executable = bundled_executable(
+            root.path(),
+            r#"{"models":[{"slug":"root-alpha","display_name":"Root Alpha","visibility":"list","priority":1}]}"#,
+        )?;
+
+        let status = sync_catalog_with_executable(
+            root.path(),
+            &config,
+            &recovery,
+            CatalogSyncOptions {
+                expected_revision: &initial.revision,
+                restart_required: false,
+                loaded: false,
+                request_verified: false,
+                bundled_executable: Some(&executable),
+            },
+        )?;
+
+        assert_eq!(
+            status.models.first().map(|model| model.slug.as_str()),
+            Some("root-alpha")
+        );
+        assert!(fixed.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixed_pointer_to_corrupt_catalog_reports_error_without_repair() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempdir()?;
+        let fixed = fixed_catalog_path(root.path());
+        let (config, _) = fixture(root.path(), Some(&fixed));
+        fs::create_dir_all(fixed.parent().expect("catalog parent"))?;
+        fs::write(&fixed, b"not-json")?;
+        let executable = bundled_executable(
+            root.path(),
+            r#"{"models":[{"slug":"root-alpha","display_name":"Root Alpha","visibility":"list","priority":1}]}"#,
+        )?;
+        let recovery = root.path().join("recovery.json");
+
+        let result =
+            ensure_catalog_with_executable(root.path(), &config, &recovery, Some(&executable));
+
+        assert!(matches!(result, Err(CatalogError::Json(_))));
+        assert_eq!(fs::read(&fixed)?, b"not-json");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_pointer_to_unavailable_catalog_falls_back_to_bundled_root()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let missing = root.path().join("missing.json");
+        let (config, _) = fixture(root.path(), Some(&missing));
+        let executable = bundled_executable(
+            root.path(),
+            r#"{"models":[{"slug":"root-alpha","display_name":"Root Alpha","visibility":"list","priority":1}]}"#,
+        )?;
+        let recovery = root.path().join("recovery.json");
+
+        let status =
+            ensure_catalog_with_executable(root.path(), &config, &recovery, Some(&executable))?;
+
+        assert_eq!(
+            status.models.first().map(|model| model.slug.as_str()),
+            Some("root-alpha")
+        );
+        assert!(fixed_catalog_path(root.path()).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn available_fixed_catalog_pointer_is_reused() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let fixed = fixed_catalog_path(root.path());
+        let (config, _) = fixture(root.path(), Some(&fixed));
+        fs::create_dir_all(fixed.parent().expect("catalog parent"))?;
+        fs::write(
+            &fixed,
+            r#"{"models":[{"slug":"fixed-alpha","display_name":"Fixed Alpha","visibility":"list","priority":1}]}"#,
+        )?;
+        let status = ensure_catalog(root.path(), &config, &root.path().join("recovery.json"))?;
+        assert_eq!(
+            status.models.first().map(|model| model.slug.as_str()),
+            Some("fixed-alpha")
+        );
+        assert!(fs::read_to_string(config)?.contains("model_catalog_json"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_fixed_catalog_is_reinitialized_from_bundled_root() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let (config, _) = fixture(root.path(), None);
         let fixed = fixed_catalog_path(root.path());
         fs::create_dir_all(fixed.parent().expect("catalog parent"))?;
         fs::write(&fixed, r#"{"models":[]}"#)?;
-        let status = ensure_catalog(root.path(), &config, &root.path().join("recovery.json"))?;
-        assert_eq!(status.models, Vec::<CatalogModel>::new());
-        assert!(fs::read_to_string(config)?.contains("model_catalog_json"));
+        let executable = bundled_executable(
+            root.path(),
+            r#"{"models":[{"slug":"root-alpha","display_name":"Root Alpha","visibility":"list","priority":1}]}"#,
+        )?;
+
+        let status = ensure_catalog_with_executable(
+            root.path(),
+            &config,
+            &root.path().join("recovery.json"),
+            Some(&executable),
+        )?;
+
+        assert_eq!(
+            status.models.first().map(|model| model.slug.as_str()),
+            Some("root-alpha")
+        );
         Ok(())
     }
 
@@ -1698,7 +2015,10 @@ mod tests {
         let config_dir = root.path().join("home/.codex");
         fs::create_dir_all(&config_dir)?;
         let source = config_dir.join("models.json");
-        fs::write(&source, r#"{"models":[]}"#)?;
+        fs::write(
+            &source,
+            r#"{"models":[{"slug":"relative-alpha","display_name":"Relative Alpha","visibility":"list","priority":1}]}"#,
+        )?;
         let config = config_dir.join("config.toml");
         fs::write(
             &config,
@@ -1713,7 +2033,10 @@ mod tests {
             status.source_path,
             Some(source.to_string_lossy().into_owned())
         );
-        assert_eq!(status.models.len(), 0);
+        assert_eq!(
+            status.models.first().map(|model| model.slug.as_str()),
+            Some("relative-alpha")
+        );
         Ok(())
     }
 
@@ -2215,7 +2538,7 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&executable, permissions)?;
 
-        assert!(root_snapshot(&record, Some(&executable)).is_none());
+        assert!(root_snapshot(&record.config_path, Some(&executable)).is_none());
         Ok(())
     }
 
