@@ -2408,8 +2408,8 @@ supports_websockets = false
         fs::write(
             &config_path,
             format!(
-                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
-                source.display()
+                "model_provider = \"custom\"\nmodel_catalog_json = {}\n",
+                toml_edit::value(source.display().to_string())
             ),
         )?;
         let runtime = AppRuntime::new(RuntimePaths {
@@ -2473,8 +2473,8 @@ supports_websockets = false
         fs::write(
             &config_path,
             format!(
-                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
-                source.display()
+                "model_provider = \"custom\"\nmodel_catalog_json = {}\n",
+                toml_edit::value(source.display().to_string())
             ),
         )?;
         let runtime = AppRuntime::new(RuntimePaths {
@@ -2531,8 +2531,8 @@ supports_websockets = false
         fs::write(
             &config_path,
             format!(
-                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
-                source.display()
+                "model_provider = \"custom\"\nmodel_catalog_json = {}\n",
+                toml_edit::value(source.display().to_string())
             ),
         )?;
         let runtime = AppRuntime::new(RuntimePaths {
@@ -2602,8 +2602,8 @@ supports_websockets = false
         fs::write(
             &config_path,
             format!(
-                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
-                source.display()
+                "model_provider = \"custom\"\nmodel_catalog_json = {}\n",
+                toml_edit::value(source.display().to_string())
             ),
         )?;
         let runtime = AppRuntime::new(RuntimePaths {
