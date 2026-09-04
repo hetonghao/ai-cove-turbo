@@ -217,10 +217,12 @@ impl Fixture {
         let wait = async {
             loop {
                 let changed = self.state.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
                 if self.ready_for_scope_count(&scope).await >= expected {
                     return;
                 }
-                changed.await;
+                changed.as_mut().await;
             }
         };
         tokio::time::timeout(Duration::from_secs(10), wait)
@@ -313,6 +315,8 @@ impl Fixture {
         let wait = async {
             loop {
                 let changed = self.state.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
                 let current = {
                     let counts = self.state.counts.lock().await;
                     match kind {
@@ -328,7 +332,7 @@ impl Fixture {
                 if current >= expected {
                     return;
                 }
-                changed.await;
+                changed.as_mut().await;
             }
         };
         tokio::time::timeout(timeout, wait)
