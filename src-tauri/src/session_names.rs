@@ -203,6 +203,7 @@ impl SessionNameCache {
                         name: Some(name.clone()),
                         parent_name: None,
                         is_subagent: false,
+                        model: None,
                     })
                 });
                 let info = info.map(|mut info| {

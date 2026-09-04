@@ -13,6 +13,7 @@ pub(crate) struct CodexThreadInfo {
     pub(crate) name: Option<String>,
     pub(crate) parent_name: Option<String>,
     pub(crate) is_subagent: bool,
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -20,6 +21,8 @@ struct CliThreadInfo {
     name: Option<String>,
     parent_name: Option<String>,
     is_subagent: i64,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,7 +72,8 @@ SELECT
             THEN NULLIF(parent.name, '')
         ELSE NULL
     END AS parent_name,
-    CASE WHEN child.thread_source = 'subagent' THEN 1 ELSE 0 END AS is_subagent
+    CASE WHEN child.thread_source = 'subagent' THEN 1 ELSE 0 END AS is_subagent,
+    NULLIF(child.model, '') AS model
 FROM threads AS child
 LEFT JOIN thread_spawn_edges AS edge ON edge.child_thread_id = child.id
 LEFT JOIN threads AS parent ON parent.id = edge.parent_thread_id
@@ -97,6 +101,7 @@ LIMIT 1;
         name: row.name,
         parent_name: row.parent_name,
         is_subagent: row.is_subagent != 0,
+        model: row.model,
     })
 }
 
@@ -136,7 +141,8 @@ SELECT
             THEN NULLIF(parent.name, '')
         ELSE NULL
     END AS parent_name,
-    CASE WHEN child.thread_source = 'subagent' THEN 1 ELSE 0 END AS is_subagent
+    CASE WHEN child.thread_source = 'subagent' THEN 1 ELSE 0 END AS is_subagent,
+    NULLIF(child.model, '') AS model
 FROM threads AS child
 LEFT JOIN thread_spawn_edges AS edge ON edge.child_thread_id = child.id
 LEFT JOIN threads AS parent ON parent.id = edge.parent_thread_id
@@ -165,6 +171,7 @@ WHERE child.id IN ({ids});
                 name: row.name,
                 parent_name: row.parent_name,
                 is_subagent: row.is_subagent != 0,
+                model: row.model,
             },
         })
         .collect())
@@ -176,6 +183,8 @@ struct CliBatchThreadInfo {
     name: Option<String>,
     parent_name: Option<String>,
     is_subagent: i64,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 pub(crate) async fn read_batch(

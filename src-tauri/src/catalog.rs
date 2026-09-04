@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -96,10 +97,10 @@ pub(crate) fn preview_catalog_models(
     if digest(&bytes) != expected_revision {
         return Err(CatalogError::ContentChanged);
     }
-    if let Some(slug) = protected_root_slug(&_record, removed_slugs) {
+    let previous_metadata = catalog_storage::read_metadata(&fixed_path);
+    if let Some(slug) = protected_root_slug(&previous_metadata, removed_slugs) {
         return Err(CatalogError::ProtectedModel(slug));
     }
-    let previous_metadata = catalog_storage::read_metadata(&fixed_path);
     let (next_bytes, metadata) =
         prepare_catalog_models(&bytes, &previous_metadata, models, removed_slugs)?;
     Ok((digest(&next_bytes), metadata))
@@ -370,10 +371,10 @@ pub(crate) fn save_catalog_models_with_removals(
     if digest(&bytes) != expected_revision {
         return Err(CatalogError::ContentChanged);
     }
-    if let Some(slug) = protected_root_slug(&record, removed_slugs) {
+    let previous_metadata = catalog_storage::read_metadata(&fixed_path);
+    if let Some(slug) = protected_root_slug(&previous_metadata, removed_slugs) {
         return Err(CatalogError::ProtectedModel(slug));
     }
-    let previous_metadata = catalog_storage::read_metadata(&fixed_path);
     let (next_bytes, metadata) =
         prepare_catalog_models(&bytes, &previous_metadata, models, removed_slugs)?;
     write_atomic(&fixed_path, &next_bytes)?;
@@ -588,33 +589,20 @@ fn remove_catalog_entries(entries: &mut Vec<Value>, removed_slugs: &[String]) {
     });
 }
 
-fn protected_root_slug(record: &OwnershipRecord, removed_slugs: &[String]) -> Option<String> {
-    let root_slugs = record
-        .source_path
-        .as_ref()
-        .and_then(|path| fs::read(path).ok())
-        .and_then(|bytes| parse_models(&bytes).ok())
-        .map(|models| {
-            models
-                .into_iter()
-                .map(|model| model.slug)
-                .collect::<Vec<_>>()
+fn protected_root_slug(metadata: &CatalogMetadata, removed_slugs: &[String]) -> Option<String> {
+    (metadata.root_available && metadata.root_source_type.as_deref() == Some("bundled_cli"))
+        .then(|| {
+            removed_slugs
+                .iter()
+                .find(|slug| {
+                    metadata
+                        .root_seen_slugs
+                        .iter()
+                        .any(|root_slug| root_slug == *slug)
+                })
+                .cloned()
         })
-        .unwrap_or_else(|| {
-            if record.root_slugs.is_empty() {
-                record
-                    .baseline_models
-                    .iter()
-                    .map(|model| model.slug.clone())
-                    .collect()
-            } else {
-                record.root_slugs.clone()
-            }
-        });
-    removed_slugs
-        .iter()
-        .find(|slug| root_slugs.iter().any(|root_slug| root_slug == *slug))
-        .cloned()
+        .flatten()
 }
 
 fn sync_catalog_from_root(
@@ -654,6 +642,27 @@ fn sync_catalog_from_root_with_executable(
     metadata.root_codex_version = snapshot.codex_version.clone();
     metadata.root_client_version = snapshot.cli_version.clone();
     metadata.root_binary_digest = snapshot.binary_digest;
+    if metadata.root_source_type.as_deref() == Some("bundled_cli") {
+        let previous_root_slugs = if metadata_before.root_available
+            && metadata_before.root_source_type.as_deref() == Some("bundled_cli")
+        {
+            metadata_before.root_seen_slugs.clone()
+        } else {
+            Vec::new()
+        };
+        let current_root_slugs = source_models
+            .iter()
+            .map(|model| model.slug.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let mut removed_slugs = metadata_before.root_removed_slugs.clone();
+        for slug in previous_root_slugs {
+            if !current_root_slugs.contains(slug.as_str()) && !removed_slugs.contains(&slug) {
+                removed_slugs.push(slug);
+            }
+        }
+        removed_slugs.retain(|slug| !current_root_slugs.contains(slug.as_str()));
+        metadata.root_removed_slugs = removed_slugs;
+    }
     let root_metadata_stable = metadata_before.root_available
         && metadata_before.root_unavailable_reason.is_none()
         && metadata_before.root_unavailable_at.is_none()
@@ -818,33 +827,17 @@ fn root_snapshot(
     record: &OwnershipRecord,
     bundled_executable: Option<&Path>,
 ) -> Option<RootSnapshot> {
-    if let Some(source_path) = record.source_path.as_ref() {
-        if let Ok(source_bytes) = fs::read(source_path) {
-            if let (Ok(source_document), Ok(source_models)) = (
-                serde_json::from_slice::<Value>(&source_bytes),
-                parse_models(&source_bytes),
-            ) {
-                return Some(RootSnapshot {
-                    codex_version: source_document
-                        .get("version")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    cli_version: None,
-                    document: source_document,
-                    models: source_models,
-                    source_type: "file".to_owned(),
-                    binary_digest: None,
-                });
-            }
-        }
-    }
-    let candidates = bundled_executable.into_iter().chain(
-        [
-            Path::new("codex"),
-            Path::new("/opt/homebrew/bin/codex"),
-            Path::new("/usr/local/bin/codex"),
-        ]
-        .into_iter(),
+    let candidates = bundled_executable.map_or_else(
+        || {
+            vec![
+                Path::new("codex"),
+                Path::new("/opt/homebrew/bin/codex"),
+                Path::new("/usr/local/bin/codex"),
+                Path::new("/Applications/ChatGPT.app/Contents/Resources/codex"),
+                Path::new("/Applications/Codex.app/Contents/Resources/codex"),
+            ]
+        },
+        |executable| vec![executable],
     );
     for executable in candidates {
         let Some(source_bytes) = bundled_catalog_bytes(executable, record.config_path.parent())
@@ -1010,24 +1003,35 @@ fn bundled_catalog_bytes(executable: &Path, current_dir: Option<&Path>) -> Optio
         command.current_dir(current_dir);
     }
     let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).ok().map(|_| output)
+    });
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) => return None,
+            Ok(Some(status)) => {
+                return status
+                    .success()
+                    .then(|| reader.join().ok().flatten())
+                    .flatten();
+            }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = reader.join();
                 return None;
             }
-            Err(_) => return None,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return None;
+            }
         }
     }
-    child
-        .wait_with_output()
-        .ok()
-        .and_then(|output| output.status.success().then_some(output.stdout))
 }
 
 fn merge_root_models(
@@ -1296,6 +1300,9 @@ fn remove_catalog_metadata(metadata: &mut CatalogMetadata, removed_slugs: &[Stri
         metadata.conflicts.remove(slug);
         metadata.root_field_digests.remove(slug);
         metadata.user_overrides.remove(slug);
+        metadata
+            .root_removed_slugs
+            .retain(|removed| removed != slug);
     }
 }
 
@@ -1693,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_template_cannot_be_deleted() -> Result<(), Box<dyn Error>> {
+    fn legacy_source_model_is_not_protected_without_bundled_root() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let source = root.path().join("source.json");
         let (config, _) = fixture(root.path(), Some(&source));
@@ -1709,13 +1716,13 @@ mod tests {
             &["gpt-5.6-sol".to_owned()],
         );
 
-        assert!(matches!(result, Err(CatalogError::ProtectedModel(slug)) if slug == "gpt-5.6-sol"));
-        assert!(fs::read_to_string(fixed_catalog_path(root.path()))?.contains("gpt-5.6-sol"));
+        assert!(result.is_ok());
+        assert!(!fs::read_to_string(fixed_catalog_path(root.path()))?.contains("gpt-5.6-sol"));
         Ok(())
     }
 
     #[test]
-    fn every_current_root_model_is_protected_from_deletion() -> Result<(), Box<dyn Error>> {
+    fn legacy_source_models_are_not_treated_as_codex_presets() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let source = root.path().join("source.json");
         let (config, _) = fixture(root.path(), Some(&source));
@@ -1731,12 +1738,13 @@ mod tests {
             &["alpha".to_owned()],
         );
 
-        assert!(matches!(result, Err(CatalogError::ProtectedModel(slug)) if slug == "alpha"));
+        assert!(result.is_ok());
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
-    fn catalog_status_marks_root_and_added_models() -> Result<(), Box<dyn Error>> {
+    fn catalog_status_does_not_treat_legacy_source_as_codex_root() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let source = root.path().join("source.json");
         let (config, _) = fixture(root.path(), Some(&source));
@@ -1760,26 +1768,189 @@ mod tests {
             .iter()
             .find(|model| model.slug == "gamma")
             .ok_or("gamma missing")?;
-        assert!(alpha.root_presence);
+        assert!(!alpha.root_presence);
         assert!(!alpha.root_missing);
         assert!(!gamma.root_presence);
-        assert!(gamma.root_missing);
+        assert!(!gamma.root_missing);
 
-        fs::write(
-            &source,
-            r#"{"models":[{"slug":"beta","display_name":"Beta","visibility":"hide","priority":1},{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","priority":0}]}"#,
-        )?;
-        let refreshed = read_catalog(root.path(), &config, &recovery, true, false, false)?;
-        let alpha = refreshed
-            .models
-            .iter()
-            .find(|model| model.slug == "alpha")
-            .ok_or("alpha missing after source refresh")?;
-        assert!(!alpha.root_presence);
-        assert!(alpha.root_missing);
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn bundled_root_marks_only_previously_seen_model_as_removed() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let initial = ensure_catalog(root.path(), &config, &recovery)?;
+        save_catalog_models(
+            root.path(),
+            &config,
+            &recovery,
+            &[
+                complete_model("gemini-3.8-flash"),
+                complete_model("grok-4.6"),
+            ],
+            &initial.revision,
+        )?;
+        let bundled_v1 = root.path().join("bundled-v1.json");
+        fs::write(
+            &bundled_v1,
+            br#"{"models":[{"slug":"grok-4.6","display_name":"grok-4.6","description":"Codex root","visibility":"list","priority":4,"truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true}]}"#,
+        )?;
+        let executable = root.path().join("codex-v1");
+        fs::write(
+            &executable,
+            format!("#!/bin/sh\ncat \"{}\"\n", bundled_v1.display()),
+        )?;
+        let mut permissions = fs::metadata(&executable)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions)?;
+
+        let (record, _) = sync_catalog_from_root_with_executable(
+            &fixed_catalog_path(root.path()),
+            &recovery,
+            read_record(&recovery)?.ok_or("recovery missing")?,
+            Some(&executable),
+        )?;
+        assert_eq!(
+            catalog_storage::read_metadata(&fixed_catalog_path(root.path())).root_seen_slugs,
+            vec!["grok-4.6".to_owned()]
+        );
+        let status_after_first_root = status_from_file(
+            &fixed_catalog_path(root.path()),
+            &record,
+            true,
+            false,
+            false,
+        )?;
+        let grok_after_first_root = status_after_first_root
+            .models
+            .iter()
+            .find(|model| model.slug == "grok-4.6")
+            .ok_or("grok missing")?;
+        assert!(grok_after_first_root.root_presence);
+        assert!(!grok_after_first_root.root_missing);
+        assert!(matches!(
+            save_catalog_models_with_removals(
+                root.path(),
+                &config,
+                &recovery,
+                &[],
+                &status_after_first_root.revision,
+                &["grok-4.6".to_owned()],
+            ),
+            Err(CatalogError::ProtectedModel(slug)) if slug == "grok-4.6"
+        ));
+        let bundled_v2 = root.path().join("bundled-v2.json");
+        fs::write(
+            &bundled_v2,
+            br#"{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","description":"Codex root","visibility":"list","priority":1,"truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true}]}"#,
+        )?;
+        fs::write(
+            &executable,
+            format!("#!/bin/sh\ncat \"{}\"\n", bundled_v2.display()),
+        )?;
+        let (record, _) = sync_catalog_from_root_with_executable(
+            &fixed_catalog_path(root.path()),
+            &recovery,
+            record,
+            Some(&executable),
+        )?;
+        let status = status_from_file(
+            &fixed_catalog_path(root.path()),
+            &record,
+            true,
+            false,
+            false,
+        )?;
+        let gemini = status
+            .models
+            .iter()
+            .find(|model| model.slug == "gemini-3.8-flash")
+            .ok_or("gemini missing")?;
+        let grok = status
+            .models
+            .iter()
+            .find(|model| model.slug == "grok-4.6")
+            .ok_or("grok missing")?;
+        assert!(!gemini.root_presence);
+        assert!(!gemini.root_missing);
+        assert!(!grok.root_presence);
+        assert!(grok.root_missing, "metadata={:?}", status.metadata);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_bundled_root_does_not_protect_stale_model() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let initial = ensure_catalog(root.path(), &config, &recovery)?;
+        save_catalog_models(
+            root.path(),
+            &config,
+            &recovery,
+            &[complete_model("grok-4.6")],
+            &initial.revision,
+        )?;
+        fs::remove_file(&source)?;
+
+        let executable = root.path().join("codex-valid");
+        fs::write(&executable, "#!/bin/sh\nprintf '%s' '{\"models\":[]}'\n")?;
+        let mut permissions = fs::metadata(&executable)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions)?;
+        let (record, _) = sync_catalog_from_root_with_executable(
+            &fixed_catalog_path(root.path()),
+            &recovery,
+            read_record(&recovery)?.ok_or("recovery missing")?,
+            Some(&executable),
+        )?;
+
+        let invalid = root.path().join("codex-invalid");
+        fs::write(&invalid, "#!/bin/sh\nprintf '%s' invalid\n")?;
+        let mut permissions = fs::metadata(&invalid)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&invalid, permissions)?;
+        let (record, _) = sync_catalog_from_root_with_executable(
+            &fixed_catalog_path(root.path()),
+            &recovery,
+            record,
+            Some(&invalid),
+        )?;
+        let status = status_from_file(
+            &fixed_catalog_path(root.path()),
+            &record,
+            false,
+            false,
+            false,
+        )?;
+        let grok = status
+            .models
+            .iter()
+            .find(|model| model.slug == "grok-4.6")
+            .ok_or("grok missing")?;
+        assert!(!grok.root_presence);
+        assert!(!grok.root_missing);
+        assert!(
+            save_catalog_models_with_removals(
+                root.path(),
+                &config,
+                &recovery,
+                &[],
+                &status.revision,
+                &["grok-4.6".to_owned()],
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
     #[test]
     fn root_sync_adopts_untouched_fields_and_preserves_user_overrides() -> Result<(), Box<dyn Error>>
     {
@@ -1806,7 +1977,27 @@ mod tests {
         let root_bytes = serde_json::to_vec_pretty(&root_document)?;
         fs::write(&source, &root_bytes)?;
 
-        let synced = ensure_catalog(root.path(), &config, &recovery)?;
+        let bundled = root.path().join("codex-bundled");
+        fs::write(
+            &bundled,
+            format!("#!/bin/sh\ncat \"{}\"\n", source.display()),
+        )?;
+        let mut permissions = fs::metadata(&bundled)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&bundled, permissions)?;
+        let (record, _) = sync_catalog_from_root_with_executable(
+            &fixed_catalog_path(root.path()),
+            &recovery,
+            read_record(&recovery)?.ok_or("recovery missing")?,
+            Some(&bundled),
+        )?;
+        let synced = status_from_file(
+            &fixed_catalog_path(root.path()),
+            &record,
+            true,
+            false,
+            false,
+        )?;
         let synced_alpha = synced
             .models
             .iter()
@@ -1857,6 +2048,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_sync_keeps_incomplete_added_model_pending() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
@@ -1881,7 +2073,27 @@ mod tests {
             }));
         fs::write(&source, serde_json::to_vec_pretty(&root_document)?)?;
 
-        let refreshed = ensure_catalog(root.path(), &config, &recovery)?;
+        let bundled = root.path().join("codex-bundled");
+        fs::write(
+            &bundled,
+            format!("#!/bin/sh\ncat \"{}\"\n", source.display()),
+        )?;
+        let mut permissions = fs::metadata(&bundled)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&bundled, permissions)?;
+        let (record, _) = sync_catalog_from_root_with_executable(
+            &fixed_catalog_path(root.path()),
+            &recovery,
+            read_record(&recovery)?.ok_or("recovery missing")?,
+            Some(&bundled),
+        )?;
+        let refreshed = status_from_file(
+            &fixed_catalog_path(root.path()),
+            &record,
+            true,
+            false,
+            false,
+        )?;
         let pending = refreshed
             .models
             .iter()
@@ -1986,6 +2198,24 @@ mod tests {
         fs::set_permissions(&executable, permissions)?;
 
         assert!(root_snapshot(&record, Some(&executable)).is_none());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_catalog_drains_large_stdout_before_waiting_for_exit() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let executable = root.path().join("codex-large-output");
+        fs::write(
+            &executable,
+            "#!/bin/sh\ndd if=/dev/zero bs=1024 count=128 2>/dev/null\n",
+        )?;
+        let mut permissions = fs::metadata(&executable)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions)?;
+
+        let output = bundled_catalog_bytes(&executable, None).ok_or("large output failed")?;
+        assert_eq!(output.len(), 131_072);
         Ok(())
     }
 

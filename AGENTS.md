@@ -1,5 +1,12 @@
 # Turbo Agent 工作规范
 
+## 运行中 Turbo 保护
+
+开发、调试和验证期间，现有 Turbo 进程是保护对象，优先使用只读检查、单元测试、静态检查和隔离构建完成验证。
+
+- 新 Turbo 实例只有在已确认配置、端口和数据目录完全隔离，且不会读取、覆盖或接管现有实例资源时才能启动。
+- 保持正在运行的 Turbo 进程持续运行；不执行会影响它们的启动、退出、终止、重启或批量进程操作。
+
 ## Rust/Tauri 调试产物
 
 本节适用于会生成 `src-tauri/target` 的 `cargo check`、`cargo test`、`cargo clippy`、benchmark、`tauri dev` 及相关验证任务。

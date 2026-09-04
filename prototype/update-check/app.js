@@ -12,6 +12,9 @@
   let checkTimer = 0;
   let installTimer = 0;
   let progressTimer = 0;
+  let renderedUpdateState = null;
+  let updateTiltFromPointer = () => {};
+  let resetTilt = () => {};
   const $ = (selector) => document.querySelector(selector);
   const all = (selector) => Array.from(document.querySelectorAll(selector));
   const dayKey = () => {
@@ -46,6 +49,9 @@
     all("[data-card-state]").forEach((target) => { target.textContent = updateState === "available" ? "发现新版本" : message; });
     all("[data-card-message]").forEach((target) => { target.textContent = message; });
     all("[data-update-card]").forEach((card) => { card.hidden = !bubble; });
+    all("[data-tilt-card]").forEach((card) => { card.hidden = !bubble; });
+    if (bubble) window.requestAnimationFrame(updateTiltFromPointer);
+    else resetTilt();
   }
 
   function openTurbo() {
@@ -84,8 +90,7 @@
     if (state.updateState !== "available") return;
     clearTimeout(installTimer);
     clearInterval(progressTimer);
-    state.bubbleOpen = false;
-    state.updateState = "redirecting";
+    setStatus("redirecting", "正在进入更新页", false);
     state.autoClickStatus = "正在进入更新页";
     state.updateProgress = 0;
     addActivity("选择立即更新，跳转到现有更新页");
@@ -120,6 +125,14 @@
     openTurbo();
   }
 
+  function simulateCurrent() {
+    state.currentVersion = latestVersion;
+    state.lastCheckDay = null;
+    state.ignoredDay = null;
+    addActivity("模拟检查结果：Turbo 已是最新");
+    openTurbo();
+  }
+
   function reset() {
     clearTimeout(checkTimer);
     clearTimeout(installTimer);
@@ -138,6 +151,19 @@
     document.body.dataset.bubbleOpen = String(state.bubbleOpen);
     $("[data-hero-status]").textContent = state.updateState === "available" ? `v${latestVersion} 可更新` : stateLabel;
     $("[data-status-dot]").dataset.state = state.updateState;
+    const currentMark = $("[data-current-mark]");
+    const isCurrent = state.updateState === "current";
+    const enteredCurrent = isCurrent && renderedUpdateState !== "current";
+    if (currentMark) {
+      currentMark.hidden = !isCurrent;
+      if (!isCurrent) currentMark.classList.remove("is-entering");
+      else if (enteredCurrent) {
+        currentMark.classList.remove("is-entering");
+        void currentMark.offsetWidth;
+        currentMark.classList.add("is-entering");
+      }
+    }
+    renderedUpdateState = state.updateState;
     $("[data-route-label]").textContent = state.route === "update-page" ? "已跳转到现有更新页" : "已返回现有配置页";
     $("[data-auto-click-status]").textContent = state.autoClickStatus;
     $("[data-install-status]").textContent = state.updateState === "installing" ? "现有安装流程进行中" : state.updateState === "updated" ? "现有流程完成" : "准备交给现有流程";
@@ -159,17 +185,28 @@
     if (action === "reset") reset();
     if (action === "day-today") switchDay(0);
     if (action === "day-tomorrow") switchDay(1);
+    if (action === "simulate-current") simulateCurrent();
   }
 
   function bindTiltedCard() {
-    const card = $("[data-tilt-card]");
+    const shell = $("[data-tilt-card]");
+    const card = shell?.querySelector("[data-update-card]");
     const glare = $("[data-tilt-glare]");
-    if (!card || !glare) return;
+    const tailHighlight = card?.querySelector(".bubble-tail-highlight");
+    const tailGradient = card?.querySelector("#tail-glare-gradient");
+    if (!shell || !card || !glare || !tailHighlight || !tailGradient) return;
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const target = { x: 0, y: 0, scale: 1, glareX: 50, glareY: 50 };
+    const target = { x: 0, y: 0, scale: 1, glareX: 50, glareY: 50, tailX: 12, tailY: 8 };
     const current = { ...target };
     let frame = 0;
     let active = false;
+    let lastPointer = null;
+    const hitRegion = card.closest(".bubble-variant--brand") || card.parentElement;
+    const isInsideHitRegion = (clientX, clientY) => {
+      if (!hitRegion || hitRegion.getBoundingClientRect().width === 0) return false;
+      const rect = hitRegion.getBoundingClientRect();
+      return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top - 16 && clientY <= rect.bottom;
+    };
     const tick = () => {
       frame = 0;
       current.x += (target.x - current.x) * 0.16;
@@ -177,28 +214,50 @@
       current.scale += (target.scale - current.scale) * 0.16;
       current.glareX += (target.glareX - current.glareX) * 0.16;
       current.glareY += (target.glareY - current.glareY) * 0.16;
+      current.tailX += (target.tailX - current.tailX) * 0.16;
+      current.tailY += (target.tailY - current.tailY) * 0.16;
       if (!reducedMotion.matches) {
         card.style.transform = `perspective(800px) rotateX(${current.y}deg) rotateY(${current.x}deg) scale(${current.scale})`;
         card.style.setProperty("--tilt-glare-x", `${current.glareX}%`);
         card.style.setProperty("--tilt-glare-y", `${current.glareY}%`);
+        card.style.setProperty("--tilt-tail-glare-opacity", active ? "1" : "0");
+        tailGradient.setAttribute("cx", String(current.tailX));
+        tailGradient.setAttribute("cy", String(current.tailY));
         glare.style.opacity = active ? "1" : "0";
       }
       if (active || Math.abs(target.x - current.x) > 0.05 || Math.abs(target.y - current.y) > 0.05 || Math.abs(target.scale - current.scale) > 0.001) frame = window.requestAnimationFrame(tick);
     };
     const schedule = () => { if (!frame) frame = window.requestAnimationFrame(tick); };
-    card.addEventListener("pointerenter", (event) => { if (event.pointerType === "touch" || reducedMotion.matches) return; active = true; target.scale = 1.025; schedule(); });
-    card.addEventListener("pointermove", (event) => {
-      if (event.pointerType === "touch" || reducedMotion.matches) return;
-      const rect = card.getBoundingClientRect();
-      const x = (event.clientX - rect.left) / rect.width;
-      const y = (event.clientY - rect.top) / rect.height;
+    const applyPointer = (clientX, clientY) => {
+      if (shell.hidden || card.hidden || reducedMotion.matches || !hitRegion) return;
+      const rect = hitRegion.getBoundingClientRect();
+      const x = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const y = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+      active = true;
+      target.scale = 1.025;
       target.x = (x - 0.5) * 14;
       target.y = (0.5 - y) * 14;
       target.glareX = x * 100;
       target.glareY = y * 100;
+      const tailRect = card.querySelector(".bubble-tail").getBoundingClientRect();
+      target.tailX = ((clientX - tailRect.left) / tailRect.width) * 24;
+      target.tailY = ((clientY - tailRect.top) / tailRect.height) * 16;
       schedule();
-    });
-    card.addEventListener("pointerleave", () => { active = false; target.x = 0; target.y = 0; target.scale = 1; target.glareX = 50; target.glareY = 50; schedule(); });
+    };
+    updateTiltFromPointer = () => {
+      if (lastPointer && isInsideHitRegion(lastPointer.x, lastPointer.y)) applyPointer(lastPointer.x, lastPointer.y);
+      else resetTilt();
+    };
+    resetTilt = () => { active = false; target.x = 0; target.y = 0; target.scale = 1; target.glareX = 50; target.glareY = 50; target.tailX = 12; target.tailY = 8; card.style.setProperty("--tilt-tail-glare-opacity", "0"); tailGradient.setAttribute("cx", "12"); tailGradient.setAttribute("cy", "8"); glare.style.opacity = "0"; schedule(); };
+    card.addEventListener("pointerenter", (event) => { if (event.pointerType === "touch" || reducedMotion.matches) return; lastPointer = { x: event.clientX, y: event.clientY }; applyPointer(event.clientX, event.clientY); });
+    const handlePointerMove = (event) => {
+      if (event.pointerType === "touch" || reducedMotion.matches) return;
+      lastPointer = { x: event.clientX, y: event.clientY };
+      if (isInsideHitRegion(event.clientX, event.clientY)) applyPointer(event.clientX, event.clientY);
+      else resetTilt();
+    };
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("mousemove", handlePointerMove);
     reducedMotion.addEventListener?.("change", () => { if (reducedMotion.matches) { active = false; card.style.transform = "none"; glare.style.opacity = "0"; } });
   }
 

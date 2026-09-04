@@ -24,7 +24,7 @@ fn reads_subagent_name_and_parent_through_the_read_only_cli() -> io::Result<()> 
     fs::write(
         &cli,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nhas_timeout=0\nfor arg in \"$@\"; do [ \"$arg\" = \".timeout 1500\" ] && has_timeout=1; done\nif [ \"$has_timeout\" -eq 0 ]; then printf '%s\\n' '[{{\"timeout\":1500}}]'; fi\nprintf '%s\\n' '[{{\"name\":\"Nash\",\"parent_name\":\"Turbo 主会话\",\"is_subagent\":1}}]'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nhas_timeout=0\nfor arg in \"$@\"; do [ \"$arg\" = \".timeout 1500\" ] && has_timeout=1; done\nif [ \"$has_timeout\" -eq 0 ]; then printf '%s\\n' '[{{\"timeout\":1500}}]'; fi\nprintf '%s\\n' '[{{\"name\":\"Nash\",\"parent_name\":\"Turbo 主会话\",\"is_subagent\":1,\"model\":\"gpt-5.3-codex\"}}]'\n",
             arguments.display()
         ),
     )?;
@@ -42,6 +42,7 @@ fn reads_subagent_name_and_parent_through_the_read_only_cli() -> io::Result<()> 
     assert_eq!(info.name.as_deref(), Some("Nash"));
     assert_eq!(info.parent_name.as_deref(), Some("Turbo 主会话"));
     assert!(info.is_subagent);
+    assert_eq!(info.model.as_deref(), Some("gpt-5.3-codex"));
     let recorded = fs::read_to_string(arguments)?;
     assert!(recorded.contains("-readonly"));
     assert!(recorded.contains("-json"));
@@ -61,7 +62,7 @@ fn reads_multiple_thread_names_in_one_read_only_batch() -> io::Result<()> {
     let cli = root.path().join("sqlite3");
     fs::write(
         &cli,
-        "#!/bin/sh\nhas_timeout=0\nfor arg in \"$@\"; do [ \"$arg\" = \".timeout 1500\" ] && has_timeout=1; done\nif [ \"$has_timeout\" -eq 0 ]; then printf '%s\\n' '[{\"timeout\":1500}]'; fi\nprintf '%s\\n' '[{\"thread_id\":\"019fc8b1-a38c-7e70-9169-d6d76a7fcedc\",\"name\":\"代码审查\",\"parent_name\":null,\"is_subagent\":0}]'\n",
+        "#!/bin/sh\nhas_timeout=0\nfor arg in \"$@\"; do [ \"$arg\" = \".timeout 1500\" ] && has_timeout=1; done\nif [ \"$has_timeout\" -eq 0 ]; then printf '%s\\n' '[{\"timeout\":1500}]'; fi\nprintf '%s\\n' '[{\"thread_id\":\"019fc8b1-a38c-7e70-9169-d6d76a7fcedc\",\"name\":\"代码审查\",\"parent_name\":null,\"is_subagent\":0,\"model\":\"gpt-5.3-codex\"}]'\n",
     )?;
     let mut permissions = fs::metadata(&cli)?.permissions();
     permissions.set_mode(0o755);
@@ -85,6 +86,7 @@ fn reads_multiple_thread_names_in_one_read_only_batch() -> io::Result<()> {
         .ok_or_else(|| io::Error::other("test ids are empty"))?;
     assert_eq!(row.thread_id, *first_id);
     assert_eq!(row.info.name.as_deref(), Some("代码审查"));
+    assert_eq!(row.info.model.as_deref(), Some("gpt-5.3-codex"));
     Ok(())
 }
 

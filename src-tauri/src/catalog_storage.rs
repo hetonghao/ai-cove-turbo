@@ -25,12 +25,20 @@ pub(super) fn status_from_file(
     let bytes = fs::read(fixed_path).map_err(CatalogError::Read)?;
     let document: Value = serde_json::from_slice(&bytes).map_err(CatalogError::Json)?;
     let metadata = read_metadata(fixed_path);
-    let root_slugs = root_slugs(record);
+    let root_slugs = root_slugs(&metadata);
     let models = parse_models(&bytes)?
         .into_iter()
         .map(|mut model| {
-            model.root_presence = root_slugs.contains(&model.slug);
-            model.root_missing = !model.root_presence;
+            model.root_presence = root_slugs
+                .as_ref()
+                .is_some_and(|slugs| slugs.contains(&model.slug));
+            model.root_missing = root_slugs.as_ref().is_some_and(|slugs| {
+                !slugs.contains(&model.slug)
+                    && metadata
+                        .root_removed_slugs
+                        .iter()
+                        .any(|slug| slug == &model.slug)
+            });
             if let Some(sources) = metadata.field_sources.get(&model.slug) {
                 model.field_sources.clone_from(sources);
             }
@@ -62,24 +70,9 @@ pub(super) fn status_from_file(
     })
 }
 
-fn root_slugs(record: &OwnershipRecord) -> HashSet<String> {
-    record
-        .source_path
-        .as_ref()
-        .and_then(|path| fs::read(path).ok())
-        .and_then(|bytes| parse_models(&bytes).ok())
-        .map(|models| models.into_iter().map(|model| model.slug).collect())
-        .unwrap_or_else(|| {
-            if record.root_slugs.is_empty() {
-                record
-                    .baseline_models
-                    .iter()
-                    .map(|model| model.slug.clone())
-                    .collect()
-            } else {
-                record.root_slugs.iter().cloned().collect()
-            }
-        })
+fn root_slugs(metadata: &CatalogMetadata) -> Option<HashSet<String>> {
+    (metadata.root_available && metadata.root_source_type.as_deref() == Some("bundled_cli"))
+        .then(|| metadata.root_seen_slugs.iter().cloned().collect())
 }
 
 pub(super) fn parse_models(bytes: &[u8]) -> Result<Vec<CatalogModel>, CatalogError> {

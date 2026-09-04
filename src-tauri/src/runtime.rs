@@ -1229,6 +1229,7 @@ impl AppRuntime {
                 .collect(),
             root_source_digest: None,
             root_seen_slugs: Vec::new(),
+            root_removed_slugs: Vec::new(),
             root_available: false,
             root_unavailable_reason: None,
             root_unavailable_at: None,

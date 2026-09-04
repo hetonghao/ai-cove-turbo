@@ -86,6 +86,7 @@ async fn connection_cleanup_stops_refresh_but_keeps_recent_request_name() {
         name: Some("历史会话".to_owned()),
         parent_name: None,
         is_subagent: false,
+        model: Some("gpt-5.3-codex".to_owned()),
     });
     state.entries.insert(thread_id.clone(), entry);
     drop(state);
@@ -139,6 +140,7 @@ async fn snapshot_uses_temporary_name_until_codex_name_arrives() {
             name: Some("正式会话名".to_owned()),
             parent_name: None,
             is_subagent: false,
+            model: None,
         });
     drop(state);
 

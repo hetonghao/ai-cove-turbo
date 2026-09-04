@@ -278,7 +278,7 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(configPanel, /data-config-view-panel="settings"/);
   assert.match(configPanel, /data-config-view-panel="catalog"[^>]*hidden/);
   assert.match(configPanel, /data-model-catalog-list/);
-  assert.match(configPanel, /data-model-catalog-root-meta/);
+  assert.doesNotMatch(configPanel, /data-model-catalog-root-meta/);
   assert.match(configPanel, /b-model-catalog b-model-catalog--wide/);
   assert.doesNotMatch(globalSettings, /data-model-catalog-list/);
   assert.match(configPanel, /data-model-catalog-info/);
@@ -308,10 +308,10 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(app, /data-model-visibility-toggle/);
   assert.match(app, /data-model-drag-handle/);
   assert.match(app, /b-model-row__actions/);
-  assert.match(app, /catalog\.path \|\| "~\/\.codex\/model-catalogs\/ai_cove_turbo\.json"/);
+  assert.match(app, /catalog\?\.path \|\| "~\/\.codex\/model-catalogs\/ai_cove_turbo\.json"/);
   assert.match(app, /rootSourceType/);
   assert.match(app, /rootCodexVersion/);
-  assert.match(app, /rootSourceDigest/);
+  assert.doesNotMatch(app, /rootSourceDigest/);
   assert.match(app, /rootLastReadAt/);
   assert.match(app, /rootLastSyncedAt/);
   assert.match(app, /rootUnavailableReason/);
@@ -339,10 +339,12 @@ test("模型目录页面保留 Codex 可见性语义并提供稳定拖拽保存"
   assert.match(css, /\.b-model-catalog__draft-actions \.turbo-bubble-action--secondary\s*\{[\s\S]*?background:\s*transparent;/);
   assert.match(css, /\.b-model-catalog\[data-dirty="true"\] \.b-model-catalog__list\s*\{[\s\S]*?padding-bottom:\s*72px;[\s\S]*?scroll-padding-block-end:\s*72px;/);
   assert.match(css, /\.b-model-catalog__info\s*\{/);
-  assert.match(css, /\.b-model-catalog__root-meta\s*\{[\s\S]*?grid-template-columns:/);
-  assert.match(css, /\.b-model-catalog__root-meta-item\.is-unavailable dd\s*\{[\s\S]*?color:\s*var\(--turbo-model-editor-error-color\);/);
+  assert.doesNotMatch(css, /\.b-model-catalog__root-meta/);
   assert.match(css, /\.b-model-catalog__info::after\s*\{[\s\S]*?content:\s*attr\(data-tooltip\);/);
+  assert.match(css, /\.b-model-catalog__info::after\s*\{[\s\S]*?white-space:\s*pre-line;/);
   assert.match(css, /\.b-model-catalog__info\s*\{[\s\S]*?color:\s*var\(--b-accent\);[\s\S]*?background:\s*var\(--b-accent-soft\);/);
+  assert.match(configPanel, /data-model-catalog-info[^>]*data-tooltip=/);
+  assert.doesNotMatch(configPanel, /data-model-catalog-info[^>]*title=/);
   assert.match(css, /#panel-config \.b-hint\s*\{[\s\S]*?margin-top:\s*18px;/);
   assert.match(css, /body\[data-active-tab="config"\]\[data-config-view="catalog"\] #panel-config \.b-hint\s*\{[\s\S]*?margin-block-start:\s*18px;/);
   assert.doesNotMatch(app, /有模型的上下文上限仍待确认，请编辑后再保存。/);
@@ -442,21 +444,32 @@ test("模型发现支持单项导入并保护已存在模型", async () => {
   assert.match(app, /escapeHtml\(model\.slug\)/);
   assert.match(app, /disabled data-existing="true"/);
   assert.match(app, /importableCount/);
-  assert.match(html, /disabled aria-disabled="true" data-action="import-all-models"/);
+  assert.match(html, /disabled hidden aria-disabled="true" data-action="import-all-models"/);
   assert.match(app, /editorTouchedFields/);
   assert.match(app, /result\.fieldSources\[field\] = changed/);
 });
 
 test("模型编辑器收敛为必需字段与高级配置", async () => {
   const html = await readFile(new URL("index.html", sourceUrl), "utf8");
+  const app = await readFile(new URL("app.js", sourceUrl), "utf8");
+  const css = await readFile(new URL("styles.css", sourceUrl), "utf8");
   assert.match(html, /data-model-field="slug"/);
   assert.match(html, /data-model-field="displayName"/);
   assert.match(html, /data-model-field="max-context-window"/);
   assert.match(html, /data-model-field="context-window" type="range"/);
+  assert.match(html, /<span>上下文上限<\/span>[\s\S]*aria-label="上下文上限滑块"/);
+  assert.match(html, /class="b-model-editor__value-row"[\s\S]*class="b-model-editor__presets" role="group" aria-label="最大上下文快捷预设"[\s\S]*data-model-context-preset="256000"[^>]*>256k[\s\S]*data-model-context-preset="512000"[^>]*>512k[\s\S]*data-model-context-preset="1000000"[^>]*>1M[\s\S]*data-model-context-preset="2000000"[^>]*>2M/);
+  assert.match(html, /data-model-compact-hint[^>]*aria-live="polite"[^>]*>设置最大上下文后，将显示自动压缩位置。<\/p>/);
+  assert.doesNotMatch(html, /data-model-compact-hint>[^<]*(?:125k|95%|90%)/);
   assert.doesNotMatch(html, /data-model-field="context-window-number"/);
   assert.match(html, /data-model-efforts/);
   assert.match(html, /data-model-field="description"/);
   assert.match(html, /data-model-field="transport"/);
+  assert.match(app, /data-model-context-preset/);
+  assert.match(app, /syncEditorContextFields\(\{ syncCurrentToMaximum: event\.target\.matches/);
+  assert.match(css, /\.b-model-editor__value-row\s*\{[\s\S]*?display:\s*flex;[\s\S]*?align-items:\s*center;/);
+  assert.match(css, /\.b-model-editor__value-row > input\s*\{[\s\S]*?width:\s*auto;[\s\S]*?flex:\s*1 1 0;/);
+  assert.match(css, /\.b-model-editor__presets\s*\{[\s\S]*?display:\s*flex;[\s\S]*?flex:\s*0 0 auto;[\s\S]*?white-space:\s*nowrap;/);
 });
 
 test("模型请求验证必须命中重启后的目标模型", async () => {
@@ -606,9 +619,9 @@ test("桌面版本和 updater endpoint 由同一编译期契约驱动", async ()
   );
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 
-  assert.equal(packageJson.version, "0.1.0-pre.1");
-  assert.match(cargo, /^version = "0\.1\.0-pre\.1"$/m);
-  assert.equal(tauriConfig.version, "0.1.0-pre.1");
+  assert.equal(packageJson.version, "0.1.0-pre.2");
+  assert.match(cargo, /^version = "0\.1\.0-pre\.2"$/m);
+  assert.equal(tauriConfig.version, "0.1.0-pre.2");
   assert.equal(packageJson.scripts["desktop:release:local"], "node scripts/desktop-release.mjs");
   assert.match(rust, /option_env!\("TURBO_UPDATER_ENDPOINT"\)/);
   assert.match(rust, /https:\/\/ai-cove\.com\/downloads\/turbo\/latest\.json/);

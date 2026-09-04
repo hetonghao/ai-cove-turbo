@@ -94,7 +94,7 @@ Turbo 以 AI Cove 为主要兼容上游。用户可以继续使用其他 HTTPS �
 - Rust 核心负责本地 HTTP 代理、zstd 压缩、WebSocket 透传、Codex 配置接管、进程生命周期集成、运行指标和更新集成。
 - 应用主要以 macOS 菜单栏或 Windows 托盘形态存在。关闭设置窗口只隐藏；明确退出才恢复配置并停止本地服务。
 - 首次启动默认开启压缩模式、WebSocket 模式和开机自启动；压缩和 WebSocket 始终保持独立控制。
-- Turbo 只读取当前用户的默认 Codex 配置位置。文件缺失、不可读、无法解析或 Provider 不完整时，以可操作错误阻止接管。
+- Turbo 只读取当前用户的默认 `.codex/config.toml`；文件缺失、不可读、无法解析或 Provider 不完整时，以可操作错误阻止接管。公共 AI Cove 子域名的 HTTP 配置以明确的 HTTPS 修复提示阻止接管。
 - Turbo 只管理根 `model_provider` 选中的 Provider，受管字段仅限 `base_url` 和 `supports_websockets`。
 - Turbo 不修改 Codex 原生请求压缩功能键。
 - 受管字段采用所有权感知恢复。Turbo 只恢复仍由自己持有的值；外部修改会产生冲突并把字段所有权交给外部编辑者。
@@ -147,7 +147,7 @@ Turbo 以 AI Cove 为主要兼容上游。用户可以继续使用其他 HTTPS �
 - 修改 Codex 源码或在 Codex 内部绕过认证门禁。
 - 设置或依赖 Codex 原生请求压缩功能键。
 - 同时管理多个 Provider，或扫描任意 Codex 配置目录。
-- 自定义配置文件选择器、自动创建 Provider、自动修复损坏的用户 TOML。
+- 自定义配置文件选择器、自动创建 Provider、自动修复损坏的用户 TOML；读取备份文件或在多个配置之间自动猜测选择。
 - 把本地服务绑定到局域网或公网接口。
 - 结束占用首选端口的未知进程。
 - 在 AI Cove 服务端合同冻结前，由 Turbo 单方面定义私有 WebSocket zstd 协议。
