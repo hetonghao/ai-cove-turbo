@@ -132,7 +132,7 @@ pub(super) struct FixtureServer {
     task: JoinHandle<()>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum CountKind {
     PrivateHandshake,
     PrivateReady,
@@ -335,9 +335,12 @@ impl Fixture {
                 changed.as_mut().await;
             }
         };
-        tokio::time::timeout(timeout, wait)
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "fixture event timed out"))
+        tokio::time::timeout(timeout, wait).await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("fixture {kind:?} event timed out (expected={expected})"),
+            )
+        })
     }
 }
 
