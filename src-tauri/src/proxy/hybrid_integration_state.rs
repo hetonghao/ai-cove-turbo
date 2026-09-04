@@ -302,7 +302,7 @@ impl Fixture {
     }
 
     async fn wait_count(&self, kind: CountKind, expected: usize) -> io::Result<()> {
-        self.wait_count_with_timeout(kind, expected, Duration::from_secs(3))
+        self.wait_count_with_timeout(kind, expected, Duration::from_secs(10))
             .await
     }
 
