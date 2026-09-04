@@ -163,7 +163,10 @@ test("正式前端用 Tauri 业务数据渲染实时终端，且错误结果覆�
   assert.match(requestRows.find((row) => row.includes("/v1/hybrid-ws")) ?? "", />Hybrid WS<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/cold-start")) ?? "", />首轮 HTTP<\/span>/);
   assert.match(requestRows.find((row) => row.includes("/v1/recovery")) ?? "", />回退 HTTP<\/span>/);
-  assert.match(requestRows.find((row) => row.includes("/v1/policy")) ?? "", />策略 HTTP<\/span>/);
+  const policyRow = requestRows.find((row) => row.includes("/v1/policy")) ?? "";
+  assert.match(policyRow, />压缩 HTTP<\/span>/);
+  assert.match(policyRow, /<dt>路由<\/dt><dd>策略 → 压缩 HTTP<\/dd>/);
+  assert.match(policyRow, /<dt>会话\/连接<\/dt><dd>— · —（无需长连接）<\/dd>/);
   const capabilityRow = requestRows.find((row) => row.includes("/v1/capability")) ?? "";
   assert.match(capabilityRow, />压缩 HTTP<\/span>/);
   assert.match(capabilityRow, /<dt>路由<\/dt><dd>自动 → 压缩 HTTP<\/dd>/);

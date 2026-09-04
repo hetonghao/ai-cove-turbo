@@ -7,7 +7,7 @@
     hybridWs: "Hybrid WS",
     hybridColdStartHttp: "首轮 HTTP",
     hybridRecoveryHttp: "回退 HTTP",
-    hybridPolicyHttp: "策略 HTTP",
+    hybridPolicyHttp: "压缩 HTTP",
     hybridCapabilityHttp: "压缩 HTTP",
     hybridLargeRequestHttp: "大请求 HTTP",
     directHttp: "压缩 HTTP",
@@ -640,7 +640,11 @@
       : info?.name || (threadId ? sessionTitle(threadId) : "—");
     const isSubagent = Boolean(info?.isSubagent || request?.isSubagent || request?.is_subagent || request?.parentName || request?.parent_name);
     const parentName = info?.parentName || request?.parentName || request?.parent_name || "-";
-    const routeName = request?.route === "hybridCapabilityHttp" ? "自动 → 压缩 HTTP" : null;
+    const routeName = request?.route === "hybridCapabilityHttp"
+      ? "自动 → 压缩 HTTP"
+      : request?.route === "hybridPolicyHttp"
+        ? "策略 → 压缩 HTTP"
+        : null;
     const rows = [
       ...(isSubagent ? [["所属父会话", parentName]] : []),
       ["会话名称", sessionName],
@@ -733,7 +737,7 @@
       "hybrid-recovery-http": numberFormatter.format(Number(state.hybridRecoveryHttp) || 0),
       "hybrid-policy-http": numberFormatter.format(Number(state.hybridPolicyHttp) || 0),
       "hybrid-capability-http": numberFormatter.format(Number(state.hybridCapabilityHttp) || 0),
-      "direct-http": numberFormatter.format((Number(state.directHttp) || 0) + (Number(state.hybridCapabilityHttp) || 0)),
+      "direct-http": numberFormatter.format((Number(state.directHttp) || 0) + (Number(state.hybridCapabilityHttp) || 0) + (Number(state.hybridPolicyHttp) || 0)),
       autostart: state.autostartEnabled ? "开" : "关",
       dock: state.dockVisible ? "开" : "关",
       restart: pendingAction === "restart-codex" || state.codexState === "restarting"
@@ -1091,6 +1095,7 @@
     const autoPolicy = (policyModels()[slug] || "auto") === "auto";
     const wsTooltip = "来自于 AI Cove 的模型能力：支持 Hybrid WebSocket 加速，建议配置传输方式：自动。";
     const httpTooltip = "来自于 AI Cove 的模型能力：支持 压缩 HTTP，建议配置传输方式：HTTP。";
+    const unavailableTooltip = "来自于 AI Cove 的提示：当前密钥或分组下此模型暂不可用";
     const unavailable = capability?.allowed === false || capability?.reasonCode === "model_not_allowed";
     const isWs = capability?.transport === "websocket";
     const label = !capability
@@ -1101,7 +1106,7 @@
     const tooltip = !capability
       ? httpTooltip
       : unavailable
-      ? (capability.reasonCode || "")
+      ? capability.reasonCode === "model_not_allowed" ? unavailableTooltip : (capability.reasonCode || "")
       : isWs ? wsTooltip : httpTooltip;
     const tooltipId = `model-capability-tooltip-${encodeURIComponent(slug)}`;
     return `<span class="state-indicator b-model-capability c-transport__detail" data-status="${unavailable ? "blocked" : "verified"}" tabindex="0" aria-describedby="${escapeHtml(tooltipId)}">${label}<span class="c-transport__tooltip b-model-capability__tooltip" id="${escapeHtml(tooltipId)}" role="tooltip">${escapeHtml(tooltip)}</span></span>`;
@@ -1135,9 +1140,15 @@
     return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>';
   }
 
+  function codexRootCatalogAvailable() {
+    const metadata = (state.catalog ?? desktopStatus.catalog)?.metadata;
+    return metadata?.rootAvailable === true && metadata?.rootSourceType === "bundled_cli";
+  }
+
   function modelRootPresence(model) {
-    if (typeof model?.rootPresence === "boolean") return model.rootPresence ? "present" : "missing";
-    if (typeof model?.rootMissing === "boolean") return model.rootMissing ? "missing" : "present";
+    if (!codexRootCatalogAvailable()) return "unknown";
+    if (model?.rootPresence === true) return "present";
+    if (model?.rootMissing === true) return "missing";
     return "unknown";
   }
 
@@ -1172,35 +1183,22 @@
     return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString("zh-CN", { hour12: false });
   }
 
-  function catalogDigestLabel(value) {
-    const raw = String(value || "").trim();
-    return raw ? (raw.length > 16 ? raw.slice(0, 16) + "…" : raw) : "未记录";
-  }
-
-  function renderCatalogRootMetadata(catalog) {
-    const container = $("[data-model-catalog-root-meta]");
-    if (!container) return;
+  function catalogInfoTooltip(catalog) {
     const metadata = catalog?.metadata || {};
-    const rootAvailable = metadata.rootAvailable === true;
     const unavailableReason = String(metadata.rootUnavailableReason || "").trim();
     const unavailableAt = metadata.rootUnavailableAt;
+    const managedPath = catalog?.path || "~/.codex/model-catalogs/ai_cove_turbo.json";
     const fields = [
+      ["模型候选源文件", managedPath],
       ["根目录来源", catalogRootSourceLabel(metadata.rootSourceType)],
       ["Codex 版本", metadata.rootCodexVersion || metadata.rootClientVersion || "未记录"],
-      ["根目录摘要", catalogDigestLabel(metadata.rootSourceDigest)],
       ["最近读取", catalogTimeLabel(metadata.rootLastReadAt)],
       ["最近成功同步", catalogTimeLabel(metadata.rootLastSyncedAt)],
     ];
-    if (!rootAvailable && (unavailableReason || unavailableAt)) {
-      fields.push(["根目录状态", `不可用${unavailableReason ? "：" + unavailableReason : ""}${unavailableAt ? " · " + catalogTimeLabel(unavailableAt) : ""}`, "is-unavailable"]);
+    if (metadata.rootAvailable !== true && (unavailableReason || unavailableAt)) {
+      fields.push(["根目录状态", `不可用${unavailableReason ? "：" + unavailableReason : ""}${unavailableAt ? " · " + catalogTimeLabel(unavailableAt) : ""}`]);
     }
-    const hasMetadata = rootAvailable || fields.some(([, value]) => value !== "未记录") || Boolean(unavailableReason || unavailableAt);
-    container.hidden = !hasMetadata;
-    if (!hasMetadata) {
-      container.innerHTML = "";
-      return;
-    }
-    container.innerHTML = fields.map(([label, value, status = ""]) => `<div class="b-model-catalog__root-meta-item${status ? " " + status : ""}"><dt>${escapeHtml(label)}</dt><dd title="${escapeHtml(value)}">${escapeHtml(value)}</dd></div>`).join("");
+    return fields.map(([label, value]) => `${label}：${value}`).join("\n");
   }
 
   function modelCatalogMarkup() {
@@ -1220,8 +1218,12 @@
       const deleteLabel = deleteProtected
         ? ROOT_MODEL_PROTECTED_LABEL
         : pendingDeleteSlug === model.slug ? "确认删除 " + modelLabel : "删除 " + modelLabel;
+      const deleteControl = '<button class="b-model-row__delete" type="button" data-action="delete-model" data-model-delete' + (deleteProtected ? ' disabled aria-disabled="true"' : "") + ' aria-label="' + escapeHtml(deleteLabel) + '"' + (deleteProtected ? "" : ' title="' + escapeHtml(deleteLabel) + '"') + ">" + modelTrashIcon() + "</button>";
+      const deleteMarkup = deleteProtected
+        ? '<span class="b-model-row__delete-hint" tabindex="0" role="img" aria-label="' + escapeHtml(deleteLabel) + '" data-tooltip="' + escapeHtml(deleteLabel) + '">' + deleteControl + "</span>"
+        : deleteControl;
       const sourceMarkup = source ? (source === "上游" ? conflict ? '<span class="b-model-row__confirm" data-model-source="' + escapeHtml(source) + '">' + escapeHtml(conflict.slice(3)) + '</span>' : "" : '<span data-model-source="' + escapeHtml(source) + '">' + escapeHtml(source + conflict) + '</span>') : conflict ? '<span class="b-model-row__confirm">' + escapeHtml(conflict.slice(3)) + '</span>' : '';
-      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><span class="b-model-row__identity">' + rootModelStatusMarkup(model) + '<strong>' + escapeHtml(modelLabel) + '</strong>' + modelSlugMarkup(model, modelLabel) + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '<div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div></span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button><button class="b-model-row__delete" type="button" data-action="delete-model" data-model-delete' + (deleteProtected ? ' disabled aria-disabled="true"' : "") + ' aria-label="' + escapeHtml(deleteLabel) + '" title="' + escapeHtml(deleteLabel) + '">' + modelTrashIcon() + '</button></span></article>';
+      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><span class="b-model-row__identity">' + rootModelStatusMarkup(model) + '<strong>' + escapeHtml(modelLabel) + '</strong>' + modelSlugMarkup(model, modelLabel) + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '<div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div></span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button>' + deleteMarkup + '</span></article>';
     }).join("");
   }
   function catalogRows() {
@@ -1260,7 +1262,6 @@
     const visible = $("[data-model-catalog-visible-count]");
     const total = $("[data-model-catalog-total-count]");
     const metadata = $("[data-model-catalog-meta]");
-    renderCatalogRootMetadata(catalog);
     if (count) count.textContent = String(totalCount);
     if (visible) visible.textContent = String(visibleCount);
     if (total) total.textContent = String(totalCount);
@@ -1272,11 +1273,9 @@
       metadata.textContent = [source, lifecycle, syncState, syncMessage].filter(Boolean).join(" · ");
     }
     if (info) {
-      const managedPath = catalog.path || "~/.codex/model-catalogs/ai_cove_turbo.json";
-      const tooltip = `模型候选源文件：${managedPath}`;
-      info.title = tooltip;
+      const tooltip = catalogInfoTooltip(catalog);
       info.dataset.tooltip = tooltip;
-      info.setAttribute("aria-label", `查看模型候选源文件：${managedPath}`);
+      info.setAttribute("aria-label", tooltip.replaceAll("\n", "；"));
     }
     if (message) {
       message.textContent = catalog.state === "conflict"
@@ -1369,10 +1368,11 @@
     else field.value = value == null ? "" : String(value);
   }
 
-  function syncEditorContextFields() {
+  function syncEditorContextFields({ syncCurrentToMaximum = false } = {}) {
     const maxField = modelEditorElement('[data-model-field="max-context-window"]');
     const range = modelEditorElement('[data-model-field="context-window"]');
     const output = modelEditorElement("[data-model-context-value]");
+    const hint = modelEditorElement("[data-model-compact-hint]");
     const maximum = Number(maxField?.value);
     const validMaximum = Number.isFinite(maximum) && maximum >= MODEL_CONTEXT_MIN;
     if (range) {
@@ -1384,9 +1384,12 @@
     if (!validMaximum) {
       if (range) range.value = "125000";
       if (output) output.textContent = "待确认";
+      if (hint) hint.textContent = "设置最大上下文后，将显示自动压缩位置。";
       return;
     }
-    const requested = editorTouchedFields.has("contextWindow")
+    const requested = syncCurrentToMaximum
+      ? maximum
+      : editorTouchedFields.has("contextWindow")
       ? Number(range?.value || maximum)
       : Number(editorDraft?.contextWindow || maximum);
     const current = Math.min(maximum, Math.max(MODEL_CONTEXT_MIN, Number.isFinite(requested) ? requested : maximum));
@@ -1399,6 +1402,7 @@
       range.style?.setProperty?.("--range-progress", `${Math.max(0, Math.min(1, progress)) * 100}%`);
     }
     const compactLimit = Math.floor(current * 0.9);
+    if (hint) hint.textContent = `当前设置：上下文上限 ${numberFormatter.format(current)} tokens；约 ${numberFormatter.format(compactLimit)} tokens 时开始自动压缩较早内容。`;
     const contextChanged = editorDraft && (editorDraft.contextWindow !== current || editorDraft.maxContextWindow !== maximum);
     const compactLimitExceeded = editorDraft && Number(editorDraft.autoCompactTokenLimit) > compactLimit;
     if (editorDraft && (editorMode !== "edit" || editorTouchedFields.has("contextWindow") || editorTouchedFields.has("maxContextWindow") || contextChanged || compactLimitExceeded)) {
@@ -2306,11 +2310,23 @@
     return sessionInfos.get(threadId)?.name || "-";
   }
 
+  function sessionModel(threadId) {
+    const info = sessionInfos.get(threadId);
+    if (info?.model) return info.model;
+    const matching = displayedRequests.filter((req) => String(req?.threadId || req?.thread_id || "").trim() === threadId);
+    for (let index = matching.length - 1; index >= 0; index -= 1) {
+      const model = matching[index]?.model || matching[index]?.modelSlug;
+      if (model && model !== "—") return model;
+    }
+    return "-";
+  }
+
   function sessionIdentityDetails(threadId) {
     const info = sessionInfos.get(threadId);
     const details = info?.isSubagent
       ? [["所属父会话", info.parentName || "-"], ["会话名称", sessionTitle(threadId)], ["会话类型", "子会话"]]
       : [["会话名称", sessionTitle(threadId)]];
+    details.push(["模型", sessionModel(threadId)]);
     details.push(["会话 ID", threadId]);
     return details;
   }
@@ -2320,6 +2336,7 @@
       name: String(info.name || "").trim(),
       parentName: String(info.parentName || "").trim(),
       isSubagent: Boolean(info.isSubagent),
+      model: String(info.model || "").trim(),
     } : null;
   }
 
@@ -3149,6 +3166,7 @@
       state.hybridWs = 0;
       state.hybridColdStartHttp = 0;
       state.hybridRecoveryHttp = 0;
+      state.hybridPolicyHttp = 0;
       state.hybridCapabilityHttp = 0;
       state.directHttp = 0;
       state.configMessage = "Preview：路径统计已重置";
@@ -3698,6 +3716,16 @@
         }
         return;
       }
+      const contextPreset = event.target.closest?.("[data-model-context-preset]");
+      if (contextPreset) {
+        const maximum = Number(contextPreset.dataset.modelContextPreset);
+        const maxField = modelEditorElement('[data-model-field="max-context-window"]');
+        if (!maxField || !Number.isFinite(maximum)) return;
+        maxField.value = String(maximum);
+        markEditorFieldTouched(maxField);
+        syncEditorContextFields({ syncCurrentToMaximum: true });
+        return;
+      }
       const editorAction = event.target.closest?.("[data-model-editor-action]");
       if (editorAction?.dataset.modelEditorAction === "save") {
         void saveModelEditor();
@@ -3823,7 +3851,7 @@
         renderDiscoveredModels();
       }
       if (event.target.matches?.('[data-model-field="max-context-window"], [data-model-field="context-window"]')) {
-        syncEditorContextFields();
+        syncEditorContextFields({ syncCurrentToMaximum: event.target.matches?.('[data-model-field="max-context-window"]') });
       }
     });
     document.addEventListener("pointerdown", (event) => {

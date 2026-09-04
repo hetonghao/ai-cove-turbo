@@ -226,7 +226,8 @@ fn reset_displayed_route_counts_preserves_hidden_large_request_count() -> Result
     assert_eq!(counts.hybrid_ws, 0);
     assert_eq!(counts.hybrid_cold_start_http, 0);
     assert_eq!(counts.hybrid_recovery_http, 0);
-    assert_eq!(counts.hybrid_policy_http, 1);
+    assert_eq!(counts.hybrid_policy_http, 0);
+    assert_eq!(counts.hybrid_capability_http, 0);
     assert_eq!(counts.hybrid_large_request_http, 1);
     assert_eq!(counts.direct_http, 0);
     Ok(())

@@ -54,7 +54,7 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
-async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models, discoveredModels = [], initialConfigView = "settings" } = {}) {
+async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models, discoveredModels = [], initialConfigView = "settings", rootAvailable = false } = {}) {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const catalog = {
     path: "/home/test/.codex/model-catalogs/ai_cove_turbo.json",
@@ -75,7 +75,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
       rootSourceType: "bundled_cli",
       rootCodexVersion: "0.42.0",
       rootSourceDigest: "abc1234567890fedcba9876543210",
-      rootAvailable: false,
+      rootAvailable,
       rootUnavailableReason: "root_catalog_unavailable",
       rootLastReadAt: "1730000000000",
       rootUnavailableAt: "1730000005000",
@@ -126,7 +126,6 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     },
   });
   const message = element({ modelCatalogMessage: "" });
-  const rootMeta = element({ modelCatalogRootMeta: "" });
   const restart = element({ modelCatalogRestart: "" });
   const catalogActions = element({ modelCatalogActions: "" });
   catalogActions.hidden = true;
@@ -154,6 +153,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     if (source) return editorSources.get(source) || null;
     if (selector === "[data-model-efforts]") return editorEfforts;
     if (selector === "[data-model-context-value]") return editorFields.get("context-value") || null;
+    if (selector === "[data-model-compact-hint]") return editorFields.get("compact-hint") || null;
     const action = selector.match(/^\[data-model-editor-action="([^"]+)"\]$/)?.[1];
     if (action) return editorActions.get(action) || null;
     return null;
@@ -167,6 +167,12 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     editorFields.set(name, field);
   });
   editorFields.set("context-value", element({ modelContextValue: "" }));
+  editorFields.set("compact-hint", element({ modelCompactHint: "" }));
+  const contextPresets = [256000, 512000, 1000000, 2000000].map((value) => {
+    const target = element({ modelContextPreset: String(value) });
+    target.closest = (selector) => selector === "[data-model-context-preset]" ? target : null;
+    return target;
+  });
   ["slug", "displayName", "description", "contextWindow", "maxContextWindow", "supportedReasoningLevels", "defaultReasoningLevel"].forEach((name) => editorSources.set(name, element({ modelSourceFor: name })));
   ["save", "undo"].forEach((name) => {
     const action = element({ modelEditorAction: name });
@@ -212,7 +218,6 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     ["[data-model-catalog-info]", info],
     ["[data-model-catalog-list]", list],
     ["[data-model-catalog-message]", message],
-    ["[data-model-catalog-root-meta]", rootMeta],
     ["[data-model-catalog-restart]", restart],
     ["[data-model-catalog-actions]", catalogActions],
     ["[data-model-catalog-draft-actions]", draftActions],
@@ -284,7 +289,6 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     info,
     list,
     message,
-    rootMeta,
     catalogRenders() { return catalogRenders; },
     catalogMarkup() { return catalogMarkup; },
     async click(action) {
@@ -322,6 +326,10 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
       const field = editorFields.get(name);
       if (value !== undefined) field.value = String(value);
       listeners.get("input")?.({ target: field });
+    },
+    clickContextPreset(value) {
+      const target = contextPresets.find((preset) => preset.dataset.modelContextPreset === String(value));
+      listeners.get("click")?.({ target });
     },
     editorSource(name) { return editorSources.get(name); },
     editorError() { return editorError.textContent || ""; },
@@ -450,8 +458,11 @@ test("模型候选保存、撤销、拖拽和失败恢复走真实命令边界",
   assert.equal(saved.visible("undo-model-settings"), false);
   assert.equal(saved.catalogActionsVisible(), false);
   assert.equal(saved.draftActionsVisible(), false);
-  assert.match(saved.info.title, /模型候选源文件：\/home\/test\/\.codex\/model-catalogs\/ai_cove_turbo\.json/);
+  assert.equal(saved.info.title, undefined);
   assert.match(saved.info.dataset.tooltip, /模型候选源文件：\/home\/test\/\.codex\/model-catalogs\/ai_cove_turbo\.json/);
+  assert.match(saved.info.dataset.tooltip, /根目录来源：Codex 内置目录/);
+  assert.match(saved.info.dataset.tooltip, /Codex 版本：0\.42\.0/);
+  assert.doesNotMatch(saved.info.dataset.tooltip, /根目录摘要/);
   saved.dragRow("alpha", "beta");
   assert.equal(saved.disabled("save-model-settings"), true);
   saved.toggleVisibility("alpha");
@@ -517,6 +528,7 @@ test("确认删除模型候选后列表移除目标并向后端传递删除意�
 
 test("根目录移除模型显示红色感叹号并保留可删除入口", async () => {
   const harness = await catalogHarness({
+    rootAvailable: true,
     models: [
       { slug: "removed", displayName: "Removed", description: "r", visibility: "list", priority: 1, rootMissing: true, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
       { slug: "preset", displayName: "Preset", description: "p", visibility: "list", priority: 2, rootPresence: true, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
@@ -529,18 +541,43 @@ test("根目录移除模型显示红色感叹号并保留可删除入口", async
   assert.match(markup, /data-model-slug="preset"[\s\S]*?data-model-delete[^>]*disabled[^>]*aria-disabled="true"[^>]*aria-label="此模型为 Codex 预设模型，暂不支持删除"/);
 });
 
-test("模型候选区展示根目录来源、摘要和读取生命周期", async () => {
+test("根目录不可用时不误报移除模型或禁用删除", async () => {
+  const harness = await catalogHarness({
+    models: [
+      { slug: "gemini-3.8-flash", displayName: "gemini-3.8-flash", description: "g", visibility: "list", priority: 1, rootMissing: true, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
+      { slug: "grok-4.6", displayName: "grok-4.6", description: "g", visibility: "list", priority: 2, rootPresence: true, contextWindow: 200000, maxContextWindow: 500000, supportedReasoningLevels: [{ effort: "low", description: "" }], defaultReasoningLevel: "low" },
+    ],
+  });
+
+  const markup = harness.catalogMarkup();
+  assert.doesNotMatch(markup, /b-model-row__root-status/);
+  assert.match(markup, /data-model-slug="gemini-3\.8-flash"[\s\S]*?data-model-delete(?![^>]*disabled)/);
+  assert.match(markup, /data-model-slug="grok-4\.6"[\s\S]*?data-model-delete(?![^>]*disabled)/);
+});
+
+test("禁用删除按钮使用标准 data-tooltip 而不是原生 title", async () => {
+  const html = await readFile(new URL("../src/index.html", import.meta.url), "utf8");
+  const app = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+
+  assert.match(app, /b-model-row__delete-hint/);
+  assert.match(app, /data-tooltip=\"' \+ escapeHtml\(deleteLabel\)/);
+  assert.match(css, /\.b-model-row__delete-hint\[data-tooltip\]::after/);
+  assert.match(css, /\.b-model-row__delete-hint\[data-tooltip\]:hover::after/);
+  assert.match(css, /\.b-model-row__delete-hint\[data-tooltip\]:focus-visible::after/);
+  assert.match(html, /data-model-catalog-list/);
+});
+
+test("模型候选区将根目录来源和读取生命周期收进信息提示", async () => {
   const harness = await catalogHarness();
-  const rootMeta = harness.rootMeta;
-  assert.equal(rootMeta.hidden, false);
-  assert.match(rootMeta.innerHTML, /根目录来源/);
-  assert.match(rootMeta.innerHTML, /Codex 内置目录/);
-  assert.match(rootMeta.innerHTML, /根目录摘要/);
-  assert.match(rootMeta.innerHTML, /abc123456789/);
-  assert.match(rootMeta.innerHTML, /最近读取/);
-  assert.match(rootMeta.innerHTML, /最近成功同步/);
-  assert.match(rootMeta.innerHTML, /根目录状态/);
-  assert.match(rootMeta.innerHTML, /不可用：root_catalog_unavailable/);
+  const tooltip = harness.info.dataset.tooltip;
+  assert.match(tooltip, /根目录来源：Codex 内置目录/);
+  assert.match(tooltip, /Codex 版本：0\.42\.0/);
+  assert.match(tooltip, /最近读取：/);
+  assert.match(tooltip, /最近成功同步：/);
+  assert.match(tooltip, /根目录状态：不可用：root_catalog_unavailable/);
+  assert.doesNotMatch(tooltip, /根目录摘要/);
+  assert.doesNotMatch(tooltip, /abc123456789/);
 });
 
 test("模型弹窗保存独立于列表草稿并保留原上下文", async () => {
@@ -687,6 +724,15 @@ test("模型传输策略编辑保存并显示能力摘要", async () => {
   failed.change("alpha", "http");
   await failed.click("save-model-settings");
   assert.match(failed.list.innerHTML, /WS 可用/);
+});
+
+test("model_not_allowed 使用面向用户的 AI Cove 提示", async () => {
+  const harness = await catalogHarness({
+    capabilityOverrides: { alpha: { allowed: false, reasonCode: "model_not_allowed" } },
+  });
+
+  assert.match(harness.list.innerHTML, /来自于 AI Cove 的提示：当前密钥或分组下此模型暂不可用/);
+  assert.doesNotMatch(harness.list.innerHTML, /model_not_allowed/);
 });
 
 test("模型能力提示使用可移出滚动容器的单一浮层", async () => {
@@ -844,16 +890,36 @@ test("模型保存失败后仍可继续修正并重试", async () => {
   assert.equal(harness.editorActionDisabled("undo"), false);
 });
 
-test("拖动当前上下文滑块应同步显示并保存对应阈值", async () => {
+test("拖动上下文上限滑块应同步显示自动压缩位置并保存对应阈值", async () => {
   const harness = await catalogHarness();
   harness.editModel("alpha");
   harness.inputEditor("context-window", 400000);
   assert.equal(harness.editorField("context-window").value, "400000");
   assert.equal(harness.editorField("context-value").textContent, "400,000 tokens");
+  assert.equal(harness.editorField("compact-hint").textContent, "当前设置：上下文上限 400,000 tokens；约 360,000 tokens 时开始自动压缩较早内容。");
   await harness.saveEditor();
   const model = harness.calls.find((call) => call.command === "save_model_settings").args.models.find((candidate) => candidate.slug === "alpha");
   assert.equal(model.contextWindow, 400000);
   assert.equal(model.autoCompactTokenLimit, 360000);
+});
+
+test("上下文快捷预设可快速填写最大上下文", async () => {
+  const harness = await catalogHarness();
+  harness.editModel("alpha");
+  harness.clickContextPreset(512000);
+  assert.equal(harness.editorField("max-context-window").value, "512000");
+  assert.equal(harness.editorField("context-window").value, "512000");
+});
+
+test("修改最大上下文时同步上下文上限", async () => {
+  const harness = await catalogHarness();
+  harness.editModel("alpha");
+  harness.inputEditor("max-context-window", 1000000);
+  assert.equal(harness.editorField("max-context-window").value, "1000000");
+  assert.equal(harness.editorField("context-window").value, "1000000");
+  assert.equal(harness.editorField("context-value").textContent, "1,000,000 tokens");
+  harness.inputEditor("context-window", 400000);
+  assert.equal(harness.editorField("context-window").value, "400000");
 });
 
 test("策略文件读取失败时在模型候选区保留可执行提示", async () => {
@@ -1698,6 +1764,28 @@ test("子会话请求详情先显示父会话和会话名称，再显示监控�
   assert.doesNotMatch(detail, /04 · 07/);
 });
 
+test("策略走 HTTP 的请求在 hover 气泡中显示策略归入压缩 HTTP", async () => {
+  const { requestStream } = await liveTailHarness({
+    recentRequests: [{
+      id: 2,
+      timestampMs: 2_000,
+      status: 200,
+      path: "/v1/responses",
+      rawBytes: 100,
+      sentBytes: 50,
+      transport: "HTTP",
+      route: "hybridPolicyHttp",
+      result: "success",
+      threadId: "thread-policy-test",
+      durationMs: 1_200,
+    }],
+  });
+  const html = requestStream.innerHTML;
+  assert.match(html, /<span class="c-transport__detail"[^>]*>压缩 HTTP<\/span>/);
+  assert.match(html, /<dt>路由<\/dt><dd>策略 → 压缩 HTTP<\/dd>/);
+  assert.match(html, /<dt>会话\/连接<\/dt><dd>— · —（无需长连接）<\/dd>/);
+});
+
 test("走 HTTP 的请求在 hover 气泡中显示无需长连接且能力降级归入压缩 HTTP", async () => {
   const { requestStream } = await liveTailHarness({
     recentRequests: [{
@@ -2134,7 +2222,7 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
     ],
   };
   const sessionNames = {
-    "thread-12345678-alpha": { name: "Nash", parentName: "Turbo 主会话", isSubagent: true },
+    "thread-12345678-alpha": { name: "Nash", parentName: "Turbo 主会话", isSubagent: true, model: "gpt-5.3-codex" },
     "thread-12345678-beta": null,
     "thread-released": { name: "已结束会话", parentName: null, isSubagent: false },
   };
@@ -2237,6 +2325,7 @@ test("连接摘要持续刷新且两个入口共享面板状态", async () => {
   assert.ok(parentIndex >= 0 && parentIndex < nameIndex);
   assert.match(boundSessionHoverMarkup, /<dt>所属父会话<\/dt><dd>Turbo 主会话<\/dd><\/div><div><dt>会话名称<\/dt><dd>Nash<\/dd><\/div><div><dt>会话类型<\/dt><dd>子会话<\/dd>/);
   const boundSessionHover = boundSessionHoverMarkup;
+  assert.match(boundSessionHover, /<dt>模型<\/dt><dd>gpt-5.3-codex<\/dd>/);
   assert.match(boundSessionHover, /<dt>会话 ID<\/dt><dd>thread-12345678-alpha<\/dd>/);
   assert.match(bound.innerHTML, /data-thread-id="thread-12345678-alpha"[^>]*>[\s\S]*?<svg class="c-session-icon" data-connection-state="active" data-session-kind="subagent"[\s\S]*?c-session-icon__branch/);
   assert.match(bound.innerHTML, /<svg class="c-session-icon"[^>]*><path d="M3 1\.75h8[^>]*\/><\/svg>/);

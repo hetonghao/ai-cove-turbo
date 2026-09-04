@@ -75,6 +75,8 @@ impl TrafficRouteCounts {
         self.hybrid_ws = 0;
         self.hybrid_cold_start_http = 0;
         self.hybrid_recovery_http = 0;
+        self.hybrid_policy_http = 0;
+        self.hybrid_capability_http = 0;
         self.direct_http = 0;
     }
 }
