@@ -175,8 +175,16 @@ async fn aborted_running_work_keeps_permit_until_worker_exit() {
     let _ = started_rx.await;
     task.abort();
     assert_eq!(scheduler.available_permits(), 0);
+    let mut waiter = Box::pin(scheduler.run(|| ()));
+    assert!(
+        poll_fn(|context| match waiter.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await
+    );
     let _ = release_tx.send(());
     let _ = task.await;
-    tokio::task::yield_now().await;
+    assert_eq!(waiter.await, Ok(()));
     assert_eq!(scheduler.available_permits(), 1);
 }

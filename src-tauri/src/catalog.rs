@@ -1618,6 +1618,24 @@ mod tests {
 
     use super::*;
 
+    fn toml_basic_string(value: &Path) -> String {
+        format!(
+            "\"{}\"",
+            value
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+        )
+    }
+
+    #[test]
+    fn toml_basic_string_escapes_windows_paths() {
+        assert_eq!(
+            toml_basic_string(Path::new(r"C:\Users\runner\source.json")),
+            r#""C:\\Users\\runner\\source.json""#
+        );
+    }
+
     fn fixture(root: &Path, pointer: Option<&Path>) -> (PathBuf, PathBuf) {
         let config = root.join("config.toml");
         let source = root.join("source.json");
@@ -1627,8 +1645,8 @@ mod tests {
                 || "model_provider = \"custom\"\n".to_owned(),
                 |path| {
                     format!(
-                        "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
-                        path.display()
+                        "model_provider = \"custom\"\nmodel_catalog_json = {}\n",
+                        toml_basic_string(path)
                     )
                 },
             ),
@@ -2554,8 +2572,8 @@ mod tests {
         fs::write(
             &config,
             format!(
-                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n",
-                source.display()
+                "model_provider = \"custom\"\nmodel_catalog_json = {}\n",
+                toml_basic_string(&source)
             ),
         )?;
         fs::write(
