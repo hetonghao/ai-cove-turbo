@@ -584,7 +584,9 @@ test("模型弹窗保存独立于列表草稿并保留原上下文", async () =>
   const harness = await catalogHarness();
   harness.toggleVisibility("alpha");
   harness.change("alpha", "http");
+  harness.change("beta", "auto");
   harness.editModel();
+  assert.equal(harness.editorField("transport").value, "http");
   assert.equal(harness.editorField("context-window").value, "200000");
   harness.editorField("displayName").value = "Alpha updated";
   harness.closeEditor();
@@ -601,6 +603,8 @@ test("模型弹窗保存独立于列表草稿并保留原上下文", async () =>
   assert.equal(savedAlpha.displayName, "Alpha updated");
   assert.equal(savedAlpha.contextWindow, 200000);
   assert.equal(savedAlpha.visibility, "list");
+  assert.equal(save.args.policy.models.alpha, "http");
+  assert.equal(Object.hasOwn(save.args.policy.models, "beta"), false);
   assert.equal(harness.disabled("save-model-settings"), false);
   await harness.click("save-model-settings");
   const listSave = harness.calls.find((call) => call.command === "update_model_catalog");
@@ -608,8 +612,7 @@ test("模型弹窗保存独立于列表草稿并保留原上下文", async () =>
     { slug: "alpha", visibility: "hide", priority: 1 },
     { slug: "beta", visibility: "hide", priority: 2 },
   ]);
-  const policySave = harness.calls.find((call) => call.command === "update_model_policy");
-  assert.equal(policySave.args.update.models.alpha, "http");
+  assert.equal(harness.calls.some((call) => call.command === "update_model_policy"), false);
 });
 
 test("旧的不完整模型只改展示字段时保留兼容保存路径", async () => {

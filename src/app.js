@@ -1450,7 +1450,7 @@
     setEditorField("displayName", editorDraft.displayName || editorDraft.slug);
     setEditorField("description", editorDraft.description || "");
     setEditorField("max-context-window", editorDraft.maxContextWindow);
-    setEditorField("transport", state.modelPolicy?.models?.[editorDraft.slug] || "auto");
+    setEditorField("transport", policyModels()[editorDraft.slug] || "auto");
     renderEditorEffortOptions();
     syncEditorReasoningOptions();
     const slugField = modelEditorElement('[data-model-field="slug"]');
@@ -1713,10 +1713,10 @@
     const source = editorMode === "edit" ? previousStateModels.find((candidate) => candidate.slug === editorOriginal?.slug) : null;
     const persisted = { ...model, visibility: source?.visibility || "list", priority: source?.priority || Math.max(0, ...previousStateModels.map((candidate) => Number(candidate.priority) || 0)) + 1 };
     const legacyPresentationOnly = Boolean(source && !modelIsComplete(source) && !modelIsComplete(persisted));
-    const policyModels = { ...(state.modelPolicy?.models || {}) };
-    if (transport === "http") policyModels[persisted.slug] = "http";
-    else delete policyModels[persisted.slug];
-    const policyUpdate = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: policyModels };
+    const nextPolicyModels = { ...policyModels() };
+    if (transport === "http") nextPolicyModels[persisted.slug] = "http";
+    else delete nextPolicyModels[persisted.slug];
+    const policyUpdate = { defaultTransport: state.modelPolicy?.defaultTransport || "auto", models: nextPolicyModels };
     if (invoke) {
       if (legacyPresentationOnly) {
         state.catalog = await invoke("update_model_catalog", {
@@ -1744,7 +1744,7 @@
         : [...previousStateModels.filter((candidate) => candidate.slug !== persisted.slug), persisted]
           .sort((left, right) => (Number(left.priority) || 0) - (Number(right.priority) || 0));
       state.catalog = { ...state.catalog, models, restartRequired: true, loaded: false, requestVerified: false, state: "owned" };
-      state.modelPolicy = { ...state.modelPolicy, models: policyModels };
+      state.modelPolicy = { ...state.modelPolicy, models: nextPolicyModels };
     }
     catalogDraft = mergeSavedModelIntoListDraft(state.catalog.models, previousDraft, previousStateModels);
     modelPolicyDraft = mergeSavedPolicyIntoDraft(state.modelPolicy, previousPolicyDraft, previousPolicy);
