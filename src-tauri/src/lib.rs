@@ -130,7 +130,7 @@ pub fn run() -> tauri::Result<()> {
             let home = app.path().home_dir()?;
             let data_dir = app.path().app_data_dir()?;
             let runtime = AppRuntime::new(RuntimePaths {
-                config_path: home.join(".codex/config.toml"),
+                config_path: home.join(".codex").join("config.toml"),
                 data_dir,
             });
             app.manage(Arc::clone(&runtime));

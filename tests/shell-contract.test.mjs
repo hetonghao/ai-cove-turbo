@@ -508,6 +508,24 @@ test("Windows 探测 Codex 不启动 PowerShell", async () => {
   assert.doesNotMatch(windowsProbe, /Get-Process/);
 });
 
+test("Windows 能定位 Codex CLI 并使用本机路径分隔符", async () => {
+  const catalog = await readFile(new URL("../src-tauri/src/catalog.rs", import.meta.url), "utf8");
+  const lib = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+
+  assert.match(catalog, /fn bundled_cli_candidates\(\)/);
+  assert.match(catalog, /CODEX_CLI_PATH/);
+  assert.match(catalog, /LOCALAPPDATA/);
+  assert.match(catalog, /Programs"\)\s*\.join\("OpenAI"\)\s*\.join\("Codex"\)\s*\.join\("bin"\)\s*\.join\("codex\.exe"\)/);
+  assert.match(catalog, /USERPROFILE/);
+  assert.match(catalog, /join\("\.codex"\)\s*\.join\("bin"\)/);
+  assert.match(catalog, /fn paths_eq\(/);
+  assert.match(catalog, /home\.join\("\.codex"\)\s*\.join\("model-catalogs"\)\s*\.join\("ai_cove_turbo\.json"\)/);
+  assert.doesNotMatch(catalog, /FIXED_CATALOG_RELATIVE_PATH/);
+  assert.doesNotMatch(catalog, /home\.join\("\.codex\/config\.toml"\)/);
+  assert.match(lib, /home\.join\("\.codex"\)\.join\("config\.toml"\)/);
+  assert.doesNotMatch(lib, /home\.join\("\.codex\/config\.toml"\)/);
+});
+
 test("Windows 同步模型目录不闪出控制台", async () => {
   const catalog = await readFile(new URL("../src-tauri/src/catalog.rs", import.meta.url), "utf8");
   const lib = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
@@ -542,7 +560,7 @@ test("模型目录只在窗口回到前台和 Codex 重启后同步", async () =
   assert.match(focused, /refresh_catalog\(/);
   assert.match(restarted, /self\.refresh_catalog\(\)/);
   assert.match(initialize, /ensure_catalog\(/);
-  assert.match(initialize, /catalog_last_sync_ms\.store\(/);
+  assert.match(initialize, /catalog_last_sync_ms\s*\.store\(/);
   assert.doesNotMatch(initialize, /self\.refresh_catalog\(\)/);
 });
 

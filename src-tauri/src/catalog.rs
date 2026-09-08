@@ -26,9 +26,35 @@ pub(crate) use catalog_types::{
     ReasoningLevel, ServiceTier,
 };
 
-pub(crate) const FIXED_CATALOG_RELATIVE_PATH: &str = ".codex/model-catalogs/ai_cove_turbo.json";
 pub(crate) fn fixed_catalog_path(home: &Path) -> PathBuf {
-    home.join(FIXED_CATALOG_RELATIVE_PATH)
+    home.join(".codex")
+        .join("model-catalogs")
+        .join("ai_cove_turbo.json")
+}
+
+fn paths_eq(left: &Path, right: &Path) -> bool {
+    left.components().eq(right.components())
+}
+
+fn is_fixed_pointer(pointer: Option<&Path>, fixed_path: &Path) -> bool {
+    pointer.is_some_and(|path| paths_eq(path, fixed_path))
+}
+
+fn owned_record(record: &OwnershipRecord, fixed_path: &Path, config_path: &Path) -> bool {
+    paths_eq(&record.fixed_path, fixed_path) && paths_eq(&record.config_path, config_path)
+}
+
+fn rewrite_stale_fixed_pointer(
+    config_path: &Path,
+    pointer: Option<&Path>,
+    fixed_path: &Path,
+) -> Result<(), CatalogError> {
+    if pointer.is_some_and(|path| {
+        paths_eq(path, fixed_path) && path.as_os_str() != fixed_path.as_os_str()
+    }) {
+        write_catalog_pointer(config_path, Some(fixed_path))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn save_metadata(home: &Path, metadata: &CatalogMetadata) -> Result<(), CatalogError> {
@@ -79,13 +105,14 @@ fn sync_catalog_with_executable(
 ) -> Result<CatalogStatus, CatalogError> {
     let fixed_path = fixed_catalog_path(home);
     let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
-    if record.fixed_path != fixed_path || record.config_path != config_path {
+    if !owned_record(&record, &fixed_path, config_path) {
         return Err(CatalogError::OwnershipConflict);
     }
     let pointer = read_catalog_pointer(config_path)?;
-    if pointer.as_deref() != Some(fixed_path.as_path()) {
+    if !is_fixed_pointer(pointer.as_deref(), &fixed_path) {
         return Err(CatalogError::OwnershipConflict);
     }
+    rewrite_stale_fixed_pointer(config_path, pointer.as_deref(), &fixed_path)?;
     let reinitialized = if fixed_path.exists() {
         read_fixed_catalog(&fixed_path)?;
         false
@@ -138,7 +165,7 @@ pub(crate) fn preview_catalog_models(
     let fixed_path = fixed_catalog_path(home);
     let _record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
     let pointer = read_catalog_pointer(config_path)?;
-    if pointer.as_deref() != Some(fixed_path.as_path()) {
+    if !is_fixed_pointer(pointer.as_deref(), &fixed_path) {
         return Err(CatalogError::OwnershipConflict);
     }
     let bytes = fs::read(&fixed_path).map_err(CatalogError::Read)?;
@@ -189,13 +216,14 @@ fn ensure_catalog_with_executable(
 ) -> Result<CatalogStatus, CatalogError> {
     let fixed_path = fixed_catalog_path(home);
     if let Some(record) = read_record(recovery_path)? {
-        if record.fixed_path != fixed_path || record.config_path != config_path {
+        if !owned_record(&record, &fixed_path, config_path) {
             return Err(CatalogError::OwnershipConflict);
         }
         let pointer = read_catalog_pointer(config_path)?;
-        if pointer.as_deref() != Some(fixed_path.as_path()) {
+        if !is_fixed_pointer(pointer.as_deref(), &fixed_path) {
             return Err(CatalogError::OwnershipConflict);
         }
+        rewrite_stale_fixed_pointer(config_path, pointer.as_deref(), &fixed_path)?;
         if fixed_path.exists() {
             read_fixed_catalog(&fixed_path)?;
         } else {
@@ -265,7 +293,10 @@ fn ensure_catalog_with_executable(
         baseline_document,
     };
     write_record(recovery_path, &record)?;
-    let changed_config = current_pointer.as_deref() != Some(fixed_path.as_path());
+    let changed_config = !is_fixed_pointer(current_pointer.as_deref(), &fixed_path);
+    if !changed_config {
+        rewrite_stale_fixed_pointer(config_path, current_pointer.as_deref(), &fixed_path)?;
+    }
     if changed_config {
         if let Err(error) = write_catalog_pointer(config_path, Some(&fixed_path)) {
             let _ = fs::remove_file(recovery_path);
@@ -316,7 +347,7 @@ pub(crate) fn reclaim_catalog(
 ) -> Result<CatalogStatus, CatalogError> {
     let fixed_path = fixed_catalog_path(home);
     let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
-    if record.config_path != config_path || record.fixed_path != fixed_path {
+    if !owned_record(&record, &fixed_path, config_path) {
         return Err(CatalogError::OwnershipConflict);
     }
     write_catalog_pointer(config_path, Some(&fixed_path))?;
@@ -333,11 +364,11 @@ pub(crate) fn read_catalog(
 ) -> Result<CatalogStatus, CatalogError> {
     let fixed_path = fixed_catalog_path(home);
     let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
-    if record.config_path != config_path || record.fixed_path != fixed_path {
+    if !owned_record(&record, &fixed_path, config_path) {
         return Err(CatalogError::OwnershipConflict);
     }
     let pointer = read_catalog_pointer(config_path)?;
-    if pointer.as_deref() != Some(fixed_path.as_path()) {
+    if !is_fixed_pointer(pointer.as_deref(), &fixed_path) {
         return Err(CatalogError::OwnershipConflict);
     }
     status_from_file(
@@ -359,7 +390,7 @@ pub(crate) fn update_catalog(
     let fixed_path = fixed_catalog_path(home);
     let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
     let pointer = read_catalog_pointer(config_path)?;
-    if pointer.as_deref() != Some(fixed_path.as_path()) {
+    if !is_fixed_pointer(pointer.as_deref(), &fixed_path) {
         return Err(CatalogError::OwnershipConflict);
     }
     let bytes = fs::read(&fixed_path).map_err(CatalogError::Read)?;
@@ -472,7 +503,7 @@ pub(crate) fn save_catalog_models_with_removals(
     let fixed_path = fixed_catalog_path(home);
     let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
     let pointer = read_catalog_pointer(config_path)?;
-    if pointer.as_deref() != Some(fixed_path.as_path()) {
+    if !is_fixed_pointer(pointer.as_deref(), &fixed_path) {
         return Err(CatalogError::OwnershipConflict);
     }
     let bytes = fs::read(&fixed_path).map_err(CatalogError::Read)?;
@@ -923,20 +954,65 @@ struct RootSnapshot {
     binary_digest: Option<String>,
 }
 
+fn bundled_cli_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("CODEX_CLI_PATH") {
+        candidates.push(PathBuf::from(path));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let local = PathBuf::from(local);
+            candidates.push(
+                local
+                    .join("Programs")
+                    .join("OpenAI")
+                    .join("Codex")
+                    .join("bin")
+                    .join("codex.exe"),
+            );
+            if let Ok(entries) = fs::read_dir(local.join("OpenAI").join("Codex").join("bin")) {
+                let mut hashed = entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path().join("codex.exe"))
+                    .filter(|path| path.is_file())
+                    .collect::<Vec<_>>();
+                hashed.sort();
+                candidates.extend(hashed.into_iter().rev());
+            }
+        }
+        if let Some(home) = std::env::var_os("USERPROFILE") {
+            let bin = PathBuf::from(home).join(".codex").join("bin");
+            candidates.push(bin.join("codex.exe"));
+            candidates.push(bin.join("codex.cmd"));
+        }
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let npm = PathBuf::from(appdata).join("npm");
+            candidates.push(npm.join("codex.cmd"));
+            candidates.push(npm.join("codex.exe"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        candidates.extend([
+            PathBuf::from("/opt/homebrew/bin/codex"),
+            PathBuf::from("/usr/local/bin/codex"),
+            PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex"),
+            PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"),
+        ]);
+    }
+    candidates.push(PathBuf::from("codex"));
+    candidates
+}
+
 fn root_snapshot(config_path: &Path, bundled_executable: Option<&Path>) -> Option<RootSnapshot> {
-    let candidates = bundled_executable.map_or_else(
-        || {
-            vec![
-                Path::new("codex"),
-                Path::new("/opt/homebrew/bin/codex"),
-                Path::new("/usr/local/bin/codex"),
-                Path::new("/Applications/ChatGPT.app/Contents/Resources/codex"),
-                Path::new("/Applications/Codex.app/Contents/Resources/codex"),
-            ]
-        },
-        |executable| vec![executable],
-    );
-    for executable in candidates {
+    let candidates = bundled_executable.map_or_else(bundled_cli_candidates, |executable| {
+        vec![executable.to_path_buf()]
+    });
+    for executable in &candidates {
+        if executable.is_absolute() && !executable.is_file() {
+            continue;
+        }
         let Some(source_bytes) = bundled_catalog_bytes(executable, config_path.parent()) else {
             continue;
         };
@@ -1648,7 +1724,7 @@ pub(crate) fn restore_catalog_bytes(
     let fixed_path = fixed_catalog_path(home);
     let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
     let pointer = read_catalog_pointer(config_path)?;
-    if pointer.as_deref() != Some(fixed_path.as_path()) {
+    if !is_fixed_pointer(pointer.as_deref(), &fixed_path) {
         return Err(CatalogError::OwnershipConflict);
     }
     let current = fs::read(&fixed_path).map_err(CatalogError::Read)?;
@@ -1669,7 +1745,7 @@ pub(crate) fn restore_catalog(
         return Err(CatalogError::SourceUnavailable);
     };
     let pointer = read_catalog_pointer(config_path)?;
-    if pointer.as_deref() == Some(fixed_path.as_path()) {
+    if is_fixed_pointer(pointer.as_deref(), &fixed_path) {
         write_catalog_pointer(
             config_path,
             record.original_model_catalog_json.as_deref().map(Path::new),
@@ -1729,6 +1805,33 @@ mod tests {
         assert_eq!(
             toml_basic_string(Path::new(r"C:\Users\runner\source.json")),
             r#""C:\\Users\\runner\\source.json""#
+        );
+    }
+
+    #[test]
+    fn mixed_separator_paths_are_the_same_catalog_file() {
+        let mixed = PathBuf::from("home").join(".codex/model-catalogs/ai_cove_turbo.json");
+        let native = PathBuf::from("home")
+            .join(".codex")
+            .join("model-catalogs")
+            .join("ai_cove_turbo.json");
+        assert!(paths_eq(&mixed, &native));
+        assert_eq!(fixed_catalog_path(Path::new("home")), native);
+        assert!(is_fixed_pointer(Some(mixed.as_path()), &native));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn bundled_cli_candidates_include_macos_app_cli() {
+        let candidates = bundled_cli_candidates();
+        assert!(
+            candidates.iter().any(|path| {
+                path == Path::new("/Applications/Codex.app/Contents/Resources/codex")
+            })
+        );
+        assert_eq!(
+            candidates.last().map(PathBuf::as_path),
+            Some(Path::new("codex"))
         );
     }
 
