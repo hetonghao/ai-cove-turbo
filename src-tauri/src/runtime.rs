@@ -1157,22 +1157,34 @@ impl AppRuntime {
         )
     }
 
-    pub(crate) async fn discover_model_catalog(
-        &self,
-    ) -> Result<DiscoveryResult, catalog_discovery::DiscoveryError> {
+    fn discovery_target(&self) -> Result<Url, catalog_discovery::DiscoveryError> {
         let managed = lock_mutex(&self.managed).clone();
-        let (upstream, compatibility) = if let Some(managed) = managed.as_ref() {
+        let check = if let Some(managed) = managed.as_ref() {
             managed
-                .discovery_upstream()
+                .original_preflight()
                 .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?
         } else {
-            let check = preflight(&self.paths.config_path)
-                .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?;
-            (check.upstream, check.compatibility)
+            preflight(&self.paths.config_path)
+                .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?
+        };
+        let upstream = self
+            .configured_upstream(&check)
+            .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?;
+        let compatibility = if self.has_upstream_override() {
+            upstream_compatibility(&upstream)
+        } else {
+            check.compatibility
         };
         if compatibility != UpstreamCompatibility::AiCove {
             return Err(catalog_discovery::DiscoveryError::InvalidUpstream);
         }
+        Ok(upstream)
+    }
+
+    pub(crate) async fn discover_model_catalog(
+        &self,
+    ) -> Result<DiscoveryResult, catalog_discovery::DiscoveryError> {
+        let upstream = self.discovery_target()?;
         let headers = effective_auth_headers(Some(&self.paths.config_path))
             .ok_or(catalog_discovery::DiscoveryError::MissingCredentials)?;
         let mut result = catalog_discovery::fetch(
@@ -2318,6 +2330,39 @@ supports_websockets = false
         assert!(restored.contains("https://api.ai-cove.com/v1"));
         assert!(restored.contains("supports_websockets = false"));
         assert!(!restored.contains("http://127.0.0.1:"));
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_target_follows_forced_ai_cove_upstream() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_path = root.path().join("config.toml");
+        let recovery = root.path().join("recovery.json");
+        fs::write(
+            &config_path,
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nbase_url = \"https://new-api.thinkervc.com/v1\"\n",
+        )?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: config_path.clone(),
+            data_dir: root.path().join("data"),
+        });
+        let managed = take_over(
+            &preflight(&config_path)?,
+            "http://127.0.0.1:9/v1",
+            true,
+            &recovery,
+        )?;
+        *lock_mutex(&runtime.managed) = Some(managed);
+        assert!(matches!(
+            runtime.discovery_target(),
+            Err(catalog_discovery::DiscoveryError::InvalidUpstream)
+        ));
+        lock_mutex(&runtime.preferences).upstream_override =
+            Some("https://api.ai-cove.com/v1".to_owned());
+        assert_eq!(
+            runtime.discovery_target()?.as_str(),
+            "https://api.ai-cove.com/v1"
+        );
         Ok(())
     }
 

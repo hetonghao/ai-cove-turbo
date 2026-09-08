@@ -3307,17 +3307,21 @@
       discoveryQuery = "";
       const filterInput = $("[data-model-discovery-filter]");
       if (filterInput) filterInput.value = "";
-      renderControls();
+      modelCatalogActionMessage = "正在从上游读取模型…";
+      renderState();
       try {
         const result = invoke
           ? await invoke("discover_model_catalog")
           : { models: (state.catalog?.models || []).map(cloneModel), scope: "current_key", sourceVersion: "preview" };
+        modelCatalogActionMessage = "";
         discoveredModels = result.models || [];
         renderDiscoveredModels();
         openModelDialog($("[data-model-discovery]"));
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        modelCatalogActionMessage = "模型发现未完成：" + detail;
         state.configMessage = "模型发现未完成，请检查当前 Provider 和 API Key。";
-        state.technicalDetail = error instanceof Error ? error.message : String(error);
+        state.technicalDetail = detail;
       } finally {
         pendingAction = "";
         renderState();

@@ -770,10 +770,11 @@ test("模型缺失传输能力信息时统一升格为 HTTP", async () => {
 });
 
 test("上游发现失败不应把模型目录标记为保存错误", async () => {
-  const harness = await catalogHarness({ failDiscovery: true });
+  const harness = await catalogHarness({ failDiscovery: true, initialConfigView: "catalog" });
   await harness.click("discover-models");
   assert.equal(harness.catalogState(), "owned");
   assert.doesNotMatch(harness.message.textContent, /模型候选目录未能保存/);
+  assert.match(harness.message.textContent, /模型发现未完成：discovery failed/);
 });
 
 test("模型上下文待确认时不再显示额外提示", async () => {

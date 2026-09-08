@@ -45,11 +45,6 @@ pub(crate) struct ManagedConfig {
 }
 
 impl ManagedConfig {
-    pub(crate) fn discovery_upstream(&self) -> Result<(Url, UpstreamCompatibility), ConfigError> {
-        let upstream = normalize_upstream(&self.original_base_url, &self.provider)?;
-        Ok((upstream.clone(), upstream_compatibility(&upstream)))
-    }
-
     pub(crate) fn original_preflight(&self) -> Result<Preflight, ConfigError> {
         let upstream = Url::parse(&self.original_base_url).map_err(ConfigError::InvalidBaseUrl)?;
         let compatibility = upstream_compatibility(&upstream);
@@ -813,9 +808,9 @@ base_url = "https://example.com/v1"
             &recovery_path,
         )?;
 
-        let (upstream, compatibility) = managed.discovery_upstream()?;
-        assert_eq!(upstream.as_str(), "https://api.ai-cove.com/v1");
-        assert_eq!(compatibility, UpstreamCompatibility::AiCove);
+        let check = managed.original_preflight()?;
+        assert_eq!(check.upstream.as_str(), "https://api.ai-cove.com/v1");
+        assert_eq!(check.compatibility, UpstreamCompatibility::AiCove);
         Ok(())
     }
 
