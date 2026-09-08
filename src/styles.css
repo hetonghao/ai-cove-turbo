@@ -4697,6 +4697,7 @@ button:disabled {
 
 .b-model-row {
   position: relative;
+  z-index: 0;
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr) auto;
   grid-template-areas: "drag copy actions";
@@ -4708,6 +4709,11 @@ button:disabled {
   background: rgba(21, 30, 26, 0.76);
   will-change: transform;
   transition: border-color var(--speed-standard) var(--ease-out), background var(--speed-standard) var(--ease-out), transform var(--speed-standard) var(--ease-out), opacity var(--speed-standard) var(--ease-out), filter var(--speed-standard) var(--ease-out), box-shadow var(--speed-standard) var(--ease-out);
+}
+
+.b-model-row:hover,
+.b-model-row:focus-within {
+  z-index: 3;
 }
 
 .b-model-row.is-dragging {
