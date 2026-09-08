@@ -452,7 +452,7 @@ impl AppRuntime {
                 });
             }
         }
-        let upstream_url = match self.configured_upstream(&check) {
+        let upstream_url = match self.configured_upstream() {
             Ok(upstream) => upstream,
             Err(error) => {
                 self.block(&error.to_string());
@@ -1158,27 +1158,8 @@ impl AppRuntime {
     }
 
     fn discovery_target(&self) -> Result<Url, catalog_discovery::DiscoveryError> {
-        let managed = lock_mutex(&self.managed).clone();
-        let check = if let Some(managed) = managed.as_ref() {
-            managed
-                .original_preflight()
-                .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?
-        } else {
-            preflight(&self.paths.config_path)
-                .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?
-        };
-        let upstream = self
-            .configured_upstream(&check)
-            .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)?;
-        let compatibility = if self.has_upstream_override() {
-            upstream_compatibility(&upstream)
-        } else {
-            check.compatibility
-        };
-        if compatibility != UpstreamCompatibility::AiCove {
-            return Err(catalog_discovery::DiscoveryError::InvalidUpstream);
-        }
-        Ok(upstream)
+        self.configured_upstream()
+            .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)
     }
 
     pub(crate) async fn discover_model_catalog(
@@ -1363,11 +1344,8 @@ impl AppRuntime {
         lock_mutex(&self.preferences).upstream_override.is_some()
     }
 
-    fn configured_upstream(&self, check: &Preflight) -> Result<Url, ConfigError> {
-        lock_mutex(&self.preferences)
-            .upstream_override
-            .as_deref()
-            .map_or_else(|| Ok(check.upstream.clone()), validate_upstream_override)
+    fn configured_upstream(&self) -> Result<Url, ConfigError> {
+        Url::parse(AI_COVE_UPSTREAM).map_err(ConfigError::InvalidBaseUrl)
     }
 
     async fn start_managed_proxy(
@@ -1431,18 +1409,19 @@ impl AppRuntime {
                 "—".to_owned(),
             )
         };
-        let upstream_text = upstream.as_str().to_owned();
-        let ai_cove = upstream_compatibility(&upstream) == UpstreamCompatibility::AiCove;
+        let requested = upstream.as_str().to_owned();
         let preferences = {
             let mut preferences = lock_mutex(&self.preferences);
-            preferences.upstream_override = Some(upstream_text.clone());
-            if !ai_cove {
-                preferences.confirmed_non_ai_cove_upstream = Some(upstream_text.clone());
-            }
+            preferences.upstream_override = Some(requested.clone());
             preferences.clone()
         };
         save_preferences(&self.paths.preferences_path(), &preferences)
             .map_err(|error| error.to_string())?;
+        let upstream = self
+            .configured_upstream()
+            .map_err(|error| error.to_string())?;
+        let upstream_text = upstream.as_str().to_owned();
+        let ai_cove = upstream_compatibility(&upstream) == UpstreamCompatibility::AiCove;
         self.update_status(|status| {
             status.config_state = "starting".to_owned();
             status.config_message = "正在切换强制上游".to_owned();
@@ -2334,7 +2313,7 @@ supports_websockets = false
     }
 
     #[test]
-    fn discovery_target_follows_forced_ai_cove_upstream() -> Result<(), Box<dyn Error>> {
+    fn discovery_target_always_uses_ai_cove() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let config_path = root.path().join("config.toml");
         let recovery = root.path().join("recovery.json");
@@ -2353,12 +2332,6 @@ supports_websockets = false
             &recovery,
         )?;
         *lock_mutex(&runtime.managed) = Some(managed);
-        assert!(matches!(
-            runtime.discovery_target(),
-            Err(catalog_discovery::DiscoveryError::InvalidUpstream)
-        ));
-        lock_mutex(&runtime.preferences).upstream_override =
-            Some("https://api.ai-cove.com/v1".to_owned());
         assert_eq!(
             runtime.discovery_target()?.as_str(),
             "https://api.ai-cove.com/v1"
@@ -2396,7 +2369,7 @@ supports_websockets = false
         let active = runtime.status().await;
 
         assert!(active.service_healthy);
-        assert_eq!(active.upstream, "https://gateway.example/v1");
+        assert_eq!(active.upstream, "https://api.ai-cove.com/v1");
         assert_eq!(active.original_upstream, "https://api.ai-cove.com/v1");
         assert_eq!(active.endpoint, before.endpoint);
         let managed_config = fs::read_to_string(&config_path)?;
@@ -2419,7 +2392,7 @@ supports_websockets = false
         restarted.initialize().await;
         let persisted = restarted.status().await;
         assert!(persisted.service_healthy);
-        assert_eq!(persisted.upstream, "https://gateway.example/v1");
+        assert_eq!(persisted.upstream, "https://api.ai-cove.com/v1");
         assert_eq!(persisted.original_upstream, "https://api.ai-cove.com/v1");
         assert!(!fs::read_to_string(&config_path)?.contains("https://gateway.example/v1"));
         restarted.shutdown().await?;
