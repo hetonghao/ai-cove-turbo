@@ -1585,22 +1585,9 @@ fn replace_template_identity(text: &str, template: &Value, target: &CatalogModel
         target.display_name.trim()
     };
     let mut sources = Vec::new();
-    if let Some(value) = template.get("display_name").and_then(Value::as_str) {
-        sources.push(value.to_owned());
-    }
-    if let Some(value) = template.get("slug").and_then(Value::as_str) {
-        sources.push(value.to_owned());
-        sources.push(value.replace(['-', '_'], " "));
-        let lower = value.to_ascii_lowercase();
-        if let Some(version) = lower
-            .strip_prefix("gpt-")
-            .and_then(|rest| rest.split(['-', '_']).next())
-            .filter(|part| part.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
-        {
-            sources.push(format!("GPT-{version}"));
-            if let Some((major, _)) = version.split_once('.') {
-                sources.push(format!("GPT-{major}"));
-            }
+    for key in ["display_name", "slug"] {
+        if let Some(value) = template.get(key).and_then(Value::as_str) {
+            sources.extend(identity_aliases(value));
         }
     }
     if sources.is_empty() {
@@ -1615,6 +1602,34 @@ fn replace_template_identity(text: &str, template: &Value, target: &CatalogModel
         }
     }
     result
+}
+
+fn identity_aliases(raw: &str) -> Vec<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let mut aliases = vec![raw.to_owned(), raw.replace(['-', '_'], " ")];
+    let parts = raw
+        .split(['-', '_', ' '])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    for n in 2..=parts.len() {
+        aliases.push(parts[..n].join("-"));
+        aliases.push(parts[..n].join(" "));
+        aliases.push(format!(
+            "{}-{}",
+            parts[0].to_ascii_uppercase(),
+            parts[1..n].join("-")
+        ));
+        if let Some((major, rest)) = parts[1].split_once('.')
+            && !rest.is_empty()
+            && major.chars().all(|ch| ch.is_ascii_digit())
+        {
+            aliases.push(format!("{}-{major}", parts[0].to_ascii_uppercase()));
+        }
+    }
+    aliases
 }
 
 fn validate_root_model(model: &Value, complete_shape: bool) -> Result<(), CatalogError> {
