@@ -123,6 +123,7 @@ pub fn run() -> tauri::Result<()> {
             set_ai_cove_upstream,
             set_upstream_override,
             set_api_key,
+            persist_api_key,
             confirm_non_ai_cove,
             check_for_updates,
             install_update,
@@ -527,6 +528,15 @@ async fn set_ai_cove_upstream(runtime: State<'_, Arc<AppRuntime>>) -> Result<App
         .set_ai_cove_upstream()
         .await
         .map_err(|error| error.to_string())?;
+    Ok(runtime.status().await)
+}
+
+#[tauri::command]
+async fn persist_api_key(
+    runtime: State<'_, Arc<AppRuntime>>,
+    api_key: String,
+) -> Result<AppStatus, String> {
+    runtime.persist_api_key(&api_key).await?;
     Ok(runtime.status().await)
 }
 

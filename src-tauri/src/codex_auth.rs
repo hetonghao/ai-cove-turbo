@@ -8,10 +8,14 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use toml_edit::DocumentMut;
 
 static AUTH_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-static ORIGINAL_KEY: OnceLock<Option<String>> = OnceLock::new();
+static ORIGINAL_KEY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 pub(super) fn set_auth_override(key: Option<String>) {
-    let restored = key.or_else(|| ORIGINAL_KEY.get().and_then(Clone::clone));
+    let restored = key.or_else(|| {
+        ORIGINAL_KEY
+            .get()
+            .and_then(|value| value.lock().ok().and_then(|key| key.clone()))
+    });
     *AUTH_OVERRIDE
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -25,20 +29,41 @@ pub(super) fn effective_auth_headers(config_path: Option<&Path>) -> Option<Heade
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
     let config_path = config_path.map_or_else(|| codex_home.join("config.toml"), Path::to_path_buf);
     let original = ORIGINAL_KEY.get_or_init(|| {
-        resolve_api_key(&codex_home, &config_path).or_else(|| {
+        Mutex::new(resolve_api_key(&codex_home, &config_path).or_else(|| {
             env::var("OPENAI_API_KEY")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
-        })
+        }))
     });
     let key = AUTH_OVERRIDE
         .get()
         .and_then(|value| value.lock().ok().and_then(|key| key.clone()))
-        .or_else(|| original.clone())?;
+        .or_else(|| original.lock().ok().and_then(|key| key.clone()))?;
     let authorization = HeaderValue::from_str(&format!("Bearer {}", key.trim())).ok()?;
     let mut headers = HeaderMap::new();
     headers.insert(header::AUTHORIZATION, authorization);
     Some(headers)
+}
+
+pub(super) fn persist_api_key(config_path: &Path, key: &str) -> Result<(), String> {
+    let home = config_path.parent().ok_or("Codex 配置目录不存在")?;
+    let path = home.join("auth.json");
+    let mut auth = fs::read_to_string(&path)
+        .ok()
+        .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
+        .unwrap_or_else(|| serde_json::json!({"auth_mode": "apiKey"}));
+    auth["auth_mode"] = serde_json::Value::String("apiKey".to_owned());
+    auth["OPENAI_API_KEY"] = serde_json::Value::String(key.to_owned());
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&auth).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("无法保存 Codex 密钥：{e}"))?;
+    *ORIGINAL_KEY
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "密钥状态锁已损坏".to_owned())? = Some(key.to_owned());
+    Ok(())
 }
 
 fn resolve_api_key(codex_home: &Path, config_path: &Path) -> Option<String> {

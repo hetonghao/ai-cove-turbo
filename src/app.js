@@ -3710,6 +3710,13 @@
         }
         return;
       }
+      const persistKey = event.target.closest?.('[data-action="persist-api-key"]');
+      if (persistKey) {
+        const key = String($('[data-upstream-key-field]')?.value || '').trim();
+        if (invoke) void invoke('persist_api_key', { apiKey: key }).then(applyStatus);
+        else applyPreviewAction('persist_api_key', { apiKey: key });
+        return;
+      }
       const upstreamSave = event.target.closest?.('[data-action="save-upstream"]');
       if (upstreamSave) {
         void saveUpstreamOverride();

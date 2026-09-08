@@ -60,6 +60,10 @@ pub(crate) fn effective_auth_headers(config_path: Option<&Path>) -> Option<Heade
     codex_auth::effective_auth_headers(config_path)
 }
 
+pub(crate) fn persist_api_key(config_path: &Path, key: &str) -> Result<(), String> {
+    codex_auth::persist_api_key(config_path, key)
+}
+
 pub(crate) fn set_auth_override(key: Option<String>) {
     codex_auth::set_auth_override(key);
 }

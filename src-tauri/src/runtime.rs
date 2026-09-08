@@ -33,8 +33,8 @@ use crate::{
     },
     proxy::{
         CapabilityModelStatus, ConnectionSnapshot, Metrics, ModelPolicyStatus, ModelPolicyUpdate,
-        ProxyHandle, ProxyOptions, effective_auth_headers, set_auth_override,
-        start_proxy_with_policy,
+        ProxyHandle, ProxyOptions, effective_auth_headers, persist_api_key as persist_auth_key,
+        set_auth_override, start_proxy_with_policy,
         traffic::{RequestEvent, TrafficWindow},
     },
     session_names::{SessionNameCache, SessionNameSnapshot, SessionNameTask},
@@ -1382,6 +1382,16 @@ impl AppRuntime {
             }
         };
         Ok((proxy, managed))
+    }
+
+    pub(crate) async fn persist_api_key(&self, raw: &str) -> Result<(), String> {
+        let key = raw.trim();
+        if key.is_empty() {
+            return Err("请输入要保存的密钥".to_owned());
+        }
+        persist_auth_key(&self.paths.config_path, key)?;
+        set_auth_override(Some(key.to_owned()));
+        Ok(())
     }
 
     pub(crate) async fn set_api_key(&self, raw: &str) -> Result<(), String> {
