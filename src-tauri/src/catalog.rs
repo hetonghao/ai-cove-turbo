@@ -1591,8 +1591,16 @@ fn replace_template_identity(text: &str, template: &Value, target: &CatalogModel
     if let Some(value) = template.get("slug").and_then(Value::as_str) {
         sources.push(value.to_owned());
         sources.push(value.replace(['-', '_'], " "));
-        if value.to_ascii_lowercase().starts_with("gpt-") {
-            sources.extend(["GPT-5.6".to_owned(), "GPT-5".to_owned()]);
+        let lower = value.to_ascii_lowercase();
+        if let Some(version) = lower
+            .strip_prefix("gpt-")
+            .and_then(|rest| rest.split(['-', '_']).next())
+            .filter(|part| part.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        {
+            sources.push(format!("GPT-{version}"));
+            if let Some((major, _)) = version.split_once('.') {
+                sources.push(format!("GPT-{major}"));
+            }
         }
     }
     if sources.is_empty() {
@@ -3102,6 +3110,28 @@ mod tests {
         assert_eq!(deepseek["default_reasoning_summary"], "none");
         assert!(deepseek.get("apply_patch_tool_type").is_none());
         assert!(deepseek.get("additional_speed_tiers").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn new_model_replaces_gpt_6_template_identity() -> Result<(), Box<dyn Error>> {
+        let bytes = br#"{"models":[{"slug":"gpt-6-astra","display_name":"GPT-6-Astra","description":"template","visibility":"list","priority":1,"context_window":125000,"max_context_window":250000,"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low","truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true,"base_instructions":"You are Codex, an agent based on GPT-6.","model_messages":{"instructions_template":"Follow GPT-6 instructions"}}]}"#;
+        let mut model = complete_model("glm-4.6");
+        model.display_name = "GLM-4.6".to_owned();
+        let (next, _) = prepare_catalog_models(bytes, &CatalogMetadata::default(), &[model], &[])?;
+        let document: Value = serde_json::from_slice(&next)?;
+        let glm = document["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|model| model["slug"] == "glm-4.6"))
+            .ok_or("glm model missing")?;
+        assert_eq!(
+            glm["base_instructions"],
+            "You are Codex, an agent based on GLM-4.6."
+        );
+        assert_eq!(
+            glm["model_messages"]["instructions_template"],
+            "Follow GLM-4.6 instructions"
+        );
         Ok(())
     }
 
