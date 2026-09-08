@@ -18,6 +18,11 @@ fn default_truncation_policy() -> Value {
     serde_json::json!({"mode": "tokens", "limit": 10_000})
 }
 
+fn default_input_modalities() -> Vec<String> {
+    // Codex treats omitted modalities as text+image. Writing ["text"] makes the app reject drops.
+    vec!["text".to_owned(), "image".to_owned()]
+}
+
 // CLIPPY-ALLOW: Codex 的模型能力协议使用独立布尔字段，合并会改变 JSON 契约。
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -111,7 +116,7 @@ impl CatalogModel {
                 .insert("description".to_owned(), "模板".to_owned());
         }
         if self.input_modalities.is_empty() {
-            self.input_modalities = vec!["text".to_owned()];
+            self.input_modalities = default_input_modalities();
             self.field_sources
                 .insert("inputModalities".to_owned(), "模板".to_owned());
         }
@@ -305,7 +310,7 @@ impl CatalogModel {
             truncation_policy: Some(default_truncation_policy()),
             shell_type: default_shell_type(),
             support_verbosity: true,
-            input_modalities: vec!["text".to_owned()],
+            input_modalities: default_input_modalities(),
             supported_reasoning_levels: Vec::new(),
             default_reasoning_level: None,
             supports_reasoning_summary_parameter: false,

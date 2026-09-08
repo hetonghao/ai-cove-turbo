@@ -258,6 +258,10 @@ mod tests {
                 .first()
                 .is_some_and(|model| !model.supports_search_tool)
         );
+        assert_eq!(
+            models.first().map(|model| model.input_modalities.clone()),
+            Some(vec!["text".to_owned(), "image".to_owned()])
+        );
     }
 
     #[test]
@@ -295,7 +299,10 @@ mod tests {
         }]}))
         .expect("codex model list");
         let model = models.first().expect("model");
-        assert_eq!(model.input_modalities, vec!["text"]);
+        assert_eq!(
+            model.input_modalities,
+            vec!["text".to_owned(), "image".to_owned()]
+        );
         assert_eq!(model.default_reasoning_summary.as_deref(), Some("none"));
         assert_eq!(
             model.field_sources.get("defaultReasoningSummary"),

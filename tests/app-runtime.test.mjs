@@ -3140,6 +3140,7 @@ test("上游发现列表支持本地筛选并按手动创建默认参数初始�
   const discoveredModels = [
     { slug: "deepseek-chat", displayName: "DeepSeek Chat" },
     { slug: "gpt-5-preview", displayName: "GPT 5 Preview" },
+    { slug: "grok-4.6", displayName: "grok-4.6", inputModalities: ["text"] },
   ];
   const harness = await catalogHarness({ discoveredModels });
   await harness.click("discover-models");
@@ -3147,13 +3148,13 @@ test("上游发现列表支持本地筛选并按手动创建默认参数初始�
   // 默认显示全部发现的模型
   assert.match(harness.discoveryList().innerHTML, /deepseek-chat/);
   assert.match(harness.discoveryList().innerHTML, /gpt-5-preview/);
-  assert.match(harness.discoverySummary().textContent, /2 个模型/);
+  assert.match(harness.discoverySummary().textContent, /3 个模型/);
 
   // 输入筛选关键词进行本地过滤
   await harness.inputDiscoveryFilter("deepseek");
   assert.match(harness.discoveryList().innerHTML, /deepseek-chat/);
   assert.doesNotMatch(harness.discoveryList().innerHTML, /gpt-5-preview/);
-  assert.match(harness.discoverySummary().textContent, /匹配 1 \/ 2 个模型/);
+  assert.match(harness.discoverySummary().textContent, /匹配 1 \/ 3 个模型/);
 
   // 筛选无匹配项
   await harness.inputDiscoveryFilter("not-found-model");
@@ -3180,8 +3181,17 @@ test("上游发现列表支持本地筛选并按手动创建默认参数初始�
     { effort: "xhigh", description: "" },
   ]));
   assert.equal(importedModel.defaultReasoningLevel, "high");
+  assert.equal(JSON.stringify(importedModel.inputModalities), JSON.stringify(["text", "image"]));
   assert.equal(importedModel.fieldSources.contextWindow, "模板");
   assert.equal(importedModel.fieldSources.maxContextWindow, "模板");
   assert.equal(importedModel.fieldSources.supportedReasoningLevels, "模板");
   assert.equal(importedModel.fieldSources.defaultReasoningLevel, "模板");
+  assert.equal(importedModel.fieldSources.inputModalities, "模板");
+
+  await harness.importDiscovered("grok-4.6");
+  const grokSave = harness.calls.filter((call) => call.command === "save_model_settings").at(-1);
+  assert.ok(grokSave, "save_model_settings was called on grok import");
+  const grok = grokSave.args.models.find((model) => model.slug === "grok-4.6");
+  assert.equal(JSON.stringify(grok.inputModalities), JSON.stringify(["text", "image"]));
+  assert.equal(grok.fieldSources.inputModalities, "模板");
 });

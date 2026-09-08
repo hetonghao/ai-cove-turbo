@@ -1892,7 +1892,10 @@
     normalized.effectiveContextWindowPercent = normalized.effectiveContextWindowPercent ?? 95;
     normalized.autoCompactTokenLimit = Math.floor(normalized.contextWindow * 0.9);
     normalized.truncationPolicy = normalized.truncationPolicy || "auto";
-    normalized.inputModalities = normalized.inputModalities?.length ? [...normalized.inputModalities] : ["text", "image"];
+    const modalitiesFromUpstream = normalized.fieldSources?.inputModalities === "上游" && normalized.inputModalities?.length;
+    normalized.inputModalities = modalitiesFromUpstream
+      ? [...normalized.inputModalities]
+      : [...DEFAULT_MODEL_CAPABILITIES.inputModalities];
     const defaultEfforts = [
       { effort: "low", description: "" },
       { effort: "medium", description: "" },
@@ -1922,6 +1925,7 @@
       maxContextWindow: hasValidMax && normalized.fieldSources?.maxContextWindow && normalized.fieldSources.maxContextWindow !== "待确认" ? normalized.fieldSources.maxContextWindow : "模板",
       supportedReasoningLevels: hasLevels && normalized.fieldSources?.supportedReasoningLevels && normalized.fieldSources.supportedReasoningLevels !== "待确认" ? normalized.fieldSources.supportedReasoningLevels : "模板",
       defaultReasoningLevel: normalized.fieldSources?.defaultReasoningLevel && normalized.fieldSources.defaultReasoningLevel !== "待确认" ? normalized.fieldSources.defaultReasoningLevel : "模板",
+      inputModalities: modalitiesFromUpstream ? "上游" : "模板",
     };
     return normalized;
   }
