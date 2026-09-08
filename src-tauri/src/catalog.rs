@@ -2,7 +2,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -1052,7 +1052,7 @@ fn now_ms_string() -> String {
 }
 
 fn codex_version(executable: &Path, current_dir: Option<&Path>) -> Option<String> {
-    let mut command = Command::new(executable);
+    let mut command = crate::process_command(executable);
     command
         .arg("--version")
         .stdin(Stdio::null())
@@ -1089,7 +1089,7 @@ fn canonical_digest(value: &Value) -> Result<String, serde_json::Error> {
 }
 
 fn bundled_catalog_bytes(executable: &Path, current_dir: Option<&Path>) -> Option<Vec<u8>> {
-    let mut command = Command::new(executable);
+    let mut command = crate::process_command(executable);
     command
         .args(["debug", "models", "--bundled"])
         .stdin(Stdio::null())

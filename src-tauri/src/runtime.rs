@@ -435,6 +435,8 @@ impl AppRuntime {
         ) {
             Ok(catalog) => {
                 *lock_mutex(&self.catalog) = catalog.clone();
+                self.catalog_last_sync_ms
+                    .store(unix_time_ms(), Ordering::Relaxed);
                 self.update_status(|status| status.catalog = catalog);
             }
             Err(error) => {
@@ -509,7 +511,6 @@ impl AppRuntime {
     }
 
     pub(crate) async fn status(&self) -> AppStatus {
-        self.refresh_catalog();
         self.refresh_ownership().await;
         self.verify_codex_restart().await;
         let _ = self.connection_snapshot().await;
@@ -799,6 +800,7 @@ impl AppRuntime {
         if let Some(catalog) = catalog_update {
             self.update_status(|status| status.catalog = catalog);
         }
+        self.refresh_catalog();
     }
 
     #[allow(clippy::unused_async)]
@@ -1821,7 +1823,7 @@ impl AppRuntime {
         update(&mut write_lock(&self.status));
     }
 
-    fn refresh_catalog(&self) {
+    pub(crate) fn refresh_catalog(&self) {
         let now = unix_time_ms();
         let previous = self.catalog_last_sync_ms.load(Ordering::Relaxed);
         if !catalog_sync_due(previous, now) {
@@ -1846,7 +1848,7 @@ impl AppRuntime {
             return;
         };
         let current = lock_mutex(&self.catalog).clone();
-        if current.state == "restored" {
+        if current.state != "owned" {
             return;
         }
         let home = self
@@ -2142,20 +2144,7 @@ pub(crate) fn codex_desktop_process_id() -> Option<u32> {
 
 #[cfg(all(not(test), target_os = "windows"))]
 pub(crate) fn codex_desktop_process_id() -> Option<u32> {
-    let output = crate::windows_process::hidden_command("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-Process -Name Codex -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Id",
-        ])
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().parse().ok())
-        .flatten()
+    crate::windows_process::process_id_by_name("Codex")
 }
 
 #[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]

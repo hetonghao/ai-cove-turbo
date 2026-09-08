@@ -1,4 +1,4 @@
-use std::{path::Path, process::Command};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -81,7 +81,7 @@ WHERE child.id = '{thread_id}'
 LIMIT 1;
 "
     );
-    let output = Command::new(executable)
+    let output = crate::process_command(executable)
         .arg("-readonly")
         .arg("-json")
         .arg("-cmd")
@@ -149,7 +149,7 @@ LEFT JOIN threads AS parent ON parent.id = edge.parent_thread_id
 WHERE child.id IN ({ids});
 "
     );
-    let output = Command::new(executable)
+    let output = crate::process_command(executable)
         .arg("-readonly")
         .arg("-json")
         .arg("-cmd")

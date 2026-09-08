@@ -233,6 +233,7 @@
   let state = { ...(invoke ? desktopStatus : previewStatus), tab: "live", configView: "settings", nonAiCoveConfirmed: false };
   let pendingAction = "";
   let refreshing = false;
+  let statusTimer = 0;
   let streamPaused = false;
   let liveTailFollowing = true;
   let unseenLiveRequests = 0;
@@ -2090,12 +2091,24 @@
   function selectTab(tab, options = {}) {
     if (!TABS.includes(tab)) return;
     if (tab !== "live") closeConnectionHoverCard();
+    const tabChanged = tab !== state.tab;
     const previousTab = state.tab;
     state.tab = tab;
     renderTab({ ...options, previousTab });
     if (tab === "live") renderLiveStream({ animateNew: false });
     if (tab === "statistics") renderStatistics();
     if (options.updateUrl !== false) updateUrl();
+    if (tabChanged) startStatusPolling();
+  }
+
+  function statusRefreshMs() {
+    return state.tab === "live" ? 1_000 : 5_000;
+  }
+
+  function startStatusPolling() {
+    if (!invoke) return;
+    if (statusTimer && typeof window.clearInterval === "function") window.clearInterval(statusTimer);
+    statusTimer = window.setInterval(refreshStatus, statusRefreshMs());
   }
 
   function escapeHtml(value) {
@@ -3974,7 +3987,7 @@
         await refreshStatus();
         await checkUpdatesOncePerDay();
       })();
-      window.setInterval(refreshStatus, 1_000);
+      startStatusPolling();
     }
   }
 

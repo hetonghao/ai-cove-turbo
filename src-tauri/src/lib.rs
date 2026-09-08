@@ -62,6 +62,17 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartExt};
 use tauri_plugin_updater::UpdaterExt;
 
+pub(crate) fn process_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[cfg(windows)]
+    {
+        windows_process::hidden_command(program)
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
+    }
+}
+
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "ai-cove-turbo";
 const OPEN_MENU_ID: &str = "open";
@@ -141,6 +152,7 @@ pub fn run() -> tauri::Result<()> {
             if matches!(event, WindowEvent::Focused(true)) {
                 let runtime = Arc::clone(window.state::<Arc<AppRuntime>>().inner());
                 tauri::async_runtime::spawn(async move {
+                    runtime.refresh_catalog();
                     runtime.verify_codex_restart().await;
                 });
             }
@@ -236,7 +248,7 @@ fn open_ai_cove_url() -> Result<(), String> {
         .spawn()
         .map_err(|error| error.to_string())?;
     #[cfg(target_os = "windows")]
-    Command::new("cmd")
+    process_command("cmd")
         .args(["/C", "start", "", AI_COVE_URL])
         .spawn()
         .map_err(|error| error.to_string())?;

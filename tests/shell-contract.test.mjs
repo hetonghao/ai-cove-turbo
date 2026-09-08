@@ -247,10 +247,13 @@ test("Tauri 前端通过约定命令读取和修改真实状态", async () => {
   ];
 
   // When: 前端加载并进入真实桌面运行时。
-  // Then: 所有动作走 invoke，状态每秒刷新，浏览器预览仍有明确降级路径。
+  // Then: 所有动作走 invoke，直播页每秒刷新、其它页五秒刷新，浏览器预览仍有明确降级路径。
   for (const command of commands) assert.match(app, new RegExp(`['"]${command}['"]`));
   assert.match(app, /window\.__TAURI__\?\.core\?\.invoke/);
-  assert.match(app, /setInterval\([^,]+,\s*1_000\)/s);
+  assert.match(app, /function statusRefreshMs\(\)/);
+  assert.match(app, /state\.tab === "live" \? 1_000 : 5_000/);
+  assert.match(app, /setInterval\(refreshStatus,\s*statusRefreshMs\(\)\)/);
+  assert.match(app, /if \(tabChanged\) startStatusPolling\(\)/);
   assert.match(app, /Preview/);
   assert.match(app, /setRouteResetOpen/);
   assert.match(app, /document\.body\.appendChild\(bubble\)/);
@@ -491,6 +494,56 @@ test("Windows 重启 Codex 不闪出 PowerShell 并返回新进程", async () =>
   assert.match(windowsRestart, /Start-Process -FilePath \$path -PassThru/);
   assert.match(windowsRestart, /\.output\(\)/);
   assert.match(windowsRestart, /parse::<u32>\(\)/);
+});
+
+test("Windows 探测 Codex 不启动 PowerShell", async () => {
+  const runtime = (await readFile(new URL("../src-tauri/src/runtime.rs", import.meta.url), "utf8")).replaceAll("\r\n", "\n");
+  const start = runtime.indexOf('#[cfg(all(not(test), target_os = "windows"))]\npub(crate) fn codex_desktop_process_id');
+  const end = runtime.indexOf('#[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]', start);
+  const windowsProbe = runtime.slice(start, end);
+
+  assert.notEqual(start, -1);
+  assert.match(windowsProbe, /crate::windows_process::process_id_by_name\("Codex"\)/);
+  assert.doesNotMatch(windowsProbe, /powershell/i);
+  assert.doesNotMatch(windowsProbe, /Get-Process/);
+});
+
+test("Windows 同步模型目录不闪出控制台", async () => {
+  const catalog = await readFile(new URL("../src-tauri/src/catalog.rs", import.meta.url), "utf8");
+  const lib = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+
+  assert.match(catalog, /crate::process_command\(executable\)/);
+  assert.doesNotMatch(catalog, /Command::new\(executable\)/);
+  assert.match(lib, /fn process_command\(/);
+  assert.match(lib, /windows_process::hidden_command\(program\)/);
+});
+
+test("状态刷新不探测模型目录", async () => {
+  const runtime = (await readFile(new URL("../src-tauri/src/runtime.rs", import.meta.url), "utf8")).replaceAll("\r\n", "\n");
+  const start = runtime.indexOf("pub(crate) async fn status(");
+  const end = runtime.indexOf("pub(crate) async fn reset_route_metrics", start);
+  const status = runtime.slice(start, end);
+
+  assert.notEqual(start, -1);
+  assert.doesNotMatch(status, /self\.refresh_catalog\(\)/);
+});
+
+test("模型目录只在窗口回到前台和 Codex 重启后同步", async () => {
+  const lib = (await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8")).replaceAll("\r\n", "\n");
+  const runtime = (await readFile(new URL("../src-tauri/src/runtime.rs", import.meta.url), "utf8")).replaceAll("\r\n", "\n");
+  const focusedStart = lib.indexOf("WindowEvent::Focused(true)");
+  const focused = lib.slice(focusedStart, lib.indexOf(".build(tauri::generate_context", focusedStart));
+  const restartedStart = runtime.indexOf("pub(crate) fn mark_desktop_restarted");
+  const restarted = runtime.slice(restartedStart, runtime.indexOf("pub(crate) async fn model_catalog", restartedStart));
+  const initializeStart = runtime.indexOf("pub(crate) async fn initialize(");
+  const initialize = runtime.slice(initializeStart, runtime.indexOf("pub(crate) async fn status(", initializeStart));
+
+  assert.notEqual(focusedStart, -1);
+  assert.match(focused, /refresh_catalog\(/);
+  assert.match(restarted, /self\.refresh_catalog\(\)/);
+  assert.match(initialize, /ensure_catalog\(/);
+  assert.match(initialize, /catalog_last_sync_ms\.store\(/);
+  assert.doesNotMatch(initialize, /self\.refresh_catalog\(\)/);
 });
 
 test("更新下载失败后进入可重试状态", async () => {
