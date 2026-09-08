@@ -299,6 +299,7 @@
             <div class="c-upstream-dialog__body">
               <div class="c-upstream-candidates" data-upstream-candidates aria-label="候选上游"><button class="c-upstream-candidate" type="button" data-upstream-candidate="https://api.ai-cove.com/v1"><span>固定 AI Cove</span><code>https://api.ai-cove.com/v1</code></button><button class="c-upstream-candidate" type="button" data-upstream-candidate="https://example.com/v1"><span>接管前的原始 Codex 上游</span><code>https://example.com/v1</code></button></div>
               <label class="b-model-editor__field c-upstream-dialog__field"><span>上游地址</span><input data-upstream-field type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://gateway.example/v1" aria-describedby="upstream-override-hint" required /></label>
+              <label class="b-model-editor__field c-upstream-dialog__field"><span>上游密钥</span><input data-upstream-key-field type="password" autocomplete="new-password" spellcheck="false" placeholder="留空恢复本次启动时的 Codex 密钥" aria-describedby="upstream-override-hint" /></label>
               <p id="upstream-override-hint" class="c-upstream-dialog__hint">保存会中断当前进行中的请求；新请求会立即使用新地址。</p>
             </div>
             <p class="b-model-dialog__error" data-upstream-error role="alert"></p>

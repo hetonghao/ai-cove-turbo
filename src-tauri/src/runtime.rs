@@ -33,7 +33,8 @@ use crate::{
     },
     proxy::{
         CapabilityModelStatus, ConnectionSnapshot, Metrics, ModelPolicyStatus, ModelPolicyUpdate,
-        ProxyHandle, ProxyOptions, effective_auth_headers, start_proxy_with_policy,
+        ProxyHandle, ProxyOptions, effective_auth_headers, set_auth_override,
+        start_proxy_with_policy,
         traffic::{RequestEvent, TrafficWindow},
     },
     session_names::{SessionNameCache, SessionNameSnapshot, SessionNameTask},
@@ -1381,6 +1382,12 @@ impl AppRuntime {
             }
         };
         Ok((proxy, managed))
+    }
+
+    pub(crate) async fn set_api_key(&self, raw: &str) -> Result<(), String> {
+        let key = raw.trim();
+        set_auth_override((!key.is_empty()).then(|| key.to_owned()));
+        Ok(())
     }
 
     pub(crate) async fn set_upstream_override(&self, raw: &str) -> Result<(), String> {

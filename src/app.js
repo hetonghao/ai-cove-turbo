@@ -1515,6 +1515,8 @@
     upstreamDialogTrigger = trigger;
     const field = $("[data-upstream-field]");
     const error = $("[data-upstream-error]");
+    const keyField = $("[data-upstream-key-field]");
+    if (keyField) keyField.value = "";
     if (field) field.value = state.upstream === "—" ? "" : String(state.upstream || "");
     if (error) error.textContent = "";
     renderUpstreamDialog();
@@ -1538,7 +1540,9 @@
     if (pendingAction) return;
     const field = $("[data-upstream-field]");
     const error = $("[data-upstream-error]");
+    const keyField = $("[data-upstream-key-field]");
     const value = String(field?.value || "").trim();
+    const apiKey = String(keyField?.value || "").trim();
     if (!value) {
       if (error) error.textContent = "请输入上游地址。";
       return;
@@ -1550,8 +1554,13 @@
       save.textContent = "切换中…";
     }
     try {
-      if (invoke) applyStatus(await invoke("set_upstream_override", { upstream: value }));
-      else applyPreviewAction("set_upstream_override", { upstream: value });
+      if (invoke) {
+        applyStatus(await invoke("set_upstream_override", { upstream: value }));
+        applyStatus(await invoke("set_api_key", { apiKey }));
+      } else {
+        applyPreviewAction("set_upstream_override", { upstream: value });
+        applyPreviewAction("set_api_key", { apiKey });
+      }
       closeUpstreamDialog();
     } catch (saveError) {
       if (error) error.textContent = saveError instanceof Error ? saveError.message : String(saveError);

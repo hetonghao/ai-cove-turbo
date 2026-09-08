@@ -60,6 +60,10 @@ pub(crate) fn effective_auth_headers(config_path: Option<&Path>) -> Option<Heade
     codex_auth::effective_auth_headers(config_path)
 }
 
+pub(crate) fn set_auth_override(key: Option<String>) {
+    codex_auth::set_auth_override(key);
+}
+
 pub(crate) use hybrid_pool::ConnectionSnapshot;
 use private_websocket::{PrivateTlsConfig, client_upgrade_response};
 use timing::{HttpTiming, HttpTimingControl, HttpTimingInput, instrument_http_stream};

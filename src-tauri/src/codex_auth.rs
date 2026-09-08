@@ -1,10 +1,22 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 
 use axum::http::{HeaderMap, HeaderValue, header};
 use toml_edit::DocumentMut;
+
+static AUTH_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static ORIGINAL_KEY: OnceLock<Option<String>> = OnceLock::new();
+
+pub(super) fn set_auth_override(key: Option<String>) {
+    let restored = key.or_else(|| ORIGINAL_KEY.get().and_then(Clone::clone));
+    *AUTH_OVERRIDE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("auth override lock") = restored;
+}
 
 pub(super) fn effective_auth_headers(config_path: Option<&Path>) -> Option<HeaderMap> {
     let codex_home = env::var_os("CODEX_HOME")
@@ -12,11 +24,17 @@ pub(super) fn effective_auth_headers(config_path: Option<&Path>) -> Option<Heade
         .or_else(|| config_path.and_then(Path::parent).map(Path::to_path_buf))
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
     let config_path = config_path.map_or_else(|| codex_home.join("config.toml"), Path::to_path_buf);
-    let key = resolve_api_key(&codex_home, &config_path).or_else(|| {
-        env::var("OPENAI_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-    })?;
+    let original = ORIGINAL_KEY.get_or_init(|| {
+        resolve_api_key(&codex_home, &config_path).or_else(|| {
+            env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+    });
+    let key = AUTH_OVERRIDE
+        .get()
+        .and_then(|value| value.lock().ok().and_then(|key| key.clone()))
+        .or_else(|| original.clone())?;
     let authorization = HeaderValue::from_str(&format!("Bearer {}", key.trim())).ok()?;
     let mut headers = HeaderMap::new();
     headers.insert(header::AUTHORIZATION, authorization);
