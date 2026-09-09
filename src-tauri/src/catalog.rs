@@ -1022,6 +1022,10 @@ fn root_snapshot(config_path: &Path, bundled_executable: Option<&Path>) -> Optio
         let Ok(source_models) = parse_models(&source_bytes) else {
             continue;
         };
+        let source_models = source_models
+            .into_iter()
+            .filter(|model| !matches!(model.slug.as_str(), "gpt-5.4" | "gpt-5.4-mini"))
+            .collect::<Vec<_>>();
         let catalog_version = source_document
             .get("version")
             .and_then(Value::as_str)
