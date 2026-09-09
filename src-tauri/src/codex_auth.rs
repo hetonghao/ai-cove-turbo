@@ -73,6 +73,11 @@ fn resolve_api_key(codex_home: &Path, config_path: &Path) -> Option<String> {
     {
         return Some(value.trim().to_owned());
     }
+    if let Some(value) = provider_api_key(config_path)
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
     if let Ok(value) = env::var("OPENAI_API_KEY")
         && !value.trim().is_empty()
     {
@@ -94,6 +99,20 @@ fn resolve_api_key(codex_home: &Path, config_path: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn provider_api_key(config_path: &Path) -> Option<String> {
+    let source = fs::read_to_string(config_path).ok()?;
+    let document = source.parse::<DocumentMut>().ok()?;
+    let provider = document.get("model_provider")?.as_str()?;
+    document
+        .get("model_providers")?
+        .get(provider)?
+        .get("api_key")?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 fn provider_env_key(config_path: &Path) -> Option<String> {
     let source = fs::read_to_string(config_path).ok()?;
     let document = source.parse::<DocumentMut>().ok()?;
@@ -110,6 +129,25 @@ fn provider_env_key(config_path: &Path) -> Option<String> {
 mod tests {
     use super::resolve_api_key;
     use std::fs;
+
+    #[test]
+    fn provider_api_key_is_consumed_from_selected_provider() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = root.path().join("config.toml");
+        fs::write(
+            &config,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+api_key = "provider-key"
+"#,
+        )
+        .expect("config");
+        assert_eq!(
+            resolve_api_key(root.path(), &config).as_deref(),
+            Some("provider-key")
+        );
+    }
 
     #[test]
     fn file_api_key_is_consumed_without_persisting_a_copy() {

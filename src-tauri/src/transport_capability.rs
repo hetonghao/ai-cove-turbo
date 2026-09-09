@@ -338,7 +338,13 @@ pub(super) async fn fetch_batch(
         .await
         .map_err(|_| "request_failed")?;
     if !response.status().is_success() {
-        return Err("request_rejected");
+        return Err(match response.status().as_u16() {
+            401 => "request_rejected_401",
+            403 => "request_rejected_403",
+            404 => "request_rejected_404",
+            500..=599 => "request_rejected_5xx",
+            _ => "request_rejected",
+        });
     }
     let bytes = response.bytes().await.map_err(|_| "response_failed")?;
     CapabilityResponse::parse(&bytes)
