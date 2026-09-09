@@ -9,7 +9,7 @@
 
   const models = [
     { slug: "gpt-5.3-codex", name: "GPT-5.3 Codex", context: "272k / 872k", reasoning: "low · high", transport: "auto", capability: "WS 可用", visible: true, description: "默认的 Codex 主力候选" },
-    { slug: "gpt-5.4", name: "GPT-5.4", context: "272k / 872k", reasoning: "medium · high", transport: "auto", capability: "WS 可用", visible: true, description: "适合复杂分析与长上下文" },
+    { slug: "gpt-5.4", rootMissing: true, name: "GPT-5.4", context: "272k / 872k", reasoning: "medium · high", transport: "auto", capability: "WS 可用", visible: true, description: "适合复杂分析与长上下文" },
     { slug: "ox-alpha", name: "ox-alpha", context: "125k / 250k", reasoning: "none", transport: "http", capability: "仅 HTTP", visible: true, description: "上游不提供 WebSocket" },
     { slug: "grok-4.6", name: "grok-4.6", context: "128k / 256k", reasoning: "medium", transport: "auto", capability: "WS 可用", visible: false, description: "备用创意与检索候选" },
     { slug: "codex-auto-review", name: "codex-auto-review", context: "125k / 250k", reasoning: "high", transport: "auto", capability: "WS 可用", visible: false, description: "用于代码审查的低频候选" },

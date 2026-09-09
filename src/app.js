@@ -206,7 +206,7 @@
       sourcePath: "~/.codex/model-catalogs/gpt-5.6-1m.json",
       models: [
         { slug: "gpt-5.3-codex", displayName: "GPT-5.3 Codex", description: "默认的 Codex 主力候选", visibility: "list", priority: 1, contextWindow: 272000, maxContextWindow: 872000, supportedReasoningLevels: [{ effort: "low", description: "低延迟" }, { effort: "high", description: "深度推理" }], defaultReasoningLevel: "low", supportsReasoningSummaryParameter: true, defaultReasoningSummary: "auto", inputModalities: ["text", "image"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
-        { slug: "gpt-5.4", displayName: "GPT-5.4", description: "适合复杂分析与长上下文", visibility: "list", priority: 2, contextWindow: 272000, maxContextWindow: 872000, supportedReasoningLevels: [{ effort: "medium", description: "平衡" }, { effort: "high", description: "深度推理" }], defaultReasoningLevel: "medium", supportsReasoningSummaryParameter: true, defaultReasoningSummary: "auto", inputModalities: ["text", "image"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
+        { slug: "gpt-5.4", rootMissing: true, displayName: "GPT-5.4", description: "适合复杂分析与长上下文", visibility: "list", priority: 2, contextWindow: 272000, maxContextWindow: 872000, supportedReasoningLevels: [{ effort: "medium", description: "平衡" }, { effort: "high", description: "深度推理" }], defaultReasoningLevel: "medium", supportsReasoningSummaryParameter: true, defaultReasoningSummary: "auto", inputModalities: ["text", "image"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
         { slug: "ox-alpha", displayName: "ox-alpha", description: "上游不提供 WebSocket", visibility: "list", priority: 3, contextWindow: 125000, maxContextWindow: 250000, supportedReasoningLevels: [{ effort: "none", description: "不使用推理" }], defaultReasoningLevel: "none", inputModalities: ["text"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
         { slug: "grok-4.6", displayName: "grok-4.6", description: "备用创意与检索候选", visibility: "hide", priority: 4, contextWindow: 128000, maxContextWindow: 256000, supportedReasoningLevels: [{ effort: "medium", description: "平衡" }], defaultReasoningLevel: "medium", inputModalities: ["text"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
         { slug: "codex-auto-review", displayName: "codex-auto-review", description: "用于代码审查的低频候选", visibility: "hide", priority: 5, contextWindow: 125000, maxContextWindow: 250000, supportedReasoningLevels: [{ effort: "high", description: "深度推理" }], defaultReasoningLevel: "high", inputModalities: ["text"], fieldSources: { contextWindow: "上游", maxContextWindow: "上游", supportedReasoningLevels: "上游" } },
@@ -216,6 +216,7 @@
       loaded: true,
       requestVerified: false,
       revision: "preview-revision",
+      metadata: { rootAvailable: true, rootSourceType: "bundled_cli", rootRemovedSlugs: ["gpt-5.4", "gpt-5.4-mini"] },
     },
   };
   const previewConnectionSnapshot = {
