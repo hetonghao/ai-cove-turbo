@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-cove-turbo"
-version = "0.1.0-pre.4"
+version = "0.1.0-pre.5"
 dependencies = [
  "axum",
  "bytes",
