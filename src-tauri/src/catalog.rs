@@ -1016,16 +1016,15 @@ fn root_snapshot(config_path: &Path, bundled_executable: Option<&Path>) -> Optio
         let Some(source_bytes) = bundled_catalog_bytes(executable, config_path.parent()) else {
             continue;
         };
-        let Ok(source_document) = serde_json::from_slice::<Value>(&source_bytes) else {
+        let Ok(mut source_document) = serde_json::from_slice::<Value>(&source_bytes) else {
             continue;
         };
-        let Ok(source_models) = parse_models(&source_bytes) else {
+        let Some(models) = source_document.get_mut("models").and_then(Value::as_array_mut) else {
             continue;
         };
-        let source_models = source_models
-            .into_iter()
-            .filter(|model| !matches!(model.slug.as_str(), "gpt-5.4" | "gpt-5.4-mini"))
-            .collect::<Vec<_>>();
+        models.retain(|model| model.get("upgrade").and_then(|upgrade| upgrade.get("retirement_at")).and_then(Value::as_str).is_none());
+        let source_bytes = serde_json::to_vec(&source_document).ok()?;
+        let Ok(source_models) = parse_models(&source_bytes) else { continue; };
         let catalog_version = source_document
             .get("version")
             .and_then(Value::as_str)
