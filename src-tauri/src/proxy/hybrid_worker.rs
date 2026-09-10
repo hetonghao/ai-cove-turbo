@@ -103,6 +103,7 @@ pub(super) async fn handle_worker_event(
     };
     match event {
         WorkerEvent::Message(message) => {
+            session.observe_deepseek_tool_event(&message);
             let from_websocket = active
                 .as_ref()
                 .is_some_and(|item| item.kind == ActiveKind::WebSocket);
@@ -136,6 +137,7 @@ pub(super) async fn handle_worker_event(
             });
             session.last_http_traffic = finished.http_traffic;
             session.last_terminal_response_id = response_id.clone();
+            session.commit_deepseek_tool_calls();
             if finished.kind == ActiveKind::WebSocket {
                 record_websocket_outcome(
                     session,
@@ -160,6 +162,7 @@ pub(super) async fn handle_worker_event(
             code,
             reason,
         } => {
+            session.clear_pending_deepseek_tool_calls();
             if super::super::is_context_length_exceeded(code)
                 && let Some(raw_bytes) = session
                     .websocket_receipt
@@ -210,6 +213,7 @@ async fn handle_cancelled_event(
     session.last_terminal_response_id = None;
     session.last_response_transport = None;
     session.last_http_traffic = None;
+    session.clear_pending_deepseek_tool_calls();
     session.ready = lease.map(|lease| *lease);
     if session.ready.is_some() {
         session.observe_idle().await;

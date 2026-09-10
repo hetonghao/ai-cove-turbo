@@ -173,6 +173,20 @@ async fn start_response(
     }
     let payload = super::super::gemini_history::normalize_gemini_function_history(&payload)
         .unwrap_or(payload);
+    let payload = super::super::deepseek_history::repair_deepseek_tool_history(
+        &payload,
+        &session.last_deepseek_tool_calls,
+    )
+    .unwrap_or(payload);
+    session.capture_deepseek_tool_calls = serde_json::from_slice::<serde_json::Value>(&payload)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(|model| model.starts_with("deepseek"))
+        })
+        .unwrap_or(false);
     let Ok(prepared) = http_request_payload(&payload) else {
         let _ = send_error(
             client,

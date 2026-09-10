@@ -1,5 +1,6 @@
 use axum::http::{HeaderMap, Uri};
 use futures_util::StreamExt;
+use serde_json::Value;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use url::Url;
 
@@ -41,6 +42,9 @@ pub(super) struct Session {
     pub(super) last_terminal_response_id: Option<String>,
     pub(super) last_response_transport: Option<ResponseTransport>,
     pub(super) last_http_traffic: Option<HttpTraffic>,
+    pub(super) last_deepseek_tool_calls: Vec<Value>,
+    pub(super) pending_deepseek_tool_calls: Vec<Value>,
+    pub(super) capture_deepseek_tool_calls: bool,
     pub(super) response_started: bool,
     pub(super) drain_reconnect_pending: bool,
     pub(super) policy: ModelPolicy,
@@ -80,6 +84,9 @@ impl Session {
             last_terminal_response_id: None,
             last_response_transport: None,
             last_http_traffic: None,
+            last_deepseek_tool_calls: Vec::new(),
+            pending_deepseek_tool_calls: Vec::new(),
+            capture_deepseek_tool_calls: false,
             response_started: false,
             drain_reconnect_pending: false,
             policy,
@@ -131,9 +138,38 @@ impl Session {
         self.last_terminal_response_id = None;
         self.last_response_transport = None;
         self.last_http_traffic = None;
+        self.last_deepseek_tool_calls.clear();
+        self.pending_deepseek_tool_calls.clear();
+        self.capture_deepseek_tool_calls = false;
         self.websocket_first_frame_at = None;
         self.websocket_first_token_at = None;
         self.observed_activity = None;
+    }
+
+    pub(super) fn observe_deepseek_tool_event(
+        &mut self,
+        message: &tokio_tungstenite::tungstenite::Message,
+    ) {
+        if !self.capture_deepseek_tool_calls {
+            return;
+        }
+        let payload = match message {
+            tokio_tungstenite::tungstenite::Message::Text(text) => text.as_bytes(),
+            tokio_tungstenite::tungstenite::Message::Binary(payload) => payload.as_ref(),
+            _ => return,
+        };
+        super::super::deepseek_history::upsert_tool_calls(
+            &mut self.pending_deepseek_tool_calls,
+            super::super::deepseek_history::tool_calls_from_event(payload),
+        );
+    }
+
+    pub(super) fn commit_deepseek_tool_calls(&mut self) {
+        self.last_deepseek_tool_calls = std::mem::take(&mut self.pending_deepseek_tool_calls);
+    }
+
+    pub(super) fn clear_pending_deepseek_tool_calls(&mut self) {
+        self.pending_deepseek_tool_calls.clear();
     }
 
     pub(super) fn refresh_capability(&self, payload: &[u8]) {

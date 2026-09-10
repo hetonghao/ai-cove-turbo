@@ -31,6 +31,10 @@ use url::Url;
 #[path = "codex_auth.rs"]
 mod codex_auth;
 mod compression;
+mod deepseek_history;
+#[cfg(test)]
+#[path = "proxy/deepseek_history_tests.rs"]
+mod deepseek_history_tests;
 mod gemini_history;
 #[cfg(test)]
 #[path = "proxy/gemini_history_tests.rs"]
@@ -1292,6 +1296,10 @@ async fn proxy_http_with_control(
         .then(|| gemini_history::normalize_gemini_function_history(&raw_body))
         .flatten();
     let raw_body = normalized.map_or(raw_body, Bytes::from);
+    let repaired = is_responses_path(&path)
+        .then(|| deepseek_history::repair_deepseek_tool_history(&raw_body, &[]))
+        .flatten();
+    let raw_body = repaired.map_or(raw_body, Bytes::from);
     let should_compress = state.compression_enabled.load(Ordering::Relaxed)
         && is_compressible_json(&parts.method, &parts.headers);
     let (outbound_body, compressed) = if should_compress {
@@ -2698,6 +2706,58 @@ data: {"type":"response.completed"}
             item_types,
             vec!["function_call", "function_call_output", "message"]
         );
+
+        proxy.stop().await;
+        upstream_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_http_deepseek_history_drops_unpaired_function_call()
+    -> Result<(), Box<dyn Error>> {
+        let captured = CapturedRequest::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let app = Router::new()
+            .route("/v1/responses", post(upstream))
+            .with_state(Arc::clone(&captured));
+        let upstream_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let proxy = start_proxy(ProxyOptions {
+            upstream: Url::parse(&format!("http://{address}/v1"))?,
+            compression_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            websocket_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ai_cove_private_websocket_zstd: false,
+            metrics: Arc::new(Metrics::default()),
+            preferred_ports: vec![0],
+            max_request_body_bytes: 1024 * 1024,
+        })
+        .await?;
+        let body = r#"{"model":"deepseek-v4.1-flash","input":[{"type":"message","role":"user","content":"hi"},{"type":"function_call","call_id":"call-1","name":"exec_command","arguments":"{}"}]}"#;
+
+        let response = reqwest::Client::new()
+            .post(format!("{}/responses", proxy.endpoint()))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let (_, forwarded) = captured
+            .lock()
+            .await
+            .take()
+            .ok_or("upstream request missing")?;
+        let value: serde_json::Value = serde_json::from_slice(&forwarded)?;
+        let item_types = value
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("repaired input missing")?
+            .iter()
+            .filter_map(|item| item.get("type").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(item_types, vec!["message"]);
 
         proxy.stop().await;
         upstream_task.abort();
