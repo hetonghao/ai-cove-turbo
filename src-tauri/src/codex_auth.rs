@@ -88,7 +88,7 @@ fn resolve_api_key(codex_home: &Path, config_path: &Path) -> Option<String> {
     if auth
         .get("auth_mode")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|mode| mode != "apiKey")
+        .is_some_and(|mode| !mode.eq_ignore_ascii_case("apikey"))
     {
         return None;
     }
@@ -103,14 +103,17 @@ fn provider_api_key(config_path: &Path) -> Option<String> {
     let source = fs::read_to_string(config_path).ok()?;
     let document = source.parse::<DocumentMut>().ok()?;
     let provider = document.get("model_provider")?.as_str()?;
-    document
-        .get("model_providers")?
-        .get(provider)?
-        .get("api_key")?
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
+    let table = document.get("model_providers")?.get(provider)?;
+    ["api_key", "experimental_bearer_token"]
+        .into_iter()
+        .find_map(|field| {
+            table
+                .get(field)?
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
 }
 
 fn provider_env_key(config_path: &Path) -> Option<String> {
@@ -146,6 +149,41 @@ api_key = "provider-key"
         assert_eq!(
             resolve_api_key(root.path(), &config).as_deref(),
             Some("provider-key")
+        );
+    }
+
+    #[test]
+    fn experimental_bearer_token_is_consumed_from_selected_provider() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = root.path().join("config.toml");
+        fs::write(
+            &config,
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+experimental_bearer_token = "sk-provider-token"
+"#,
+        )
+        .expect("config");
+        assert_eq!(
+            resolve_api_key(root.path(), &config).as_deref(),
+            Some("sk-provider-token")
+        );
+    }
+
+    #[test]
+    fn lowercase_apikey_auth_mode_still_uses_file_key() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = root.path().join("config.toml");
+        fs::write(&config, "preferred_auth_method = 'apikey'").expect("config");
+        fs::write(
+            root.path().join("auth.json"),
+            r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-file-token"}"#,
+        )
+        .expect("auth");
+        assert_eq!(
+            resolve_api_key(root.path(), &config).as_deref(),
+            Some("sk-file-token")
         );
     }
 
