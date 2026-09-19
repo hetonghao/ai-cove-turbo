@@ -49,6 +49,9 @@ _Avoid_: 把任意 OpenAI 兼容端点都表述为已受 Turbo 保证支持。
 **非 AI Cove 上游**：主机不是 AI Cove 标准端点的用户自定义上游；Turbo 在明确警告后允许继续尝试连接，但相关配置可能不生效或产生错误。
 _Avoid_: 静默使用、显示为完全兼容、无提示直接阻止。
 
+**隐蔽上游覆盖**：三击实时页 `UPSTREAM` 打开的弹窗只改 Turbo 的实际转发目标与转发密钥，Codex 仍连接本机端点，覆盖地址不写回 Codex 配置；上游候选模型发现固定读取 AI Cove 目录，不随覆盖变化。
+_Avoid_: 让模型发现跟随覆盖地址、把覆盖地址写进 Codex 配置、在未设置覆盖时替换透传的 Authorization。
+
 **WebSocket 集成门禁**：Turbo 在本项目内完成 WebSocket 透明转发和本地验证；AI Cove 上游支持由其他工作流交付，生产端到端验证在两边完成后执行。
 _Avoid_: 在 Turbo 项目中顺带修改 AI Cove 上游、未集成测试就宣称 WebSocket 可用。
 

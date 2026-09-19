@@ -1210,6 +1210,7 @@ async fn proxy_request(
         HeaderName::from_static("x-ai-cove-client-version"),
         header::HeaderValue::from_static(turbo_client_version()),
     );
+    codex_auth::apply_forwarded_auth_override(request.headers_mut());
     if is_websocket_upgrade(request.headers()) {
         return proxy_websocket(state, &mut request).await;
     }

@@ -453,7 +453,7 @@ impl AppRuntime {
                 });
             }
         }
-        let upstream_url = match self.configured_upstream() {
+        let upstream_url = match self.proxy_upstream() {
             Ok(upstream) => upstream,
             Err(error) => {
                 self.block(&error.to_string());
@@ -1159,7 +1159,7 @@ impl AppRuntime {
     }
 
     fn discovery_target(&self) -> Result<Url, catalog_discovery::DiscoveryError> {
-        self.configured_upstream()
+        self.catalog_upstream()
             .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)
     }
 
@@ -1345,8 +1345,17 @@ impl AppRuntime {
         lock_mutex(&self.preferences).upstream_override.is_some()
     }
 
-    fn configured_upstream(&self) -> Result<Url, ConfigError> {
+    /// 模型发现（上游候选模型）固定读取 AI Cove 目录，不受隐蔽上游覆盖影响。
+    fn catalog_upstream(&self) -> Result<Url, ConfigError> {
         Url::parse(AI_COVE_UPSTREAM).map_err(ConfigError::InvalidBaseUrl)
+    }
+
+    /// 实际转发目标：优先使用隐蔽弹窗保存的上游覆盖，未覆盖时回到 AI Cove。
+    fn proxy_upstream(&self) -> Result<Url, ConfigError> {
+        let override_upstream = lock_mutex(&self.preferences).upstream_override.clone();
+        override_upstream
+            .as_deref()
+            .map_or_else(|| self.catalog_upstream(), validate_upstream_override)
     }
 
     async fn start_managed_proxy(
@@ -1434,9 +1443,7 @@ impl AppRuntime {
         };
         save_preferences(&self.paths.preferences_path(), &preferences)
             .map_err(|error| error.to_string())?;
-        let upstream = self
-            .configured_upstream()
-            .map_err(|error| error.to_string())?;
+        let upstream = self.proxy_upstream().map_err(|error| error.to_string())?;
         let upstream_text = upstream.as_str().to_owned();
         let ai_cove = upstream_compatibility(&upstream) == UpstreamCompatibility::AiCove;
         self.update_status(|status| {
@@ -2330,7 +2337,8 @@ supports_websockets = false
     }
 
     #[test]
-    fn discovery_target_always_uses_ai_cove() -> Result<(), Box<dyn Error>> {
+    fn discovery_target_stays_on_ai_cove_when_proxy_upstream_is_overridden()
+    -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let config_path = root.path().join("config.toml");
         let recovery = root.path().join("recovery.json");
@@ -2349,6 +2357,17 @@ supports_websockets = false
             &recovery,
         )?;
         *lock_mutex(&runtime.managed) = Some(managed);
+        assert_eq!(
+            runtime.discovery_target()?.as_str(),
+            "https://api.ai-cove.com/v1"
+        );
+        // 隐蔽上游覆盖只改实际转发目标；上游候选模型发现仍固定读取 AI Cove 目录。
+        lock_mutex(&runtime.preferences).upstream_override =
+            Some("https://gateway.example/v1".to_owned());
+        assert_eq!(
+            runtime.proxy_upstream()?.as_str(),
+            "https://gateway.example/v1"
+        );
         assert_eq!(
             runtime.discovery_target()?.as_str(),
             "https://api.ai-cove.com/v1"
@@ -2386,9 +2405,14 @@ supports_websockets = false
         let active = runtime.status().await;
 
         assert!(active.service_healthy);
-        assert_eq!(active.upstream, "https://api.ai-cove.com/v1");
+        assert_eq!(active.upstream, "https://gateway.example/v1");
+        assert!(!active.ai_cove_upstream);
         assert_eq!(active.original_upstream, "https://api.ai-cove.com/v1");
         assert_eq!(active.endpoint, before.endpoint);
+        assert_eq!(
+            runtime.proxy_upstream()?.as_str(),
+            "https://gateway.example/v1"
+        );
         let managed_config = fs::read_to_string(&config_path)?;
         assert!(managed_config.contains(&active.endpoint));
         assert!(!managed_config.contains("https://gateway.example/v1"));
@@ -2409,7 +2433,7 @@ supports_websockets = false
         restarted.initialize().await;
         let persisted = restarted.status().await;
         assert!(persisted.service_healthy);
-        assert_eq!(persisted.upstream, "https://api.ai-cove.com/v1");
+        assert_eq!(persisted.upstream, "https://gateway.example/v1");
         assert_eq!(persisted.original_upstream, "https://api.ai-cove.com/v1");
         assert!(!fs::read_to_string(&config_path)?.contains("https://gateway.example/v1"));
         restarted.shutdown().await?;

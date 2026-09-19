@@ -22,6 +22,24 @@ pub(super) fn set_auth_override(key: Option<String>) {
         .expect("auth override lock") = restored;
 }
 
+/// 隐蔽弹窗设置过上游密钥时，用它替换转发请求携带的 Authorization。
+/// 未设置过覆盖时保持透传，不改变原有行为。
+pub(super) fn apply_forwarded_auth_override(headers: &mut HeaderMap) {
+    let active = AUTH_OVERRIDE
+        .get()
+        .and_then(|value| value.lock().ok().and_then(|key| key.clone()));
+    apply_forwarded_auth(headers, active.as_deref());
+}
+
+fn apply_forwarded_auth(headers: &mut HeaderMap, key: Option<&str>) {
+    let Some(key) = key.map(str::trim).filter(|key| !key.is_empty()) else {
+        return;
+    };
+    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {key}")) {
+        headers.insert(header::AUTHORIZATION, value);
+    }
+}
+
 pub(super) fn effective_auth_headers(config_path: Option<&Path>) -> Option<HeaderMap> {
     let codex_home = env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -130,8 +148,11 @@ fn provider_env_key(config_path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_api_key;
     use std::fs;
+
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::{apply_forwarded_auth, resolve_api_key};
 
     #[test]
     fn provider_api_key_is_consumed_from_selected_provider() {
@@ -200,6 +221,32 @@ experimental_bearer_token = "sk-provider-token"
         assert_eq!(
             resolve_api_key(root.path(), &config).as_deref(),
             Some("test-key")
+        );
+    }
+
+    #[test]
+    fn forwarded_auth_override_replaces_the_client_authorization() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer client-key"),
+        );
+        for absent in [None, Some("   ")] {
+            apply_forwarded_auth(&mut headers, absent);
+            assert_eq!(
+                headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer client-key"),
+                "{absent:?}"
+            );
+        }
+        apply_forwarded_auth(&mut headers, Some(" sk-live "));
+        assert_eq!(
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer sk-live")
         );
     }
 
