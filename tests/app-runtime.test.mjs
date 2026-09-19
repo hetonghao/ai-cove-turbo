@@ -195,12 +195,12 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   const importAllAction = element({ action: "import-all-models" });
   importAllAction.closest = (selector) => selector === "[data-action]" ? importAllAction : null;
   const restartControl = element({ action: "restart-codex", catalogRestart: "", restartHint: "" });
-  const configViewButtons = ["settings", "catalog"].map((configView) => {
+  const configViewButtons = ["settings", "catalog", "skills"].map((configView) => {
     const target = element({ configView });
     target.closest = (selector) => selector === '[data-config-view][role="tab"]' || selector === "[data-config-view]" ? target : null;
     return target;
   });
-  const configViewPanels = ["settings", "catalog"].map((configView) => element({ configViewPanel: configView }));
+  const configViewPanels = ["settings", "catalog", "skills"].map((configView) => element({ configViewPanel: configView }));
   const actions = ["save-model-settings", "undo-model-settings", "open-config"].map((action) => {
     const target = element({ action });
     target.closest = (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-action]" ? target : null;
@@ -434,6 +434,8 @@ test("配置工作区通过顶部 Tab 切换并同步 URL 与键盘状态", asyn
   harness.keydownConfig("ArrowLeft");
   assert.equal(harness.configView(), "settings");
   harness.keydownConfig("End");
+  assert.equal(harness.configView(), "skills");
+  harness.keydownConfig("ArrowLeft");
   assert.equal(harness.configView(), "catalog");
 });
 

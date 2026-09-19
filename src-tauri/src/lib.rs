@@ -10,6 +10,9 @@ pub(crate) mod config;
 pub(crate) mod proxy;
 pub(crate) mod runtime;
 mod session_names;
+pub(crate) mod skills;
+mod skills_catalog;
+mod skills_install;
 #[cfg(target_os = "windows")]
 mod windows_process;
 
@@ -17,6 +20,8 @@ mod windows_process;
 mod benchmark;
 #[cfg(test)]
 mod codex_thread_title_tests;
+#[cfg(test)]
+mod skills_tests;
 #[cfg(test)]
 mod transport_ack_benchmark;
 
@@ -127,14 +132,19 @@ pub fn run() -> tauri::Result<()> {
             confirm_non_ai_cove,
             check_for_updates,
             install_update,
+            get_skills,
+            install_skill,
+            uninstall_skill,
         ])
         .setup(|app| {
             let home = app.path().home_dir()?;
             let data_dir = app.path().app_data_dir()?;
             let runtime = AppRuntime::new(RuntimePaths {
                 config_path: home.join(".codex").join("config.toml"),
-                data_dir,
+                data_dir: data_dir.clone(),
             });
+            let skills_manager = skills::SkillsManager::new(home.clone(), data_dir)?;
+            app.manage(Arc::new(skills_manager));
             app.manage(Arc::clone(&runtime));
             initialize_desktop_preferences(app.handle(), &runtime);
             install_tray(app)?;
@@ -854,4 +864,42 @@ $process.Id"#;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn restart_codex_desktop() -> Result<Option<u32>, String> {
     Err("当前平台不支持重启 Codex Desktop".to_owned())
+}
+
+#[tauri::command]
+async fn get_skills(
+    manager: State<'_, Arc<skills::SkillsManager>>,
+    refresh: bool,
+) -> Result<skills::SkillsStatus, skills::SkillError> {
+    manager.status(refresh).await
+}
+
+#[tauri::command]
+async fn install_skill(
+    manager: State<'_, Arc<skills::SkillsManager>>,
+    id: String,
+    expected_release_revision: String,
+    expected_local_revision: String,
+    confirm_replace: bool,
+) -> Result<skills::SkillMutationResult, skills::SkillError> {
+    manager
+        .install(
+            &id,
+            &expected_release_revision,
+            &expected_local_revision,
+            confirm_replace,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn uninstall_skill(
+    manager: State<'_, Arc<skills::SkillsManager>>,
+    id: String,
+    expected_local_revision: String,
+    confirmed: bool,
+) -> Result<skills::SkillMutationResult, skills::SkillError> {
+    manager
+        .uninstall(&id, &expected_local_revision, confirmed)
+        .await
 }

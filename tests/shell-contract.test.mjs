@@ -24,7 +24,7 @@ test("桌面壳按实时、统计、配置三页承载观测与控制", async ()
 
   // Then: 实时、统计和配置页可访问，业务控制仍只出现在配置页。
   assert.equal((html.match(/data-tab="/g) ?? []).length, 3);
-  assert.equal(tabs.length, 5);
+  assert.equal(tabs.length, 6);
   assert.match(html, /data-tab="live"/);
   assert.match(html, /data-tab="statistics"/);
   assert.match(html, /data-tab="config"/);

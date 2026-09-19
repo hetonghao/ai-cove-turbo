@@ -314,9 +314,16 @@
     return "live";
   }
 
+  const CONFIG_VIEWS = ["settings", "catalog", "skills"];
+
   function readConfigView() {
     const requestedView = new URL(window.location.href).searchParams.get("view");
-    return requestedView === "catalog" ? "catalog" : "settings";
+    return CONFIG_VIEWS.includes(requestedView) ? requestedView : "settings";
+  }
+
+  function syncSkillsActivation() {
+    const active = state.tab === "config" && state.configView === "skills" && !document.hidden;
+    window.TurboSkills?.activate?.(active);
   }
 
   function updateUrl() {
@@ -2092,10 +2099,11 @@
   }
 
   function selectConfigView(view, options = {}) {
-    if (!(view === "settings" || view === "catalog")) return;
+    if (!CONFIG_VIEWS.includes(view)) return;
     state.configView = view;
     renderConfigView(options);
     if (options.updateUrl !== false) updateUrl();
+    syncSkillsActivation();
   }
 
   function selectTab(tab, options = {}) {
@@ -2109,6 +2117,7 @@
     if (tab === "statistics") renderStatistics();
     if (options.updateUrl !== false) updateUrl();
     if (tabChanged) startStatusPolling();
+    syncSkillsActivation();
   }
 
   function statusRefreshMs() {
@@ -3450,7 +3459,7 @@
   }
 
   function handleConfigViewKeydown(event, currentTab) {
-    const views = ["settings", "catalog"];
+    const views = CONFIG_VIEWS;
     const currentIndex = views.indexOf(currentTab.dataset.configView);
     const keys = { ArrowRight: 1, ArrowLeft: -1, Home: -currentIndex, End: views.length - 1 - currentIndex };
     if (!Object.hasOwn(keys, event.key)) return;
@@ -3986,12 +3995,14 @@
       state.configView = readConfigView();
       selectTab(readTab(), { updateUrl: false });
       renderConfigView();
+      syncSkillsActivation();
     });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && invoke) {
         void refreshStatus();
         void checkUpdatesOncePerDay();
       }
+      syncSkillsActivation();
     });
     bindConnectionDock();
     bindDotField();
@@ -4003,6 +4014,7 @@
     renderState();
     renderConnectionInspector();
     updateUrl();
+    syncSkillsActivation();
     if (invoke) {
       void (async () => {
         await refreshStatus();

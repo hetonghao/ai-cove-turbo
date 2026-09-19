@@ -212,6 +212,7 @@
                 <div class="b-config-view-tabs" role="tablist" aria-label="配置工作区">
                   <button id="config-view-settings" type="button" role="tab" aria-selected="true" aria-controls="config-view-panel-settings" data-config-view="settings" tabindex="0"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="10" cy="18" r="2"/></svg><span>运行偏好</span></button>
                   <button id="config-view-catalog" type="button" role="tab" aria-selected="false" aria-controls="config-view-panel-catalog" data-config-view="catalog" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg><span>模型候选</span><b data-model-catalog-count>0</b></button>
+                  <button id="config-view-skills" type="button" role="tab" aria-selected="false" aria-controls="config-view-panel-skills" data-config-view="skills" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/><path d="m17 14 3 3-3 3"/></svg><span>Skills</span><b data-skills-count>0</b></button>
                 </div>
               </header>
               <div id="config-view-panel-settings" class="b-config-view" data-config-view-panel="settings" role="tabpanel" aria-labelledby="config-view-settings">
@@ -289,6 +290,23 @@
                   </form>
                 </dialog>
               </div>
+              <div id="config-view-panel-skills" class="b-config-view" data-config-view-panel="skills" role="tabpanel" aria-labelledby="config-view-skills" hidden>
+                <section class="b-model-catalog b-model-catalog--wide b-skills turbo-tilt-bubble" data-tilt-only aria-labelledby="b-skills-title">
+                  <header class="b-config-heading b-config-heading--catalog"><div><p class="eyebrow">SKILLS</p><h2 id="b-skills-title">AI Cove Skills</h2><p>官方目录提供的技能，安装到本机技能目录后供代理使用；更新或卸载前会自动备份。</p></div><button class="b-model-catalog__info" type="button" data-skills-info aria-label="查看技能安装目录与目录源状态" data-tooltip="技能目录：正在读取">!</button></header>
+                  <div class="b-model-catalog__toolbar"><span><strong data-skills-installed-count>0</strong> 个已安装</span><span class="b-model-catalog__meta" data-skills-meta></span><div class="b-model-catalog__toolbar-actions"><button type="button" data-skill-action="refresh">检查更新</button></div></div>
+                  <div class="b-model-catalog__toolbar b-skills__path"><span class="b-model-catalog__meta">安装目录 <code data-skills-install-root></code></span></div>
+                  <div class="b-model-catalog__list b-skills__list" data-skills-list aria-live="polite"></div>
+                  <p class="b-model-catalog__message" data-skills-message role="status" aria-live="polite"></p>
+                </section>
+                <dialog class="b-model-dialog" data-skill-dialog aria-labelledby="b-skill-dialog-title">
+                  <form method="dialog" class="b-model-dialog__surface">
+                    <header><div><p class="eyebrow">SKILL ACTION</p><h2 id="b-skill-dialog-title" data-skill-dialog-title>确认操作</h2><p data-skill-dialog-summary></p></div><button type="button" class="b-model-dialog__close" data-skill-dialog-close aria-label="关闭技能操作">×</button></header>
+                    <div class="b-skills-diff" data-skill-dialog-diff></div>
+                    <p class="b-model-dialog__error" data-skill-dialog-error role="alert"></p>
+                    <footer><button type="button" data-skill-dialog-confirm>确认</button><button type="button" data-skill-dialog-close>取消</button></footer>
+                  </form>
+                </dialog>
+              </div>
             </div>
             <p class="b-hint">从菜单栏或系统托盘重新打开 · 关闭窗口不会停止 Turbo</p>
           </div>
@@ -312,6 +330,7 @@
     <script src="./telemetry.js"></script>
     <script src="./strands.js"></script>
     <script src="./connection-dom.js"></script>
+    <script src="./skills.js"></script>
     <script src="./app.js?catalog-layout=delete-popover-1"></script>
   </body>
 </html>
