@@ -215,15 +215,26 @@ fn ensure_catalog_with_executable(
     bundled_executable: Option<&Path>,
 ) -> Result<CatalogStatus, CatalogError> {
     let fixed_path = fixed_catalog_path(home);
-    if let Some(record) = read_record(recovery_path)? {
+    if let Some(mut record) = read_record(recovery_path)? {
         if !owned_record(&record, &fixed_path, config_path) {
             return Err(CatalogError::OwnershipConflict);
         }
         let pointer = read_catalog_pointer(config_path)?;
-        if !is_fixed_pointer(pointer.as_deref(), &fixed_path) {
-            return Err(CatalogError::OwnershipConflict);
+        if record.released {
+            // 上次退出已释放接管并把指针还原给客户配置，重新启动时按原状恢复。
+            if !is_fixed_pointer(pointer.as_deref(), &fixed_path) {
+                record.original_model_catalog_json =
+                    pointer.as_ref().map(|path| path.display().to_string());
+                write_catalog_pointer(config_path, Some(&fixed_path))?;
+            }
+            record.released = false;
+            write_record(recovery_path, &record)?;
+        } else {
+            if !is_fixed_pointer(pointer.as_deref(), &fixed_path) {
+                return Err(CatalogError::OwnershipConflict);
+            }
+            rewrite_stale_fixed_pointer(config_path, pointer.as_deref(), &fixed_path)?;
         }
-        rewrite_stale_fixed_pointer(config_path, pointer.as_deref(), &fixed_path)?;
         if fixed_path.exists() {
             read_fixed_catalog(&fixed_path)?;
         } else {
@@ -247,7 +258,10 @@ fn ensure_catalog_with_executable(
     let current_pointer = read_catalog_pointer(config_path)?;
     let source_path = match current_pointer.as_ref() {
         Some(source) if source != &fixed_path => {
-            if let Some(bytes) = read_usable_catalog(source) {
+            if read_fixed_catalog(&fixed_path)? {
+                // 既有 Turbo 模型目录直接复用，重新接管不得覆盖用户手动添加的模型。
+                None
+            } else if let Some(bytes) = read_usable_catalog(source) {
                 write_atomic(&fixed_path, &bytes)?;
                 Some(source.clone())
             } else {
@@ -291,6 +305,7 @@ fn ensure_catalog_with_executable(
         root_document: Value::Null,
         baseline_models,
         baseline_document,
+        released: false,
     };
     write_record(recovery_path, &record)?;
     let changed_config = !is_fixed_pointer(current_pointer.as_deref(), &fixed_path);
@@ -346,11 +361,15 @@ pub(crate) fn reclaim_catalog(
     recovery_path: &Path,
 ) -> Result<CatalogStatus, CatalogError> {
     let fixed_path = fixed_catalog_path(home);
-    let record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
+    let mut record = read_record(recovery_path)?.ok_or(CatalogError::SourceUnavailable)?;
     if !owned_record(&record, &fixed_path, config_path) {
         return Err(CatalogError::OwnershipConflict);
     }
     write_catalog_pointer(config_path, Some(&fixed_path))?;
+    if record.released {
+        record.released = false;
+        write_record(recovery_path, &record)?;
+    }
     status_from_file(&fixed_path, &record, true, false, false)
 }
 
@@ -1767,7 +1786,7 @@ pub(crate) fn restore_catalog(
     recovery_path: &Path,
 ) -> Result<CatalogStatus, CatalogError> {
     let fixed_path = fixed_catalog_path(home);
-    let Some(record) = read_record(recovery_path)? else {
+    let Some(mut record) = read_record(recovery_path)? else {
         return Err(CatalogError::SourceUnavailable);
     };
     let pointer = read_catalog_pointer(config_path)?;
@@ -1777,16 +1796,10 @@ pub(crate) fn restore_catalog(
             record.original_model_catalog_json.as_deref().map(Path::new),
         )?;
     }
-    match fs::remove_file(recovery_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(CatalogError::Write(error)),
-    }
-    let metadata_path = fixed_path.with_file_name("ai_cove_turbo.metadata.json");
-    match fs::remove_file(metadata_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(CatalogError::Write(error)),
+    // 退出只释放接管所有权：保留接管记录与模型目录元数据，重启后按原状恢复接管前的模型状态。
+    if !record.released {
+        record.released = true;
+        write_record(recovery_path, &record)?;
     }
     Ok(CatalogStatus {
         path: fixed_path.display().to_string(),
@@ -1801,7 +1814,7 @@ pub(crate) fn restore_catalog(
         loaded: false,
         request_verified: false,
         revision: String::new(),
-        metadata: CatalogMetadata::default(),
+        metadata: catalog_storage::read_metadata(&fixed_path),
     })
 }
 
@@ -2107,6 +2120,169 @@ mod tests {
             Some("fixed-alpha")
         );
         assert!(fs::read_to_string(config)?.contains("model_catalog_json"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_fixed_catalog_is_reused_when_original_pointer_disappeared()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let fixed = fixed_catalog_path(root.path());
+        let missing = root.path().join("original.json");
+        let (config, _) = fixture(root.path(), Some(&missing));
+        fs::create_dir_all(fixed.parent().expect("catalog parent"))?;
+        fs::write(
+            &fixed,
+            r#"{"models":[{"slug":"user-alpha","display_name":"User Alpha","visibility":"list","priority":1},{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","priority":2,"base_instructions":"base","model_messages":{"instructions_template":"instructions"},"truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true}]}"#,
+        )?;
+        let executable = bundled_executable(
+            root.path(),
+            r#"{"models":[{"slug":"root-alpha","display_name":"Root Alpha","visibility":"list","priority":1}]}"#,
+        )?;
+
+        let status = ensure_catalog_with_executable(
+            root.path(),
+            &config,
+            &root.path().join("recovery.json"),
+            Some(&executable),
+        )?;
+
+        assert_eq!(
+            status
+                .models
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-alpha", "gpt-5.6-sol"]
+        );
+        assert!(fs::read_to_string(&fixed)?.contains("user-alpha"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_keeps_record_and_metadata_for_restart() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        let fixed = fixed_catalog_path(root.path());
+        ensure_catalog(root.path(), &config, &recovery)?;
+        let baseline_slugs = read_record(&recovery)?
+            .expect("ownership record")
+            .baseline_models
+            .iter()
+            .map(|model| model.slug.clone())
+            .collect::<Vec<_>>();
+
+        let mut document: Value = serde_json::from_slice(&fs::read(&fixed)?)?;
+        document["models"]
+            .as_array_mut()
+            .expect("catalog models")
+            .push(serde_json::json!({
+                "slug": "user-flash",
+                "display_name": "User Flash",
+                "visibility": "list",
+                "priority": 9
+            }));
+        fs::write(&fixed, serde_json::to_vec_pretty(&document)?)?;
+        let mut metadata = read_metadata(root.path());
+        metadata.root_removed_slugs = vec!["legacy-model".to_owned()];
+        metadata.field_sources.insert(
+            "user-flash".to_owned(),
+            std::collections::BTreeMap::from([("display_name".to_owned(), "用户".to_owned())]),
+        );
+        save_metadata(root.path(), &metadata)?;
+        let missing_executable = root.path().join("no-such-codex");
+
+        let released = restore_catalog(root.path(), &config, &recovery)?;
+
+        assert_eq!(released.state, "restored");
+        assert_eq!(
+            read_catalog_pointer(&config)?.as_deref(),
+            Some(source.as_path())
+        );
+        assert!(recovery.exists());
+        assert!(read_record(&recovery)?.expect("ownership record").released);
+        assert_eq!(
+            read_metadata(root.path()).root_removed_slugs,
+            vec!["legacy-model".to_owned()]
+        );
+
+        let resumed = ensure_catalog_with_executable(
+            root.path(),
+            &config,
+            &recovery,
+            Some(&missing_executable),
+        )?;
+
+        let record = read_record(&recovery)?.expect("ownership record");
+        assert!(!record.released);
+        assert_eq!(
+            record
+                .baseline_models
+                .iter()
+                .map(|model| model.slug.clone())
+                .collect::<Vec<_>>(),
+            baseline_slugs
+        );
+        assert_eq!(
+            read_catalog_pointer(&config)?.as_deref(),
+            Some(fixed.as_path())
+        );
+        let slugs = resumed
+            .models
+            .iter()
+            .map(|model| model.slug.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            slugs.contains(&"user-flash"),
+            "重新接管后用户模型丢失：{slugs:?}"
+        );
+        assert_eq!(
+            read_metadata(root.path()).root_removed_slugs,
+            vec!["legacy-model".to_owned()]
+        );
+        assert_eq!(
+            read_metadata(root.path())
+                .field_sources
+                .get("user-flash")
+                .and_then(|fields| fields.get("display_name"))
+                .map(String::as_str),
+            Some("用户")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn released_takeover_keeps_the_latest_customer_pointer() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.json");
+        let (config, _) = fixture(root.path(), Some(&source));
+        let recovery = root.path().join("recovery.json");
+        ensure_catalog(root.path(), &config, &recovery)?;
+        restore_catalog(root.path(), &config, &recovery)?;
+
+        let customer = root.path().join("customer.json");
+        fs::write(
+            &customer,
+            r#"{"models":[{"slug":"customer-alpha","display_name":"Customer Alpha","visibility":"list","priority":1}]}"#,
+        )?;
+        write_catalog_pointer(&config, Some(&customer))?;
+        let missing_executable = root.path().join("no-such-codex");
+
+        ensure_catalog_with_executable(root.path(), &config, &recovery, Some(&missing_executable))?;
+        restore_catalog(root.path(), &config, &recovery)?;
+
+        assert_eq!(
+            read_catalog_pointer(&config)?.as_deref(),
+            Some(customer.as_path())
+        );
+        assert_eq!(
+            fs::read_to_string(&customer)?,
+            r#"{"models":[{"slug":"customer-alpha","display_name":"Customer Alpha","visibility":"list","priority":1}]}"#
+        );
         Ok(())
     }
 
@@ -2690,8 +2866,7 @@ mod tests {
     }
 
     #[test]
-    fn external_source_refreshes_an_existing_fixed_catalog_before_takeover()
-    -> Result<(), Box<dyn Error>> {
+    fn external_source_takeover_keeps_an_existing_fixed_catalog() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let source = root.path().join("source.json");
         let (config, _) = fixture(root.path(), Some(&source));
@@ -2705,15 +2880,16 @@ mod tests {
 
         let status = ensure_catalog(root.path(), &config, &recovery)?;
 
+        assert_eq!(status.source_path, None);
         assert_eq!(
-            status.source_path.as_deref(),
-            Some(source.to_string_lossy().as_ref())
+            status
+                .models
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["stale"]
         );
-        assert_eq!(
-            status.models.first().map(|model| model.slug.as_str()),
-            Some("alpha")
-        );
-        assert!(fs::read_to_string(fixed)?.contains("\"beta\""));
+        assert!(!fs::read_to_string(&fixed)?.contains("\"beta\""));
         assert!(fs::read_to_string(config)?.contains("ai_cove_turbo.json"));
         Ok(())
     }

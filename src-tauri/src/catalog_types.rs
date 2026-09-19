@@ -450,6 +450,8 @@ pub(crate) struct OwnershipRecord {
     pub(crate) root_document: Value,
     #[serde(default)]
     pub(crate) baseline_document: Value,
+    #[serde(default)]
+    pub(crate) released: bool,
 }
 
 #[derive(Debug)]

@@ -2897,6 +2897,77 @@ supports_websockets = false
     }
 
     #[tokio::test]
+    async fn restart_after_shutdown_keeps_user_added_models() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_dir = root.path().join("home/.codex");
+        let catalogs = config_dir.join("model-catalogs");
+        fs::create_dir_all(&catalogs)?;
+        let config_path = config_dir.join("config.toml");
+        let original = catalogs.join("original.json");
+        fs::write(
+            &original,
+            r#"{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","priority":1}]}"#,
+        )?;
+        fs::write(
+            &config_path,
+            format!(
+                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n\n[model_providers.custom]\nbase_url = \"https://api.ai-cove.com/v1\"\nsupports_websockets = false\n",
+                original.display()
+            ),
+        )?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: config_path.clone(),
+            data_dir: root.path().join("data"),
+        });
+        runtime.initialize().await;
+
+        let catalog_path = catalogs.join("ai_cove_turbo.json");
+        let mut document: serde_json::Value = serde_json::from_slice(&fs::read(&catalog_path)?)?;
+        document["models"]
+            .as_array_mut()
+            .expect("catalog models")
+            .push(serde_json::json!({
+                "slug": "user-flash",
+                "display_name": "User Flash",
+                "visibility": "list",
+                "priority": 2
+            }));
+        fs::write(&catalog_path, serde_json::to_vec_pretty(&document)?)?;
+        let home = config_dir.parent().expect("home");
+        let mut metadata = catalog::read_metadata(home);
+        metadata.root_removed_slugs = vec!["legacy-model".to_owned()];
+        catalog::save_metadata(home, &metadata)?;
+
+        runtime.shutdown().await?;
+        // 原始模型目录在 Turbo 退出后被移除，随后 Turbo 以新进程重新启动。
+        fs::remove_file(&original)?;
+        let restarted = AppRuntime::new(RuntimePaths {
+            config_path: config_path.clone(),
+            data_dir: root.path().join("data"),
+        });
+        restarted.initialize().await;
+
+        let document: serde_json::Value = serde_json::from_slice(&fs::read(&catalog_path)?)?;
+        let slugs = document["models"]
+            .as_array()
+            .expect("catalog models")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(
+            slugs.contains(&"user-flash"),
+            "重启后用户手动添加的模型被移除：{slugs:?}"
+        );
+        assert_eq!(
+            catalog::read_metadata(home).root_removed_slugs,
+            vec!["legacy-model".to_owned()],
+            "重启后模型目录元数据被丢弃"
+        );
+        restarted.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn shutdown_prevents_later_takeover() -> Result<(), Box<dyn Error>> {
         let root = tempdir()?;
         let config_dir = root.path().join("home/.codex");
