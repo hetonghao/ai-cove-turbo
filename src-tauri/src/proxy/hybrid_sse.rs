@@ -80,16 +80,6 @@ pub(super) fn http_request_payload(payload: &[u8]) -> Result<PreparedResponseCre
         .map_err(|error| error.to_string())
 }
 
-pub(super) fn continuation_payload(payload: &[u8]) -> Result<Vec<u8>, String> {
-    let mut value: Value = serde_json::from_slice(payload).map_err(|error| error.to_string())?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "response.create must be a JSON object".to_owned())?;
-    object.remove("type");
-    object.insert("stream".to_owned(), Value::Bool(true));
-    serde_json::to_vec(&value).map_err(|error| error.to_string())
-}
-
 #[derive(Debug, Default)]
 pub(super) struct SseParser {
     pending: Vec<u8>,

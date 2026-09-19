@@ -21,7 +21,7 @@ async fn explicit_http_policy_takes_precedence_over_websocket_capability() -> io
     server.fixture.wait_ready(6).await?;
 
     // When: the first response is submitted.
-    send_create(&mut client).await?;
+    send_transcript_create(&mut client).await?;
     server.fixture.wait_http(1).await?;
 
     // Then: Turbo uses policy HTTP and never sends an upstream WS application frame.
@@ -30,7 +30,7 @@ async fn explicit_http_policy_takes_precedence_over_websocket_capability() -> io
         .pointer("/response/id")
         .and_then(Value::as_str)
         .ok_or_else(|| io::Error::other("HTTP response id missing"))?;
-    send_continuation(&mut client, first_id).await?;
+    send_tool_output_continuation(&mut client, first_id, "call-fixture-1").await?;
     server.fixture.wait_http(2).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     let counts = server.fixture.counts().await;
@@ -128,6 +128,116 @@ async fn http_response_continuation_is_rejected_without_http_replay() -> io::Res
         third.pointer("/response/id").and_then(Value::as_str),
         Some("http-response-2")
     );
+
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn policy_http_continuation_expands_previous_transcript_over_http() -> io::Result<()> {
+    // Given: 用户策略把模型固定为 HTTP，且第一轮已经产出 tool call。
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let directory = tempfile::tempdir()?;
+    let policy_path = directory.path().join("policy.json");
+    std::fs::write(
+        &policy_path,
+        br#"{"version":1,"default_transport":"auto","models":{"test":{"transport":"http"}}}"#,
+    )?;
+    let (proxy, _) = start_test_proxy_with_policy(&server, Some(policy_path)).await?;
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
+    server.fixture.wait_ready(6).await?;
+    send_transcript_create(&mut client).await?;
+    let first = next_event_value(&mut client).await?;
+    let first_id = first
+        .pointer("/response/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("HTTP response id missing"))?;
+    assert_eq!(first_id, "http-response-1");
+
+    // When: 客户端只回带工具输出的增量续传帧。
+    send_tool_output_continuation(&mut client, first_id, "call-fixture-1").await?;
+
+    // Then: 第二条请求本身自包含，不需要上游解析任何状态。
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    let payloads = server.fixture.http_payloads().await;
+    assert_eq!(payloads.len(), 2);
+    let upstream_payload = payloads
+        .get(1)
+        .ok_or_else(|| io::Error::other("second HTTP request missing"))?;
+    let continuation: Value = serde_json::from_slice(upstream_payload).map_err(io::Error::other)?;
+    assert!(continuation.get("previous_response_id").is_none());
+    assert!(continuation.get("type").is_none());
+    assert_eq!(continuation.get("stream"), Some(&Value::Bool(true)));
+    assert_eq!(
+        continuation.get("instructions"),
+        Some(&Value::from("be brief"))
+    );
+    let item_types: Vec<&str> = continuation
+        .get("input")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("type").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        item_types,
+        vec!["message", "custom_tool_call", "custom_tool_call_output"]
+    );
+    assert_eq!(
+        continuation.pointer("/input/1/call_id"),
+        Some(&Value::from("call-fixture-1"))
+    );
+
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn policy_http_continuation_without_pairing_rejects_locally() -> io::Result<()> {
+    // Given: 用户策略固定 HTTP，第一轮产出 `call-fixture-1`。
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let directory = tempfile::tempdir()?;
+    let policy_path = directory.path().join("policy.json");
+    std::fs::write(
+        &policy_path,
+        br#"{"version":1,"default_transport":"auto","models":{"test":{"transport":"http"}}}"#,
+    )?;
+    let (proxy, _) = start_test_proxy_with_policy(&server, Some(policy_path)).await?;
+    let (mut client, _) = connect_local(&proxy).await?;
+    server.fixture.wait_ready(6).await?;
+    send_transcript_create(&mut client).await?;
+    let first = next_event_value(&mut client).await?;
+    let first_id = first
+        .pointer("/response/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("HTTP response id missing"))?;
+
+    // When: 续传帧引用了一个上一轮并不存在的 call_id。
+    send_tool_output_continuation(&mut client, first_id, "call-unknown").await?;
+
+    // Then: 不做无法自证的展开，本地报告状态缺失，也不再占用一次上游请求。
+    let error = next_event_value(&mut client).await?;
+    assert_eq!(
+        error.pointer("/error/code"),
+        Some(&Value::from("previous_response_not_found"))
+    );
+    assert_eq!(server.fixture.counts().await.http_requests, 1);
 
     drop(client);
     proxy.stop().await;

@@ -103,10 +103,10 @@ pub(super) async fn handle_worker_event(
     };
     match event {
         WorkerEvent::Message(message) => {
-            session.observe_deepseek_tool_event(&message);
             let from_websocket = active
                 .as_ref()
                 .is_some_and(|item| item.kind == ActiveKind::WebSocket);
+            session.observe_response_event(&message, from_websocket);
             if from_websocket {
                 mark_websocket_first_frame(session, active.as_ref());
                 if session.websocket_first_token_at.is_none() && is_first_output_message(&message) {
@@ -138,6 +138,7 @@ pub(super) async fn handle_worker_event(
             session.last_http_traffic = finished.http_traffic;
             session.last_terminal_response_id = response_id.clone();
             session.commit_deepseek_tool_calls();
+            session.commit_http_continuation(response_id.as_deref());
             if finished.kind == ActiveKind::WebSocket {
                 record_websocket_outcome(
                     session,
@@ -163,6 +164,7 @@ pub(super) async fn handle_worker_event(
             reason,
         } => {
             session.clear_pending_deepseek_tool_calls();
+            session.abort_http_continuation();
             if super::super::is_context_length_exceeded(code)
                 && let Some(raw_bytes) = session
                     .websocket_receipt
@@ -190,6 +192,7 @@ pub(super) async fn handle_worker_event(
             handle_cancelled_event(client, session, active, lease).await
         }
         WorkerEvent::Error { code, message } => {
+            session.abort_http_continuation();
             retire_failed_websocket(session, active, code, &message).await;
             let _ = send_error(client, "server_error", &message).await;
             let _ = close_client(client, code, &message).await;
@@ -214,6 +217,7 @@ async fn handle_cancelled_event(
     session.last_response_transport = None;
     session.last_http_traffic = None;
     session.clear_pending_deepseek_tool_calls();
+    session.clear_http_continuation();
     session.ready = lease.map(|lease| *lease);
     if session.ready.is_some() {
         session.observe_idle().await;

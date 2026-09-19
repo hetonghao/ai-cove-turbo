@@ -31,6 +31,10 @@ use url::Url;
 #[path = "codex_auth.rs"]
 mod codex_auth;
 mod compression;
+mod continuation_merge;
+#[cfg(test)]
+#[path = "proxy/continuation_merge_tests.rs"]
+mod continuation_merge_tests;
 mod deepseek_history;
 #[cfg(test)]
 #[path = "proxy/deepseek_history_tests.rs"]

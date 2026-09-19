@@ -17,11 +17,12 @@ use super::{
 use crate::proxy::{HttpRequestMetric, HttpTraffic, ProxyState, traffic};
 
 pub(super) fn start_http_worker(
-    session: &super::Session,
+    session: &mut super::Session,
     payload: Vec<u8>,
     traffic: HttpTraffic,
 ) -> Active {
     let raw_bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+    session.begin_http_continuation(&payload);
     let (command_tx, command_rx) = mpsc::channel(8);
     let (event_tx, event_rx) = mpsc::channel(8);
     let mut metadata = session

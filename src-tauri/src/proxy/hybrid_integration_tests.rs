@@ -130,6 +130,40 @@ async fn send_continuation(
         .map_err(io::Error::other)
 }
 
+async fn send_transcript_create(client: &mut ClientWebSocket) -> io::Result<()> {
+    let request = serde_json::json!({
+        "type": "response.create",
+        "model": "test",
+        "instructions": "be brief",
+        "input": [{"type": "message", "role": "user", "content": "画画"}],
+    });
+    client
+        .send(Message::Text(request.to_string().into()))
+        .await
+        .map_err(io::Error::other)
+}
+
+async fn send_tool_output_continuation(
+    client: &mut ClientWebSocket,
+    previous_response_id: &str,
+    call_id: &str,
+) -> io::Result<()> {
+    let request = serde_json::json!({
+        "type": "response.create",
+        "model": "test",
+        "previous_response_id": previous_response_id,
+        "input": [{
+            "type": "custom_tool_call_output",
+            "call_id": call_id,
+            "output": "done",
+        }],
+    });
+    client
+        .send(Message::Text(request.to_string().into()))
+        .await
+        .map_err(io::Error::other)
+}
+
 async fn send_gemini_history(
     client: &mut ClientWebSocket,
     previous_response_id: Option<&str>,

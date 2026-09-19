@@ -37,10 +37,11 @@ pub(super) async fn upstream_request(
     if upgrade {
         return upgrade_response(&fixture, &mut request, private).await;
     }
-    let Ok(_body) = to_bytes(request.into_body(), 64 * 1024 * 1024).await else {
+    let Ok(body) = to_bytes(request.into_body(), 64 * 1024 * 1024).await else {
         return Response::new(Body::empty());
     };
     fixture.record(|counts| counts.http_requests += 1).await;
+    fixture.state.http_payloads.lock().await.push(body.to_vec());
     let http_index = fixture.counts().await.http_requests;
     if fixture.config.delay_http {
         fixture.state.release_http.notified().await;
@@ -53,9 +54,20 @@ pub(super) async fn upstream_request(
         *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
         return response;
     }
+    // 夹具的 HTTP 回合固定产出一个 tool call，供状态续传展开的断言使用。
     let response_id = serde_json::json!({
         "type": "response.completed",
-        "response": {"id": format!("http-response-{http_index}")},
+        "response": {
+            "id": format!("http-response-{http_index}"),
+            "output": [{
+                "id": "ctc-fixture-1",
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call-fixture-1",
+                "name": "exec",
+                "input": "echo ok",
+            }],
+        },
     });
     let mut response = Response::new(Body::from(format!(
         "data: {}\n\n",

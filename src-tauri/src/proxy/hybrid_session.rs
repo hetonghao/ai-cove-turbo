@@ -4,6 +4,7 @@ use serde_json::Value;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use url::Url;
 
+use super::super::continuation_merge::{HttpContinuation, PendingHttpContinuation};
 use super::super::{
     HttpTraffic, ProxyState,
     hybrid_pool::{
@@ -45,6 +46,8 @@ pub(super) struct Session {
     pub(super) last_deepseek_tool_calls: Vec<Value>,
     pub(super) pending_deepseek_tool_calls: Vec<Value>,
     pub(super) capture_deepseek_tool_calls: bool,
+    pub(super) pending_http_continuation: Option<PendingHttpContinuation>,
+    pub(super) last_http_continuation: Option<HttpContinuation>,
     pub(super) response_started: bool,
     pub(super) drain_reconnect_pending: bool,
     pub(super) policy: ModelPolicy,
@@ -87,6 +90,8 @@ impl Session {
             last_deepseek_tool_calls: Vec::new(),
             pending_deepseek_tool_calls: Vec::new(),
             capture_deepseek_tool_calls: false,
+            pending_http_continuation: None,
+            last_http_continuation: None,
             response_started: false,
             drain_reconnect_pending: false,
             policy,
@@ -141,27 +146,84 @@ impl Session {
         self.last_deepseek_tool_calls.clear();
         self.pending_deepseek_tool_calls.clear();
         self.capture_deepseek_tool_calls = false;
+        self.clear_http_continuation();
         self.websocket_first_frame_at = None;
         self.websocket_first_token_at = None;
         self.observed_activity = None;
     }
 
-    pub(super) fn observe_deepseek_tool_event(
+    /// 记录一次响应事件：WebSocket 响应只采集 `DeepSeek` 历史修复所需的 tool call，
+    /// HTTP 响应额外累积状态续传展开所需的 output items。
+    pub(super) fn observe_response_event(
         &mut self,
         message: &tokio_tungstenite::tungstenite::Message,
+        from_websocket: bool,
     ) {
+        self.observe_deepseek_tool_event(message);
+        if !from_websocket {
+            self.observe_http_response_event(message);
+        }
+    }
+
+    fn observe_deepseek_tool_event(&mut self, message: &tokio_tungstenite::tungstenite::Message) {
         if !self.capture_deepseek_tool_calls {
             return;
         }
-        let payload = match message {
-            tokio_tungstenite::tungstenite::Message::Text(text) => text.as_bytes(),
-            tokio_tungstenite::tungstenite::Message::Binary(payload) => payload.as_ref(),
-            _ => return,
+        let Some(payload) = message_bytes(message) else {
+            return;
         };
         super::super::deepseek_history::upsert_tool_calls(
             &mut self.pending_deepseek_tool_calls,
             super::super::deepseek_history::tool_calls_from_event(payload),
         );
+    }
+
+    /// 记录即将发往上游的 HTTP 请求体，作为之后展开状态续传的底稿。
+    pub(super) fn begin_http_continuation(&mut self, payload: &[u8]) {
+        self.pending_http_continuation = Some(PendingHttpContinuation::new(payload));
+    }
+
+    /// 累积本轮 HTTP 响应里可以进入下一次请求的 output items。
+    fn observe_http_response_event(&mut self, message: &tokio_tungstenite::tungstenite::Message) {
+        let Some(payload) = message_bytes(message) else {
+            return;
+        };
+        let Some(pending) = self.pending_http_continuation.as_mut() else {
+            return;
+        };
+        pending.observe(payload);
+    }
+
+    /// 终态事件到达后固化续传材料；没有响应 ID 的响应不允许被续传。
+    pub(super) fn commit_http_continuation(&mut self, response_id: Option<&str>) {
+        let pending = self.pending_http_continuation.take();
+        self.last_http_continuation = match response_id {
+            Some(_) => pending.and_then(PendingHttpContinuation::finish),
+            None => None,
+        };
+    }
+
+    /// 本轮 HTTP 请求没有拿到可用终态，丢弃未完成的底稿。
+    pub(super) fn abort_http_continuation(&mut self) {
+        self.pending_http_continuation = None;
+    }
+
+    pub(super) fn clear_http_continuation(&mut self) {
+        self.pending_http_continuation = None;
+        self.last_http_continuation = None;
+    }
+
+    /// 把带 `previous_response_id` 的续传帧展开成自包含请求；状态对不上时不展开。
+    pub(super) fn expand_http_continuation(
+        &self,
+        payload: &[u8],
+        previous_response_id: Option<&str>,
+    ) -> Option<Vec<u8>> {
+        let previous_response_id = previous_response_id?;
+        if self.last_terminal_response_id.as_deref() != Some(previous_response_id) {
+            return None;
+        }
+        self.last_http_continuation.as_ref()?.expand(payload)
     }
 
     pub(super) fn commit_deepseek_tool_calls(&mut self) {
@@ -294,4 +356,12 @@ async fn cleanup(session: &mut Session, active: &mut Option<Active>) {
         lease.release().await;
     }
     session.handle.close().await;
+}
+
+fn message_bytes(message: &Message) -> Option<&[u8]> {
+    match message {
+        Message::Text(text) => Some(text.as_bytes()),
+        Message::Binary(payload) => Some(payload.as_ref()),
+        _ => None,
+    }
 }

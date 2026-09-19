@@ -114,6 +114,7 @@ pub(super) struct Counts {
 pub(super) struct FixtureState {
     pub(super) counts: Mutex<Counts>,
     pub(super) private_payloads: Mutex<Vec<Vec<u8>>>,
+    pub(super) http_payloads: Mutex<Vec<Vec<u8>>>,
     pub(super) changed: Notify,
     pub(super) release_private: Notify,
     pub(super) release_http: Notify,
@@ -154,6 +155,7 @@ impl FixtureServer {
             state: Arc::new(FixtureState {
                 counts: Mutex::new(Counts::default()),
                 private_payloads: Mutex::new(Vec::new()),
+                http_payloads: Mutex::new(Vec::new()),
                 changed: Notify::new(),
                 release_private: Notify::new(),
                 release_http: Notify::new(),
@@ -281,6 +283,10 @@ impl Fixture {
 
     pub(super) async fn private_payloads(&self) -> Vec<Vec<u8>> {
         self.state.private_payloads.lock().await.clone()
+    }
+
+    pub(super) async fn http_payloads(&self) -> Vec<Vec<u8>> {
+        self.state.http_payloads.lock().await.clone()
     }
 
     pub(super) fn release_private(&self) {

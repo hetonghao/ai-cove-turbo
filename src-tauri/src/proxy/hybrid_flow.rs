@@ -14,7 +14,7 @@ use super::{
     Active, ClientWebSocket, Session,
     common::{close_client, event_type, reject_thread_switch, send_error},
     http, idle, legacy,
-    sse::{HttpFallback, continuation_payload, http_request_payload},
+    sse::{HttpFallback, http_request_payload},
     websocket,
 };
 
@@ -231,36 +231,26 @@ async fn start_response(
     if previous_response_id.is_some()
         && session.last_response_transport == Some(super::ResponseTransport::Http)
     {
-        if session
+        let traffic = session
             .last_http_traffic
-            .is_some_and(|traffic| traffic.route == traffic::TrafficRoute::HybridCapabilityHttp)
+            .unwrap_or(HttpTraffic::HYBRID_CAPABILITY);
+        // 能力路线（auto 判定 HTTP-only）保持“本地拒绝 + 客户端全量重发”的既有契约；
+        // 其余 HTTP 路线（policy / 大请求 / 恢复 / 冷启动）把状态续传展开成自包含请求，
+        // 上游只支持 HTTP 时不会再有孤立 tool output。
+        if traffic.route != traffic::TrafficRoute::HybridCapabilityHttp
+            && let Some(http_payload) =
+                session.expand_http_continuation(&payload, previous_response_id.as_deref())
         {
-            session.response_started = false;
-            let _ = send_error(
-                client,
-                "previous_response_not_found",
-                "Previous response is not available on this websocket",
-            )
-            .await;
+            start_http_response(session, active, http_payload, traffic);
             return true;
         }
-        let Ok(http_payload) = continuation_payload(&payload) else {
-            let _ = send_error(
-                client,
-                "invalid_request",
-                "response.create continuation cannot be sent over HTTP",
-            )
-            .await;
-            return true;
-        };
-        start_http_response(
-            session,
-            active,
-            http_payload,
-            session
-                .last_http_traffic
-                .unwrap_or(HttpTraffic::HYBRID_CAPABILITY),
-        );
+        session.response_started = false;
+        let _ = send_error(
+            client,
+            "previous_response_not_found",
+            "Previous response is not available on this websocket",
+        )
+        .await;
         return true;
     }
     if previous_response_id.is_none() {
@@ -342,7 +332,7 @@ async fn start_response(
 }
 
 fn start_http_only_response(
-    session: &Session,
+    session: &mut Session,
     active: &mut Option<Active>,
     fallback: HttpFallback,
     traffic: HttpTraffic,
@@ -354,7 +344,7 @@ fn start_http_only_response(
 }
 
 fn start_http_response(
-    session: &Session,
+    session: &mut Session,
     active: &mut Option<Active>,
     payload: Vec<u8>,
     traffic: HttpTraffic,
