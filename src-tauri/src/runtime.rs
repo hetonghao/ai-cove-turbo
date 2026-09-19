@@ -2911,8 +2911,8 @@ supports_websockets = false
         fs::write(
             &config_path,
             format!(
-                "model_provider = \"custom\"\nmodel_catalog_json = \"{}\"\n\n[model_providers.custom]\nbase_url = \"https://api.ai-cove.com/v1\"\nsupports_websockets = false\n",
-                original.display()
+                "model_provider = \"custom\"\nmodel_catalog_json = {}\n\n[model_providers.custom]\nbase_url = \"https://api.ai-cove.com/v1\"\nsupports_websockets = false\n",
+                toml_edit::value(original.display().to_string())
             ),
         )?;
         let runtime = AppRuntime::new(RuntimePaths {
