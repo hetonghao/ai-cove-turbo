@@ -58,6 +58,13 @@ pub(crate) struct RemoteManifest {
     pub id: String,
     pub version: String,
     pub files: Vec<RemoteFile>,
+    pub archive: Option<RemoteArchive>,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteArchive {
+    pub name: String,
     pub sha256: String,
 }
 
@@ -393,6 +400,22 @@ impl CatalogClient {
             }
             Err(error) => return Err(CatalogStageError::unsafe_path(error.message)),
         }
+        if let Some(archive) = &manifest.archive {
+            let rel = format!("releases/{}/{}/{}", manifest.id, manifest.version, archive.name);
+            let url = self
+                .resource_url(&rel)
+                .ok_or_else(|| CatalogStageError::unsafe_path("unsafe archive path"))?;
+            let data = self
+                .get_bytes(url, MAX_TOTAL_BYTES)
+                .await
+                .map_err(|error| CatalogStageError::network(error.message))?;
+            if sha256_hex(&data) != archive.sha256 {
+                return Err(CatalogStageError::integrity(
+                    "downloaded archive checksum mismatch",
+                ));
+            }
+            return extract_archive(anchor, staging_dir, manifest, &data);
+        }
         let rel_prefix = format!("releases/{}/{}/files/", manifest.id, manifest.version);
         for file in &manifest.files {
             validate_relative_path(&file.path)
@@ -418,69 +441,136 @@ impl CatalogClient {
                     file.path
                 )));
             }
-            let target = file
-                .path
-                .split('/')
-                .fold(staging_dir.to_path_buf(), |mut path, part| {
-                    path.push(part);
-                    path
-                });
-            if let Some(parent) = target.parent() {
-                ensure_safe_ancestors(anchor, parent)
-                    .map_err(|error| CatalogStageError::unsafe_path(error.message))?;
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    CatalogStageError::permission(format!(
-                        "cannot create skill directories: {error}"
-                    ))
-                })?;
-                ensure_safe_ancestors(anchor, parent)
-                    .map_err(|error| CatalogStageError::unsafe_path(error.message))?;
-            }
-            match safe_metadata(anchor, &target) {
-                Ok(None) => {}
-                Ok(_) => {
-                    return Err(CatalogStageError::unsafe_path(format!(
-                        "staged path already exists: {}",
-                        file.path
-                    )));
-                }
-                Err(error) => return Err(CatalogStageError::unsafe_path(error.message)),
-            }
-            let mut handle = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&target)
-                .map_err(|error| {
-                    CatalogStageError::permission(format!(
-                        "cannot write staged file {}: {error}",
-                        file.path
-                    ))
-                })?;
-            handle
-                .write_all(&data)
-                .and_then(|_| handle.sync_all())
-                .map_err(|error| {
-                    CatalogStageError::permission(format!(
-                        "cannot write staged file {}: {error}",
-                        file.path
-                    ))
-                })?;
-            drop(handle);
-            #[cfg(unix)]
-            if file.executable {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).map_err(
-                    |error| {
-                        CatalogStageError::permission(format!(
-                            "cannot mark staged file executable {}: {error}",
-                            file.path
-                        ))
-                    },
-                )?;
-            }
+            stage_file(anchor, staging_dir, &file.path, &data, file.executable)?;
         }
         Ok(())
     }
+}
+
+fn stage_file(
+    anchor: &Path,
+    staging_dir: &Path,
+    relpath: &str,
+    data: &[u8],
+    executable: bool,
+) -> Result<(), CatalogStageError> {
+    let target = relpath
+        .split('/')
+        .fold(staging_dir.to_path_buf(), |mut path, part| {
+            path.push(part);
+            path
+        });
+    if let Some(parent) = target.parent() {
+        ensure_safe_ancestors(anchor, parent)
+            .map_err(|error| CatalogStageError::unsafe_path(error.message))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            CatalogStageError::permission(format!("cannot create skill directories: {error}"))
+        })?;
+        ensure_safe_ancestors(anchor, parent)
+            .map_err(|error| CatalogStageError::unsafe_path(error.message))?;
+    }
+    match safe_metadata(anchor, &target) {
+        Ok(None) => {}
+        Ok(_) => {
+            return Err(CatalogStageError::unsafe_path(format!(
+                "staged path already exists: {relpath}"
+            )));
+        }
+        Err(error) => return Err(CatalogStageError::unsafe_path(error.message)),
+    }
+    let mut handle = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&target)
+        .map_err(|error| {
+            CatalogStageError::permission(format!("cannot write staged file {relpath}: {error}"))
+        })?;
+    handle
+        .write_all(data)
+        .and_then(|_| handle.sync_all())
+        .map_err(|error| {
+            CatalogStageError::permission(format!("cannot write staged file {relpath}: {error}"))
+        })?;
+    drop(handle);
+    #[cfg(unix)]
+    if executable {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).map_err(
+            |error| {
+                CatalogStageError::permission(format!(
+                    "cannot mark staged file executable {relpath}: {error}"
+                ))
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn extract_archive(
+    anchor: &Path,
+    staging_dir: &Path,
+    manifest: &RemoteManifest,
+    data: &[u8],
+) -> Result<(), CatalogStageError> {
+    let decoder = flate2::read::GzDecoder::new(data);
+    let mut archive = tar::Archive::new(decoder);
+    let prefix = format!("{}/", manifest.id);
+    let mut written = 0usize;
+    let mut total: u64 = 0;
+    let entries = archive
+        .entries()
+        .map_err(|_| CatalogStageError::integrity("skill archive is not a valid tar"))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|_| CatalogStageError::integrity("skill archive is not a valid tar"))?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            continue;
+        }
+        if !entry_type.is_file() {
+            return Err(CatalogStageError::unsafe_path(
+                "skill archive contains a non-file entry",
+            ));
+        }
+        let raw_name = entry.path_bytes();
+        let name = std::str::from_utf8(raw_name.as_ref())
+            .map_err(|_| CatalogStageError::unsafe_path("archive entry name is not UTF-8"))?;
+        let relpath = name
+            .strip_prefix(&prefix)
+            .ok_or_else(|| CatalogStageError::unsafe_path("archive entry escapes the skill"))?
+            .to_string();
+        validate_relative_path(&relpath)
+            .map_err(|message| CatalogStageError::unsafe_path(message))?;
+        written += 1;
+        if written > MAX_SKILL_FILES {
+            return Err(CatalogStageError::integrity(
+                "skill archive contains too many files",
+            ));
+        }
+        let executable = entry
+            .header()
+            .mode()
+            .map(|mode| mode & 0o111 != 0)
+            .unwrap_or(false);
+        let mut body = Vec::new();
+        entry
+            .take(MAX_FILE_BYTES + 1)
+            .read_to_end(&mut body)
+            .map_err(|_| CatalogStageError::integrity("cannot read archive entry"))?;
+        if body.len() as u64 > MAX_FILE_BYTES {
+            return Err(CatalogStageError::integrity(format!(
+                "archive entry exceeds the allowed size: {relpath}"
+            )));
+        }
+        total = total.saturating_add(body.len() as u64);
+        if total > MAX_TOTAL_BYTES {
+            return Err(CatalogStageError::integrity(
+                "skill archive exceeds the total size limit",
+            ));
+        }
+        stage_file(anchor, staging_dir, &relpath, &body, executable)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -648,10 +738,40 @@ fn parse_manifest(raw: &[u8], entry: &CatalogSkill) -> Result<RemoteManifest, Sk
         ));
     }
     parsed.sort_by(|a, b| a.path.cmp(&b.path));
+    let archive = match value.get("archive") {
+        None => {
+            if value.get("archive_sha256").is_some() {
+                return Err(SkillError::new(
+                    "integrity_error",
+                    "manifest declares archive_sha256 without archive",
+                ));
+            }
+            None
+        }
+        Some(raw) => {
+            let name = raw.as_str().ok_or_else(|| {
+                SkillError::new("integrity_error", "manifest archive must be a string")
+            })?;
+            let expected = format!("{id}-{version}.tar.gz");
+            if name != expected {
+                return Err(SkillError::new(
+                    "integrity_error",
+                    format!("manifest archive {name} does not match the declared skill"),
+                ));
+            }
+            let sha256 = required_string(&value, "archive_sha256")?;
+            validate_sha256(&sha256)?;
+            Some(RemoteArchive {
+                name: name.to_string(),
+                sha256,
+            })
+        }
+    };
     Ok(RemoteManifest {
         id,
         version,
         files: parsed,
+        archive,
         sha256: sha,
     })
 }

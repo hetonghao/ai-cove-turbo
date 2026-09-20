@@ -23,6 +23,7 @@ version = "1.0.0"
 dependencies = [
  "axum",
  "bytes",
+ "flate2",
  "futures-util",
  "http-body-util",
  "hyper",
@@ -33,6 +34,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",

@@ -60,6 +60,58 @@ fn write_release(
     (manifest_bytes.clone(), sha(&manifest_bytes))
 }
 
+fn build_archive_bytes(
+    id: &str,
+    files: &[(&str, &[u8])],
+    exec: &[&str],
+    extra: &[(&str, &[u8])],
+) -> Vec<u8> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    {
+        let mut tar = tar::Builder::new(&mut encoder);
+        let mut sorted: Vec<(String, &[u8], bool)> = files
+            .iter()
+            .map(|(path, body)| (format!("{id}/{path}"), *body, exec.contains(path)))
+            .collect();
+        sorted.extend(extra.iter().map(|(path, body)| {
+            (path.to_string(), *body, false)
+        }));
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        for (path, body, executable) in sorted {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(if executable { 0o755 } else { 0o644 });
+            header.set_mtime(0);
+            header.set_cksum();
+            tar.append_data(&mut header, path, body).unwrap();
+        }
+        tar.finish().unwrap();
+    }
+    encoder.finish().unwrap()
+}
+
+fn write_release_archived(
+    root: &Path,
+    id: &str,
+    version: &str,
+    files: &[(&str, &[u8])],
+    exec: &[&str],
+    archive_extra: &[(&str, &[u8])],
+) -> (Vec<u8>, String) {
+    let (manifest_bytes, _sha) = write_release(root, id, version, files, exec);
+    let release = root.join("releases").join(id).join(version);
+    let archive_name = format!("{id}-{version}.tar.gz");
+    let archive_bytes = build_archive_bytes(id, files, exec, archive_extra);
+    std::fs::write(release.join(&archive_name), &archive_bytes).unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    manifest["archive"] = serde_json::json!(archive_name);
+    manifest["archive_sha256"] = serde_json::json!(sha(&archive_bytes));
+    let manifest_bytes =
+        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()).into_bytes();
+    std::fs::write(release.join("manifest.json"), &manifest_bytes).unwrap();
+    (manifest_bytes.clone(), sha(&manifest_bytes))
+}
+
 fn write_catalog(root: &Path, skills: Vec<serde_json::Value>) {
     let catalog = serde_json::json!({"schema_version": 1, "skills": skills});
     std::fs::write(
@@ -70,6 +122,14 @@ fn write_catalog(root: &Path, skills: Vec<serde_json::Value>) {
 }
 
 fn demo_fixture(version: &str, body: &[u8]) -> Fixture {
+    demo_fixture_impl(version, body, false)
+}
+
+fn demo_fixture_archived(version: &str, body: &[u8]) -> Fixture {
+    demo_fixture_impl(version, body, true)
+}
+
+fn demo_fixture_impl(version: &str, body: &[u8], archived: bool) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("skills");
     std::fs::create_dir_all(&root).unwrap();
@@ -77,8 +137,11 @@ fn demo_fixture(version: &str, body: &[u8]) -> Fixture {
         ("SKILL.md", b"---\nname: demo-skill\n---\nx\n"),
         ("scripts/tool.py", body),
     ];
-    let (_manifest, manifest_sha) =
-        write_release(&root, "demo-skill", version, &files, &["scripts/tool.py"]);
+    let (_manifest, manifest_sha) = if archived {
+        write_release_archived(&root, "demo-skill", version, &files, &["scripts/tool.py"], &[])
+    } else {
+        write_release(&root, "demo-skill", version, &files, &["scripts/tool.py"])
+    };
     write_catalog(
         &root,
         vec![serde_json::json!({
@@ -181,6 +244,187 @@ fn status_skill<'a>(
     id: &str,
 ) -> &'a crate::skills::SkillStatus {
     status.skills.iter().find(|skill| skill.id == id).unwrap()
+}
+
+#[tokio::test]
+async fn install_via_archive_lands_files_and_exec_bit() {
+    let fixture = demo_fixture_archived("1.0.0", b"print(1)\n");
+    let (url, _stop) = serve(
+        fixture.dir.parent().unwrap().to_path_buf(),
+        "skills/catalog.json",
+    )
+    .await;
+    let (manager, tmp) = test_manager(&url);
+    let home = tmp.path().join("home");
+
+    let status = manager.status(true).await.unwrap();
+    let skill = status_skill(&status, "demo-skill");
+    let result = manager
+        .install(
+            "demo-skill",
+            skill.release_revision.as_deref().unwrap(),
+            &skill.local_revision,
+            false,
+        )
+        .await
+        .unwrap();
+    let installed = status_skill(&result.status, "demo-skill");
+    assert_eq!(installed.local_state, "managed");
+    assert_eq!(installed.installed_version.as_deref(), Some("1.0.0"));
+    assert_eq!(
+        std::fs::read(home.join(".agents/skills/demo-skill/scripts/tool.py")).unwrap(),
+        b"print(1)\n"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(home.join(".agents/skills/demo-skill/scripts/tool.py"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111);
+    }
+}
+
+#[tokio::test]
+async fn install_rejects_archive_with_wrong_checksum() {
+    let fixture = demo_fixture_archived("1.0.0", b"print(1)\n");
+    std::fs::write(
+        fixture
+            .dir
+            .join("releases/demo-skill/1.0.0/demo-skill-1.0.0.tar.gz"),
+        b"corrupted",
+    )
+    .unwrap();
+    let (url, _stop) = serve(
+        fixture.dir.parent().unwrap().to_path_buf(),
+        "skills/catalog.json",
+    )
+    .await;
+    let (manager, _tmp) = test_manager(&url);
+
+    let status = manager.status(true).await.unwrap();
+    let skill = status_skill(&status, "demo-skill");
+    let error = manager
+        .install(
+            "demo-skill",
+            skill.release_revision.as_deref().unwrap(),
+            &skill.local_revision,
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "integrity_error");
+}
+
+#[tokio::test]
+async fn install_rejects_archive_with_undeclared_entry() {
+    let fixture = {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("skills");
+        std::fs::create_dir_all(&root).unwrap();
+        let files: Vec<(&str, &[u8])> = vec![
+            ("SKILL.md", b"---\nname: demo-skill\n---\nx\n"),
+            ("scripts/tool.py", b"print(1)\n"),
+        ];
+        let (_m, manifest_sha) = write_release_archived(
+            &root,
+            "demo-skill",
+            "1.0.0",
+            &files,
+            &["scripts/tool.py"],
+            &[("demo-skill/extra/evil.py", b"evil\n")],
+        );
+        write_catalog(
+            &root,
+            vec![serde_json::json!({
+                "id": "demo-skill",
+                "name": "Demo Skill",
+                "description": "fixture",
+                "version": "1.0.0",
+                "manifest": "releases/demo-skill/1.0.0/manifest.json",
+                "manifest_sha256": manifest_sha,
+            })],
+        );
+        Fixture {
+            dir: root,
+            _tmp: tmp,
+        }
+    };
+    let (url, _stop) = serve(
+        fixture.dir.parent().unwrap().to_path_buf(),
+        "skills/catalog.json",
+    )
+    .await;
+    let (manager, _tmp) = test_manager(&url);
+
+    let status = manager.status(true).await.unwrap();
+    let skill = status_skill(&status, "demo-skill");
+    let error = manager
+        .install(
+            "demo-skill",
+            skill.release_revision.as_deref().unwrap(),
+            &skill.local_revision,
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "integrity_error");
+}
+
+#[tokio::test]
+async fn install_rejects_archive_entry_outside_skill_prefix() {
+    let fixture = {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("skills");
+        std::fs::create_dir_all(&root).unwrap();
+        let files: Vec<(&str, &[u8])> = vec![
+            ("SKILL.md", b"---\nname: demo-skill\n---\nx\n"),
+            ("scripts/tool.py", b"print(1)\n"),
+        ];
+        let (_m, manifest_sha) = write_release_archived(
+            &root,
+            "demo-skill",
+            "1.0.0",
+            &files,
+            &["scripts/tool.py"],
+            &[("other-skill/escape.txt", b"evil\n")],
+        );
+        write_catalog(
+            &root,
+            vec![serde_json::json!({
+                "id": "demo-skill",
+                "name": "Demo Skill",
+                "description": "fixture",
+                "version": "1.0.0",
+                "manifest": "releases/demo-skill/1.0.0/manifest.json",
+                "manifest_sha256": manifest_sha,
+            })],
+        );
+        Fixture {
+            dir: root,
+            _tmp: tmp,
+        }
+    };
+    let (url, _stop) = serve(
+        fixture.dir.parent().unwrap().to_path_buf(),
+        "skills/catalog.json",
+    )
+    .await;
+    let (manager, _tmp) = test_manager(&url);
+
+    let status = manager.status(true).await.unwrap();
+    let skill = status_skill(&status, "demo-skill");
+    let error = manager
+        .install(
+            "demo-skill",
+            skill.release_revision.as_deref().unwrap(),
+            &skill.local_revision,
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "unsafe_path");
 }
 
 #[tokio::test]
