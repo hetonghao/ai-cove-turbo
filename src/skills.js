@@ -263,8 +263,11 @@
     updateBadge.dataset.updateState = skill.updateState;
     updateBadge.textContent = updateLabel(skill);
     badges.appendChild(updateBadge);
+    const controls = document.createElement('div');
+    controls.className = 'b-skills-row__controls';
+    controls.appendChild(badges);
     head.appendChild(title);
-    head.appendChild(badges);
+    head.appendChild(controls);
 
     const meta = document.createElement('p');
     meta.className = 'b-skills-row__meta';
@@ -281,7 +284,6 @@
         (status && status.catalogState !== 'fresh' ? '上次获取版本 ' : '最新 ') + skill.latestVersion
       );
     }
-    if (skill.backupPath) versions.push('最近备份 ' + skill.backupPath);
     meta.textContent = versions.join(' · ');
 
     const desc = document.createElement('p');
@@ -291,6 +293,20 @@
     row.appendChild(head);
     row.appendChild(meta);
     row.appendChild(desc);
+
+    if (skill.backupPath) {
+      const details = document.createElement('details');
+      details.className = 'b-skills-diff__details b-skills-backup';
+      details.dataset.diffKey = skill.id + ':backup';
+      const summary = document.createElement('summary');
+      summary.textContent = '最近备份';
+      const path = document.createElement('code');
+      path.dataset.skillBackupPath = '';
+      path.textContent = skill.backupPath;
+      details.appendChild(summary);
+      details.appendChild(path);
+      row.appendChild(details);
+    }
 
     if (skill.error) {
       const error = document.createElement('p');
@@ -342,7 +358,7 @@
       uninstall.textContent = '卸载';
       actions.appendChild(uninstall);
     }
-    row.appendChild(actions);
+    if (busy || actions.children.length > 1) controls.appendChild(actions);
     return row;
   }
 
@@ -437,6 +453,8 @@
     pendingConfirm = options;
     if (typeof els.dialog.showModal === 'function') {
       els.dialog.showModal();
+      const cancel = els.dialog.querySelector('[data-skill-dialog-cancel]');
+      if (cancel) cancel.focus();
     }
     return true;
   }
@@ -508,10 +526,15 @@
       if (result && result.status) {
         status = result.status;
       }
+      const completed = action === 'install' ? '安装完成' : '卸载完成';
       if (result && result.backupPath) {
-        setActionMessage('已备份到 ' + result.backupPath);
+        const updated = findSkill(skill.id);
+        if (updated) updated.backupPath = result.backupPath;
+        setActionMessage(updated
+          ? completed + '；原目录已备份，可展开“最近备份”查看。'
+          : completed + '；已备份到 ' + result.backupPath);
       } else {
-        setActionMessage('');
+        setActionMessage(completed + '。');
       }
     } catch (error) {
       const message = describeError(error);
@@ -543,7 +566,18 @@
   function refresh(manual) {
     if (!els || loading || pendingBySkill.size) return Promise.resolve();
     loading = true;
-    if (els.refreshButton) els.refreshButton.disabled = true;
+    if (els.refreshButton) {
+      els.refreshButton.disabled = true;
+      els.refreshButton.textContent = '正在检查…';
+    }
+    els.list.setAttribute('aria-busy', 'true');
+    if (!status) {
+      els.list.textContent = '';
+      const placeholder = document.createElement('p');
+      placeholder.className = 'b-skills-empty';
+      placeholder.textContent = '正在读取官方技能目录…';
+      els.list.appendChild(placeholder);
+    }
     const stamp = requestStamp = requestStamp + 1;
     const mutationsAtStart = mutationStamp;
     return invokeCommand('get_skills', { refresh: Boolean(manual) })
@@ -555,11 +589,18 @@
       })
       .catch((error) => {
         if (stamp !== requestStamp) return;
-        if (els && els.meta) els.meta.textContent = describeError(error);
+        if (els && els.meta) els.meta.textContent = '检查失败，请检查网络后重试。' + describeError(error);
+        if (!status && els && els.list.children.length) {
+          els.list.children[0].textContent = '暂时无法读取官方目录，请点击“检查更新”重试。';
+        }
       })
       .finally(() => {
         loading = false;
-        if (els && els.refreshButton) els.refreshButton.disabled = false;
+        if (els) els.list.setAttribute('aria-busy', 'false');
+        if (els && els.refreshButton) {
+          els.refreshButton.disabled = false;
+          els.refreshButton.textContent = '检查更新';
+        }
       });
   }
 

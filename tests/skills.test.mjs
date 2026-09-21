@@ -243,6 +243,61 @@ function click(button, list) {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+test("skill actions share the header with status badges instead of a bottom row", async () => {
+  const base = skillsStatus();
+  base.skills.push({ ...base.skills[1], id: "update-skill", latestVersion: "1.1.0", updateState: "available" });
+  const { TurboSkills, dom } = await loadModule({ invoke: async () => base });
+  TurboSkills.activate(true);
+  await tick(); await tick();
+  for (const row of dom.list.children) {
+    const head = row.querySelector(".b-skills-row__head");
+    const controls = head.querySelector(".b-skills-row__controls");
+    assert.ok(controls);
+    assert.equal(controls.children[0].className, "b-skills-row__badges");
+    const actions = row.querySelector(".b-skills-row__actions");
+    assert.equal(actions.parentNode, controls);
+    assert.equal(row.children.some((child) => child === actions), false);
+  }
+  const updated = dom.list.children.find((row) => row.dataset.skillId === "update-skill");
+  assert.equal(updated.querySelector('[data-skill-action="install"]').textContent, "更新");
+  assert.equal(updated.querySelector('[data-skill-action="uninstall"]').textContent, "卸载");
+});
+
+test("backup paths stay in expandable details, separate from version metadata", async () => {
+  const base = skillsStatus();
+  base.skills[1].backupPath = "/home/test/" + "long-path/".repeat(20) + "backup";
+  const { TurboSkills, dom } = await loadModule({ invoke: async () => base });
+  TurboSkills.activate(true);
+  await tick(); await tick();
+  const row = dom.list.children.find((child) => child.dataset.skillId === "managed-skill");
+  assert.doesNotMatch(row.querySelector(".b-skills-row__meta").textContent, /backup|long-path/);
+  const backup = row.querySelector("details");
+  assert.equal(backup.open, false);
+  assert.equal(backup.querySelector("code").textContent, base.skills[1].backupPath);
+  backup.open = true;
+  await TurboSkills.refresh(true);
+  const updated = dom.list.children.find((child) => child.dataset.skillId === "managed-skill");
+  assert.equal(updated.querySelector("details").open, true);
+});
+
+test("initial loading and failed refresh expose readable recovery states", async () => {
+  let reject;
+  const gate = new Promise((_, fail) => { reject = fail; });
+  const { TurboSkills, dom } = await loadModule({ invoke: () => gate });
+  TurboSkills.activate(true);
+  assert.equal(dom.refreshButton.textContent, "正在检查…");
+  assert.equal(dom.refreshButton.disabled, true);
+  assert.equal(dom.list.getAttribute("aria-busy"), "true");
+  assert.match(dom.list.children[0].textContent, /正在读取/);
+  reject(new Error("offline"));
+  await tick(); await tick();
+  assert.equal(dom.refreshButton.textContent, "检查更新");
+  assert.equal(dom.refreshButton.disabled, false);
+  assert.equal(dom.list.getAttribute("aria-busy"), "false");
+  assert.match(dom.meta.textContent, /offline/);
+  assert.match(dom.list.children[0].textContent, /重试/);
+});
+
 test("activate loads status through real invoke and renders rows", async () => {
   const calls = [];
   const { TurboSkills, dom } = await loadModule({
@@ -320,7 +375,9 @@ test("unmanaged install opens dialog then confirms with confirmReplace", async (
   assert.ok(installCall);
   assert.equal(installCall[1].confirmReplace, true);
   assert.equal(installCall[1].expectedLocalRevision, "rev-unmanaged");
-  assert.equal(dom.message.textContent, "已备份到 /tmp/backup");
+  assert.equal(dom.message.textContent, "安装完成；原目录已备份，可展开“最近备份”查看。");
+  const updatedRow = Array.from(dom.list.children).find((child) => child.dataset.skillId === "unmanaged-skill");
+  assert.equal(updatedRow.querySelector('[data-skill-backup-path]').textContent, "/tmp/backup");
   assert.equal(dom.dialog.open, false);
 });
 
