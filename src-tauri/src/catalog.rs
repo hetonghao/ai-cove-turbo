@@ -1016,7 +1016,9 @@ fn bundled_cli_candidates() -> Vec<PathBuf> {
         candidates.extend([
             PathBuf::from("/opt/homebrew/bin/codex"),
             PathBuf::from("/usr/local/bin/codex"),
+            PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"),
             PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex"),
+            PathBuf::from("/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex"),
             PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"),
         ]);
     }
@@ -1863,11 +1865,17 @@ mod tests {
     #[test]
     fn bundled_cli_candidates_include_macos_app_cli() {
         let candidates = bundled_cli_candidates();
-        assert!(
-            candidates.iter().any(|path| {
-                path == Path::new("/Applications/Codex.app/Contents/Resources/codex")
-            })
-        );
+        for path in [
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+            "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex",
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "/Applications/Codex.app/Contents/Resources/codex",
+        ] {
+            assert!(
+                candidates.iter().any(|candidate| candidate == Path::new(path)),
+                "missing bundled CLI candidate: {path}"
+            );
+        }
         assert_eq!(
             candidates.last().map(PathBuf::as_path),
             Some(Path::new("codex"))
