@@ -322,7 +322,7 @@
   }
 
   function syncSkillsActivation() {
-    const active = state.tab === "config" && state.configView === "skills" && !document.hidden;
+    const active = state.tab === "config" && !document.hidden;
     window.TurboSkills?.activate?.(active);
   }
 

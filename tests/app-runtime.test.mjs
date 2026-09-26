@@ -54,7 +54,7 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
-async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models, discoveredModels = [], initialConfigView = "settings", rootAvailable = false } = {}) {
+async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models, discoveredModels = [], initialTab = "config", initialConfigView = "settings", rootAvailable = false } = {}) {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const catalog = {
     path: "/home/test/.codex/model-catalogs/ai_cove_turbo.json",
@@ -272,9 +272,11 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
       return [];
     },
   };
+  let skillsActive = false;
   const window = {
     __TAURI__: { core: { invoke } },
-    location: { href: `tauri://localhost/?tab=config&view=${initialConfigView}` },
+    TurboSkills: { activate(active) { skillsActive = active; } },
+    location: { href: `tauri://localhost/?tab=${initialTab}&view=${initialConfigView}` },
     history: { replaceState(_state, _title, url) { window.location.href = String(url); } },
     addEventListener() {},
     setInterval(handler) { tick = handler; },
@@ -286,6 +288,11 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   const row = (slug) => element({ modelSlug: slug });
   return {
     calls,
+    skillsActive() { return skillsActive; },
+    setHidden(hidden) {
+      document.hidden = hidden;
+      listeners.get("visibilitychange")?.();
+    },
     info,
     list,
     message,
@@ -416,6 +423,22 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     },
   };
 }
+
+test("进入配置页即激活 Skills 加载，无需选中 Skills 标签", async () => {
+  for (const initialConfigView of ["settings", "catalog", "skills"]) {
+    const harness = await catalogHarness({ initialConfigView });
+    assert.equal(harness.skillsActive(), true, initialConfigView);
+    harness.setHidden(true);
+    assert.equal(harness.skillsActive(), false);
+    harness.setHidden(false);
+    assert.equal(harness.skillsActive(), true);
+  }
+  const harness = await catalogHarness({ initialTab: "live" });
+  assert.equal(harness.skillsActive(), false);
+  await harness.click("open-config");
+  assert.equal(harness.configView(), "settings");
+  assert.equal(harness.skillsActive(), true);
+});
 
 test("配置工作区通过顶部 Tab 切换并同步 URL 与键盘状态", async () => {
   const harness = await catalogHarness();
