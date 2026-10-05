@@ -5,6 +5,8 @@
 
 pub(crate) mod catalog;
 mod catalog_discovery;
+#[cfg(any(test, target_os = "windows"))]
+mod codex_desktop_windows;
 mod codex_thread_title;
 pub(crate) mod config;
 pub(crate) mod proxy;
@@ -718,7 +720,7 @@ end if"#;
     .map(Some)
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn restart_codex_desktop_with<Q, E, O, P>(
     old_pid: Option<u32>,
     mut quit: Q,
@@ -760,7 +762,7 @@ where
     Err("Codex Desktop 未能重新启动，请手动打开后重试".to_owned())
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod restart_codex_tests {
     use std::{
         cell::{Cell, RefCell},
@@ -823,42 +825,70 @@ mod restart_codex_tests {
 
 #[cfg(target_os = "windows")]
 fn restart_codex_desktop() -> Result<Option<u32>, String> {
+    const EXIT_ATTEMPTS: usize = 150;
     const LAUNCH_ATTEMPTS: usize = 300;
     const POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-    let script = r#"$path = Join-Path $env:LOCALAPPDATA 'Programs\Codex\Codex.exe'
-if (-not (Test-Path $path)) { throw '未找到 Codex Desktop 可执行文件' }
-$processes = Get-Process -Name Codex -ErrorAction SilentlyContinue | Where-Object { $_.Path -and [string]::Equals($_.Path, $path, [System.StringComparison]::OrdinalIgnoreCase) }
-$processes | ForEach-Object {
-  [void]$_.CloseMainWindow()
-  if (-not $_.WaitForExit(5000)) { throw 'Codex Desktop 未能优雅退出' }
+    const LOCATE_SCRIPT: &str = r"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$package = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+if ($package) {
+  $application = @(($package | Get-AppxPackageManifest).Package.Applications.Application) | Select-Object -First 1
+  if ($application) { 'shell:AppsFolder\' + $package.PackageFamilyName + '!' + $application.Id; exit 0 }
 }
-$process = Start-Process -FilePath $path -PassThru
-if (-not $process) { throw '无法启动 Codex Desktop' }
-$process.Id"#;
-    let output = crate::windows_process::hidden_command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if detail.is_empty() {
-            "无法重启 Codex Desktop".to_owned()
-        } else {
-            format!("无法重启 Codex Desktop：{detail}")
-        });
+$path = Join-Path $env:LOCALAPPDATA 'Programs\Codex\Codex.exe'
+if (Test-Path -LiteralPath $path) { $path; exit 0 }
+exit 2";
+    const CLOSE_SCRIPT: &str = r"$process = Get-Process -Id $env:TURBO_CODEX_PID -ErrorAction SilentlyContinue
+if (-not $process) { exit 0 }
+if (-not $process.CloseMainWindow()) { exit 3 }";
+    const LAUNCH_SCRIPT: &str = "Start-Process -FilePath $env:TURBO_CODEX_TARGET";
+
+    let located = windows_powershell(LOCATE_SCRIPT, None).map_err(|error| error.to_string())?;
+    let target = String::from_utf8_lossy(&located.stdout).trim().to_owned();
+    if !located.status.success() || target.is_empty() {
+        return Err("未找到 Codex Desktop 安装，请手动打开 Codex 后重试".to_owned());
     }
-    let pid = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u32>()
-        .map_err(|_| "无法读取 Codex Desktop 新进程".to_owned())?;
-    for _ in 0..LAUNCH_ATTEMPTS {
-        if runtime::codex_desktop_process_id() == Some(pid) {
-            return Ok(Some(pid));
-        }
-        std::thread::sleep(POLL_INTERVAL);
+    let old_pid = runtime::codex_desktop_process_id();
+    restart_codex_desktop_with(
+        old_pid,
+        || {
+            let pid = old_pid.map(|pid| pid.to_string()).unwrap_or_default();
+            let closed = windows_powershell(CLOSE_SCRIPT, Some(("TURBO_CODEX_PID", &pid)))
+                .map_err(|error| error.to_string())?;
+            match closed.status.code() {
+                Some(0) => Ok(()),
+                Some(3) => Err(
+                    "Codex Desktop 没有可关闭的窗口，可能已最小化到托盘，请手动退出后重试"
+                        .to_owned(),
+                ),
+                _ => Err("无法优雅退出 Codex Desktop".to_owned()),
+            }
+        },
+        crate::windows_process::process_exists,
+        || {
+            windows_powershell(LAUNCH_SCRIPT, Some(("TURBO_CODEX_TARGET", &target)))
+                .map_err(|error| error.to_string())?
+                .status
+                .success()
+                .then_some(())
+                .ok_or_else(|| "无法请求系统重新打开 Codex Desktop".to_owned())
+        },
+        runtime::codex_desktop_process_id,
+        (EXIT_ATTEMPTS, LAUNCH_ATTEMPTS, POLL_INTERVAL),
+    )
+    .map(Some)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_powershell(
+    script: &str,
+    env: Option<(&str, &str)>,
+) -> std::io::Result<std::process::Output> {
+    let mut command = crate::windows_process::hidden_command("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    if let Some((name, value)) = env {
+        command.env(name, value);
     }
-    Err("Codex Desktop 未能重新启动，请手动打开后重试".to_owned())
+    command.output()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

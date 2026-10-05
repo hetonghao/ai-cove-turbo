@@ -2159,7 +2159,7 @@ pub(crate) fn codex_desktop_process_id() -> Option<u32> {
 
 #[cfg(all(not(test), target_os = "windows"))]
 pub(crate) fn codex_desktop_process_id() -> Option<u32> {
-    crate::windows_process::process_id_by_name("Codex")
+    crate::windows_process::codex_desktop_process_id()
 }
 
 #[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]

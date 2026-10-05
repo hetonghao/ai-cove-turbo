@@ -1502,6 +1502,24 @@ test("没有近期 WebSocket 成功证据时保留通用 HTTP 降级提示", asy
   assert.equal(action.dataset.action, "restart-codex");
 });
 
+test("Codex 重启失败时显示失败原因和重试入口", async () => {
+  // Given: Rust 侧已把 Codex Desktop 重启标记为失败，并给出原因。
+  const { action, message, recovery, title } = await liveRecoveryHarness({
+    serviceHealthy: true,
+    configState: "managed",
+    codexState: "restart_failed",
+    restartRequired: true,
+    configMessage: "未找到 Codex Desktop 安装，请手动打开 Codex 后重试",
+  });
+
+  // Then: 运行页直接展示原因，而不是只把按钮文案改成重试。
+  assert.equal(recovery.hidden, false);
+  assert.equal(title.textContent, "Codex 重启失败");
+  assert.equal(message.textContent, "未找到 Codex Desktop 安装，请手动打开 Codex 后重试");
+  assert.equal(action.dataset.action, "restart-codex");
+  assert.equal(action.textContent, "重试启动 Codex");
+});
+
 test("HTTP AI Cove 上游显示 HTTPS 修复提示而不是离线故障", async () => {
   // Given: 当前上游是 AI Cove 域名，但配置使用了 HTTP，服务尚未启动。
   const { action, message, recovery, title } = await liveRecoveryHarness({

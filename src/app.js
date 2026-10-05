@@ -867,6 +867,15 @@
         detail: state.technicalDetail,
       };
     }
+    if (state.codexState === "restart_failed") {
+      return {
+        title: "Codex 重启失败",
+        message: state.configMessage || "Codex 未能重新启动，请手动打开 Codex 后重试。",
+        action: "restart-codex",
+        label: "重试启动 Codex",
+        detail: state.technicalDetail,
+      };
+    }
     if (state.websocketEnabled && String(state.websocketState).toLowerCase() === "failed") {
       return {
         title: "WebSocket 连接失败",

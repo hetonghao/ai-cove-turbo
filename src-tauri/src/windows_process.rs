@@ -5,9 +5,13 @@ use std::{
     process::Command,
 };
 
+use crate::codex_desktop_windows::{is_codex_desktop_image, main_process_id};
+
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x0000_1000;
 const MAX_PATH: usize = 260;
+const MAX_IMAGE_PATH: usize = 32_768;
 
 #[repr(C)]
 struct ProcessEntry32W {
@@ -34,10 +38,34 @@ impl Drop for Snapshot {
     }
 }
 
+struct ProcessHandle(*mut c_void);
+
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a process handle returned by `OpenProcess`.
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+struct ProcessRecord {
+    pid: u32,
+    parent_pid: u32,
+    exe_file: String,
+}
+
 unsafe extern "system" {
     fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> *mut c_void;
     fn Process32FirstW(snapshot: *mut c_void, entry: *mut ProcessEntry32W) -> i32;
     fn Process32NextW(snapshot: *mut c_void, entry: *mut ProcessEntry32W) -> i32;
+    fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+    fn QueryFullProcessImageNameW(
+        process: *mut c_void,
+        flags: u32,
+        exe_name: *mut u16,
+        size: *mut u32,
+    ) -> i32;
     fn CloseHandle(handle: *mut c_void) -> i32;
 }
 
@@ -47,7 +75,25 @@ pub(crate) fn hidden_command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
-pub(crate) fn process_id_by_name(name: &str) -> Option<u32> {
+pub(crate) fn codex_desktop_process_id() -> Option<u32> {
+    let local_app_data = std::env::var("LOCALAPPDATA").ok();
+    let desktop: Vec<(u32, u32)> = process_records()?
+        .into_iter()
+        .filter(|record| process_name_matches(&record.exe_file, "Codex"))
+        .filter(|record| {
+            process_image_path(record.pid)
+                .is_some_and(|path| is_codex_desktop_image(&path, local_app_data.as_deref()))
+        })
+        .map(|record| (record.pid, record.parent_pid))
+        .collect();
+    main_process_id(&desktop)
+}
+
+pub(crate) fn process_exists(pid: u32) -> bool {
+    process_records().is_some_and(|records| records.iter().any(|record| record.pid == pid))
+}
+
+fn process_records() -> Option<Vec<ProcessRecord>> {
     // SAFETY: `CreateToolhelp32Snapshot` is the documented process-list entry point.
     let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if is_invalid_handle(handle) {
@@ -70,15 +116,36 @@ pub(crate) fn process_id_by_name(name: &str) -> Option<u32> {
     if unsafe { Process32FirstW(snapshot.0, &raw mut entry) } == 0 {
         return None;
     }
+    let mut records = Vec::new();
     loop {
-        if process_name_matches(&exe_file_name(&entry.sz_exe_file), name) {
-            return Some(entry.th32_process_id);
-        }
+        records.push(ProcessRecord {
+            pid: entry.th32_process_id,
+            parent_pid: entry.th32_parent_process_id,
+            exe_file: exe_file_name(&entry.sz_exe_file),
+        });
         // SAFETY: `entry` remains the snapshot's iteration buffer until the handle is closed.
         if unsafe { Process32NextW(snapshot.0, &raw mut entry) } == 0 {
-            return None;
+            return Some(records);
         }
     }
+}
+
+fn process_image_path(pid: u32) -> Option<String> {
+    // SAFETY: limited query access is enough to read the image path of a same-user process.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let process = ProcessHandle(handle);
+    let mut buffer = vec![0_u16; MAX_IMAGE_PATH];
+    let mut size = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: `buffer` holds `size` UTF-16 units and `process` stays open for the call.
+    if unsafe { QueryFullProcessImageNameW(process.0, 0, buffer.as_mut_ptr(), &raw mut size) } == 0
+    {
+        return None;
+    }
+    buffer.truncate(usize::try_from(size).ok()?);
+    Some(String::from_utf16_lossy(&buffer))
 }
 
 fn is_invalid_handle(handle: *mut c_void) -> bool {
