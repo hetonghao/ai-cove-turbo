@@ -133,28 +133,12 @@ pub(super) async fn handle_idle_client_message(
     }
 }
 
-async fn reject_missing_continuation(
-    client: &mut ClientWebSocket,
-    session: &mut Session,
-    has_request_source: bool,
-    previous_response_id: Option<&str>,
-) -> bool {
-    if has_request_source {
-        let Some(previous_response_id) = previous_response_id else {
-            return false;
-        };
-        if session.last_terminal_response_id.as_deref() == Some(previous_response_id) {
-            return false;
-        }
-    }
+async fn close_missing_continuation(client: &mut ClientWebSocket, session: &mut Session) -> bool {
     session.response_started = false;
-    let _ = send_error(
-        client,
-        "previous_response_not_found",
-        "Previous response is not available on this websocket",
-    )
-    .await;
-    true
+    let message = "Previous response is not available on this websocket";
+    let _ = send_error(client, "previous_response_not_found", message).await;
+    let _ = close_client(client, 1002, message).await;
+    false
 }
 
 #[allow(clippy::large_futures, clippy::too_many_lines)]
@@ -197,11 +181,7 @@ async fn start_response(
         return true;
     };
     if !prepared.has_request_source {
-        session.response_started = false;
-        let message = "Previous response is not available on this websocket";
-        let _ = send_error(client, "previous_response_not_found", message).await;
-        let _ = close_client(client, 1002, message).await;
-        return false;
+        return close_missing_continuation(client, session).await;
     }
     if !session.bind_thread_id(prepared.thread_id).await {
         return reject_thread_switch(client).await;
@@ -222,8 +202,11 @@ async fn start_response(
     {
         checkout_handoff_websocket(session, previous_response_id.as_deref()).await;
     }
-    if reject_missing_continuation(client, session, true, previous_response_id.as_deref()).await {
-        return true;
+    if previous_response_id
+        .as_deref()
+        .is_some_and(|id| session.last_terminal_response_id.as_deref() != Some(id))
+    {
+        return close_missing_continuation(client, session).await;
     }
     if previous_response_id.is_none() {
         session.refresh_capability(&payload);
@@ -234,23 +217,12 @@ async fn start_response(
         let traffic = session
             .last_http_traffic
             .unwrap_or(HttpTraffic::HYBRID_CAPABILITY);
-        // 能力路线（auto 判定 HTTP-only）保持“本地拒绝 + 客户端全量重发”的既有契约；
-        // 其余 HTTP 路线（policy / 大请求 / 恢复 / 冷启动）把状态续传展开成自包含请求，
-        // 上游只支持 HTTP 时不会再有孤立 tool output。
-        if traffic.route != traffic::TrafficRoute::HybridCapabilityHttp
-            && let Some(http_payload) =
-                session.expand_http_continuation(&payload, previous_response_id.as_deref())
-        {
-            start_http_response(session, active, http_payload, traffic);
-            return true;
-        }
-        session.response_started = false;
-        let _ = send_error(
-            client,
-            "previous_response_not_found",
-            "Previous response is not available on this websocket",
-        )
-        .await;
+        let Some(http_payload) =
+            session.expand_http_continuation(&payload, previous_response_id.as_deref())
+        else {
+            return close_missing_continuation(client, session).await;
+        };
+        start_http_response(session, active, http_payload, traffic);
         return true;
     }
     if previous_response_id.is_none() {
@@ -314,13 +286,7 @@ async fn start_response(
                 reason: "续传请求正在等待可用 WebSocket".to_owned(),
             })
             .await;
-        let _ = send_error(
-            client,
-            "upstream_http_error",
-            "续传请求需要 WebSocket v2，正在重新建立连接",
-        )
-        .await;
-        return true;
+        return close_missing_continuation(client, session).await;
     };
     if large_http_request && session.ready.is_some() {
         session

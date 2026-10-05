@@ -87,47 +87,46 @@ async fn auto_http_only_capability_skips_upstream_websocket_application_attempt(
 }
 
 #[tokio::test]
-async fn http_response_continuation_is_rejected_without_http_replay() -> io::Result<()> {
-    // Given: Auto policy resolves the model to HttpOnly.
+async fn capability_http_continuation_expands_previous_transcript_over_http() -> io::Result<()> {
+    // Given: Auto policy resolves the model to HttpOnly and the first HTTP turn emits a tool call.
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::Persistent,
         delay_http: false,
     })
     .await?;
-    let (proxy, _) = start_test_proxy(&server).await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
     proxy.set_capability_for_test("test", CapabilityTransport::HttpOnly);
     let (mut client, _) = connect_local(&proxy).await?;
     server.fixture.wait_ready(6).await?;
-
-    // When: the first HTTP response is followed by its previous_response_id continuation.
-    send_create(&mut client).await?;
+    send_transcript_create(&mut client).await?;
     let first = next_event_value(&mut client).await?;
     let first_id = first
         .pointer("/response/id")
         .and_then(Value::as_str)
         .ok_or_else(|| io::Error::other("HTTP response id missing"))?;
     assert_eq!(first_id, "http-response-1");
-    send_continuation(&mut client, first_id).await?;
 
-    // Then: Turbo reports state missing locally instead of sending unsupported stateful HTTP.
-    let second = next_event_value(&mut client).await?;
+    // When: Codex sends only the tool output with previous_response_id.
+    send_tool_output_continuation(&mut client, first_id, "call-fixture-1").await?;
+
+    // Then: Turbo sends a self-contained HTTP request instead of waiting for a client resend.
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    let payloads = server.fixture.http_payloads().await;
+    assert_eq!(payloads.len(), 2);
+    let continuation: Value = serde_json::from_slice(
+        payloads
+            .get(1)
+            .ok_or_else(|| io::Error::other("second HTTP request missing"))?,
+    )
+    .map_err(io::Error::other)?;
+    assert!(continuation.get("previous_response_id").is_none());
     assert_eq!(
-        second.pointer("/error/code"),
-        Some(&Value::from("previous_response_not_found"))
+        continuation.pointer("/input/1/call_id"),
+        Some(&Value::from("call-fixture-1"))
     );
     let counts = server.fixture.counts().await;
-    assert!(counts.private_handshakes >= 6);
     assert_eq!(counts.private_messages, 0);
-    assert_eq!(counts.http_requests, 1);
-
-    // And: a fresh full request remains usable over HTTP.
-    send_create(&mut client).await?;
-    server.fixture.wait_http(2).await?;
-    let third = next_event_value(&mut client).await?;
-    assert_eq!(
-        third.pointer("/response/id").and_then(Value::as_str),
-        Some("http-response-2")
-    );
+    assert_eq!(metrics.snapshot().hybrid_capability_http, 2);
 
     drop(client);
     proxy.stop().await;
@@ -231,12 +230,8 @@ async fn policy_http_continuation_without_pairing_rejects_locally() -> io::Resul
     // When: 续传帧引用了一个上一轮并不存在的 call_id。
     send_tool_output_continuation(&mut client, first_id, "call-unknown").await?;
 
-    // Then: 不做无法自证的展开，本地报告状态缺失，也不再占用一次上游请求。
-    let error = next_event_value(&mut client).await?;
-    assert_eq!(
-        error.pointer("/error/code"),
-        Some(&Value::from("previous_response_not_found"))
-    );
+    // Then: 不做无法自证的展开，本地报告状态缺失并关闭连接，也不再占用一次上游请求。
+    expect_missing_continuation_close(&mut client).await?;
     assert_eq!(server.fixture.counts().await.http_requests, 1);
 
     drop(client);

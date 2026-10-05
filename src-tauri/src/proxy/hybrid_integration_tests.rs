@@ -114,22 +114,6 @@ async fn send_create(client: &mut ClientWebSocket) -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
-async fn send_continuation(
-    client: &mut ClientWebSocket,
-    previous_response_id: &str,
-) -> io::Result<()> {
-    let request = serde_json::json!({
-        "type": "response.create",
-        "model": "test",
-        "previous_response_id": previous_response_id,
-        "input": "next",
-    });
-    client
-        .send(Message::Text(request.to_string().into()))
-        .await
-        .map_err(io::Error::other)
-}
-
 async fn send_transcript_create(client: &mut ClientWebSocket) -> io::Result<()> {
     let request = serde_json::json!({
         "type": "response.create",
@@ -264,6 +248,25 @@ async fn next_event_value(client: &mut ClientWebSocket) -> io::Result<Value> {
         };
         return serde_json::from_slice(&payload).map_err(io::Error::other);
     }
+}
+
+async fn expect_missing_continuation_close(client: &mut ClientWebSocket) -> io::Result<()> {
+    let error = next_event_value(client).await?;
+    assert_eq!(error.get("type"), Some(&Value::from("error")));
+    assert_eq!(
+        error.pointer("/error/code"),
+        Some(&Value::from("previous_response_not_found"))
+    );
+    let close = tokio::time::timeout(Duration::from_secs(1), client.next())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "local websocket stayed open"))?;
+    let Some(Ok(Message::Close(Some(frame)))) = close else {
+        return Err(io::Error::other(
+            "missing continuation did not close local websocket",
+        ));
+    };
+    assert_eq!(u16::from(frame.code), 1002);
+    Ok(())
 }
 
 fn assert_counts(counts: CountsSnapshot, private: usize, messages: usize, http: usize) {

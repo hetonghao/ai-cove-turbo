@@ -29,35 +29,13 @@ async fn continuation_without_handoff_returns_local_state_missing() -> io::Resul
     server.fixture.wait_ready(6).await?;
 
     send_continuation(&mut client, "resp_test").await?;
-    let error = next_event_value(&mut client).await?;
-    assert_eq!(error.get("type"), Some(&Value::from("error")));
-    assert_eq!(
-        error.pointer("/error/code"),
-        Some(&Value::from("previous_response_not_found"))
-    );
-    assert_eq!(
-        error.pointer("/error/message"),
-        Some(&Value::from(
-            "Previous response is not available on this websocket"
-        ))
-    );
+    expect_missing_continuation_close(&mut client).await?;
     assert_counts(server.fixture.counts().await, 6, 0, 0);
     assert_eq!(metrics.snapshot().hybrid_ws, 0);
     assert!(metrics.traffic_snapshot().recent_requests.is_empty());
     let snapshot = proxy.connection_snapshot().await;
     assert_eq!(snapshot.current_connections, 6);
     assert_eq!(snapshot.prewarm, 6);
-
-    client
-        .send(Message::Ping(b"still-open".to_vec().into()))
-        .await
-        .map_err(io::Error::other)?;
-    let Some(Ok(Message::Pong(_))) = client.next().await else {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "local websocket did not stay open",
-        ));
-    };
     drop(client);
     proxy.stop().await;
     server.stop().await;
@@ -86,11 +64,7 @@ async fn stale_continuation_is_rejected_after_upstream_discard() -> io::Result<(
     send_continuation(&mut client, "response-1").await?;
 
     // Then: Turbo rejects the stale continuation locally without an upstream request or failure row.
-    let error = next_event_value(&mut client).await?;
-    assert_eq!(
-        error.pointer("/error/code"),
-        Some(&Value::from("previous_response_not_found"))
-    );
+    expect_missing_continuation_close(&mut client).await?;
     assert_counts_with_min_private(server.fixture.counts().await, 7, 1, 0);
     assert_eq!(metrics.snapshot().hybrid_ws, 1);
     let events = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
@@ -101,6 +75,10 @@ async fn stale_continuation_is_rejected_after_upstream_discard() -> io::Result<(
             .all(|event| event.get("failurePhase") != Some(&Value::from("hybridActive")))
     }));
 
+    // And: the reconnected client's full request remains usable.
+    drop(client);
+    let (mut client, status) = connect_local(&proxy).await?;
+    assert_eq!(status, 101);
     send_create(&mut client).await?;
     server.fixture.wait_messages(2).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
