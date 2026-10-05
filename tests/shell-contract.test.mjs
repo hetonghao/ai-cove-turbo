@@ -484,16 +484,19 @@ test("模型请求验证必须命中重启后的目标模型", async () => {
   assert.match(traffic, /pub\(crate\) fn is_successful_responses_for/);
 });
 
-test("Windows 重启 Codex 不闪出 PowerShell 并返回新进程", async () => {
+test("Windows 重启商店版 Codex 不闪出 PowerShell 并等待新进程", async () => {
   const rust = (await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8")).replaceAll("\r\n", "\n");
   const start = rust.indexOf('#[cfg(target_os = "windows")]\nfn restart_codex_desktop');
   const end = rust.indexOf('#[cfg(not(any(target_os = "macos", target_os = "windows")))]', start);
   const windowsRestart = rust.slice(start, end);
 
+  assert.notEqual(start, -1);
   assert.match(windowsRestart, /crate::windows_process::hidden_command\("powershell\.exe"\)/);
-  assert.match(windowsRestart, /Start-Process -FilePath \$path -PassThru/);
+  assert.match(windowsRestart, /Get-AppxPackage -Name OpenAI\.Codex/);
+  assert.match(windowsRestart, /shell:AppsFolder/);
+  assert.match(windowsRestart, /restart_codex_desktop_with\(/);
   assert.match(windowsRestart, /\.output\(\)/);
-  assert.match(windowsRestart, /parse::<u32>\(\)/);
+  assert.doesNotMatch(windowsRestart, /-PassThru/);
 });
 
 test("Windows 探测 Codex 不启动 PowerShell", async () => {
@@ -503,7 +506,7 @@ test("Windows 探测 Codex 不启动 PowerShell", async () => {
   const windowsProbe = runtime.slice(start, end);
 
   assert.notEqual(start, -1);
-  assert.match(windowsProbe, /crate::windows_process::process_id_by_name\("Codex"\)/);
+  assert.match(windowsProbe, /crate::windows_process::codex_desktop_process_id\(\)/);
   assert.doesNotMatch(windowsProbe, /powershell/i);
   assert.doesNotMatch(windowsProbe, /Get-Process/);
 });
