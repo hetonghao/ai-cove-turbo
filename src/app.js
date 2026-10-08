@@ -1110,24 +1110,25 @@
 
   function capabilityBadge(slug) {
     const capability = state.transportCapabilities?.[slug];
-    const autoPolicy = (policyModels()[slug] || "auto") === "auto";
+    const autoPolicy = (state.modelPolicy?.models?.[slug] || state.modelPolicy?.defaultTransport || "auto") === "auto";
     const wsTooltip = "来自于 AI Cove 的模型能力：支持 Hybrid WebSocket 加速，建议配置传输方式：自动。";
-    const httpTooltip = "来自于 AI Cove 的模型能力：支持 压缩 HTTP，建议配置传输方式：HTTP。";
+    const httpTooltip = "来自于 AI Cove 的模型能力：支持 压缩 HTTP，建议配置传输方式：HTTP。无需 WS 预热。";
     const unavailableTooltip = "来自于 AI Cove 的提示：当前密钥或分组下此模型暂不可用";
     const unavailable = capability?.allowed === false || capability?.reasonCode === "model_not_allowed";
-    const isWs = capability?.transport === "websocket";
+    const isWs = state.websocketEnabled && autoPolicy && capability?.transport === "websocket";
+    const pending = !capability || capability.reasonCode === "capability_expired";
     const label = !capability
       ? autoPolicy ? "自动 → 压缩 HTTP" : "压缩 HTTP"
       : unavailable
       ? "不可用"
       : isWs ? "WS 可用" : autoPolicy ? "自动 → 压缩 HTTP" : "压缩 HTTP";
-    const tooltip = !capability
-      ? httpTooltip
+    const tooltip = pending
+      ? (!capability ? "能力尚未确认，暂用 HTTP；无需 WS 预热" : "能力已过期，暂用 HTTP；无需 WS 预热")
       : unavailable
       ? capability.reasonCode === "model_not_allowed" ? unavailableTooltip : (capability.reasonCode || "")
       : isWs ? wsTooltip : httpTooltip;
     const tooltipId = `model-capability-tooltip-${encodeURIComponent(slug)}`;
-    return `<span class="state-indicator b-model-capability c-transport__detail" data-status="${unavailable ? "blocked" : "verified"}" tabindex="0" aria-describedby="${escapeHtml(tooltipId)}">${label}<span class="c-transport__tooltip b-model-capability__tooltip" id="${escapeHtml(tooltipId)}" role="tooltip">${escapeHtml(tooltip)}</span></span>`;
+    return `<span class="state-indicator b-model-capability c-transport__detail" data-status="${unavailable ? "blocked" : pending ? "pending" : "verified"}" tabindex="0" aria-describedby="${escapeHtml(tooltipId)}">${label}<span class="c-transport__tooltip b-model-capability__tooltip" id="${escapeHtml(tooltipId)}" role="tooltip">${escapeHtml(tooltip)}</span></span>`;
   }
 
   function modelContextLabel(model) {
@@ -3143,7 +3144,7 @@
         && updatePreference.checkedDay === updateDayKey()
         && updatePreference.lastState;
       const nextCapabilities = status.transportCapabilities && typeof status.transportCapabilities === "object"
-        ? { ...(state.transportCapabilities || {}), ...status.transportCapabilities }
+        ? { ...status.transportCapabilities }
         : state.transportCapabilities;
       state = {
         ...state,

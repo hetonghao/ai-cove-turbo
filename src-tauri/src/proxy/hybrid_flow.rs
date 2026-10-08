@@ -24,28 +24,28 @@ pub(super) async fn handle_idle(
     session: &mut Session,
     active_response: &mut Option<Active>,
 ) -> bool {
+    if session.current_model_requires_http() {
+        session.release_idle_websocket().await;
+    }
     let selection = if session.ready.is_some() {
+        let capability_cache = std::sync::Arc::clone(&session.state.capability_cache);
+        tokio::select! {
+        biased;
+        () = capability_cache.changed() => return true,
+        selection =
         select_idle(
             client.next(),
             poll_ready(&mut session.ready),
             tokio::time::sleep(super::super::hybrid_pool::KEEPALIVE_INTERVAL),
         )
-        .await
-    } else if session.response_started {
-        select_waiting_idle(client.next(), session.handle.checkout_ready()).await
+        => selection,
+        }
     } else {
         IdleSelection::Client(client.next().await)
     };
     match selection {
         IdleSelection::Client(message) => {
             handle_idle_client_message(client, session, active_response, message).await
-        }
-        IdleSelection::Closed => false,
-        IdleSelection::PoolReady(upstream) => {
-            session.ready = Some(*upstream);
-            session.drain_reconnect_pending = false;
-            session.observe_idle().await;
-            true
         }
         IdleSelection::Ready(result) => idle::handle_idle_upstream(client, session, result).await,
         IdleSelection::Keepalive => idle::handle_idle_keepalive(session).await,
@@ -54,28 +54,8 @@ pub(super) async fn handle_idle(
 
 pub(super) enum IdleSelection {
     Client(Option<Result<Message, WebSocketError>>),
-    PoolReady(Box<Lease>),
-    Closed,
     Ready(Option<Result<Message, WebSocketError>>),
     Keepalive,
-}
-
-pub(super) async fn select_waiting_idle<Client, PoolReady>(
-    client: Client,
-    pool_ready: PoolReady,
-) -> IdleSelection
-where
-    Client: Future<Output = Option<Result<Message, WebSocketError>>>,
-    PoolReady: Future<Output = Option<Lease>>,
-{
-    tokio::select! {
-        biased;
-        upstream = pool_ready => upstream.map_or_else(
-            || IdleSelection::Closed,
-            |upstream| IdleSelection::PoolReady(Box::new(upstream)),
-        ),
-        message = client => IdleSelection::Client(message),
-    }
 }
 
 pub(super) async fn select_idle<Client, Ready, Keepalive>(
@@ -133,8 +113,7 @@ pub(super) async fn handle_idle_client_message(
     }
 }
 
-async fn close_missing_continuation(client: &mut ClientWebSocket, session: &mut Session) -> bool {
-    session.response_started = false;
+async fn close_missing_continuation(client: &mut ClientWebSocket) -> bool {
     let message = "Previous response is not available on this websocket";
     let _ = send_error(client, "previous_response_not_found", message).await;
     let _ = close_client(client, 1002, message).await;
@@ -181,7 +160,7 @@ async fn start_response(
         return true;
     };
     if !prepared.has_request_source {
-        return close_missing_continuation(client, session).await;
+        return close_missing_continuation(client).await;
     }
     if !session.bind_thread_id(prepared.thread_id).await {
         return reject_thread_switch(client).await;
@@ -191,7 +170,6 @@ async fn start_response(
     metadata.temporary_name = prepared.temporary_name.clone();
     session.state.metrics.observe_session_name_hint(&metadata);
     session.request_metadata = Some(metadata);
-    session.response_started = true;
     let previous_response_id = prepared.previous_response_id;
     if previous_response_id.is_none() {
         session.policy = session.state.model_policy.reload();
@@ -200,13 +178,17 @@ async fn start_response(
     if previous_response_id.is_some()
         && session.last_response_transport != Some(super::ResponseTransport::Http)
     {
+        if session.current_model_requires_http() {
+            session.release_idle_websocket().await;
+            return close_missing_continuation(client).await;
+        }
         checkout_handoff_websocket(session, previous_response_id.as_deref()).await;
     }
     if previous_response_id
         .as_deref()
         .is_some_and(|id| session.last_terminal_response_id.as_deref() != Some(id))
     {
-        return close_missing_continuation(client, session).await;
+        return close_missing_continuation(client).await;
     }
     if previous_response_id.is_none() {
         session.refresh_capability(&payload);
@@ -220,8 +202,9 @@ async fn start_response(
         let Some(http_payload) =
             session.expand_http_continuation(&payload, previous_response_id.as_deref())
         else {
-            return close_missing_continuation(client, session).await;
+            return close_missing_continuation(client).await;
         };
+        session.release_idle_websocket().await;
         start_http_response(session, active, http_payload, traffic);
         return true;
     }
@@ -234,23 +217,23 @@ async fn start_response(
             } else {
                 HttpTraffic::HYBRID_CAPABILITY
             };
+            session.release_idle_websocket().await;
             start_http_only_response(session, active, fallback, traffic);
             return true;
         }
     }
     let large_http_request = payload.len() >= session.max_websocket_request_bytes
         && matches!(&fallback, HttpFallback::Request(_));
-    let wait_for_drain_reconnect =
-        !large_http_request && std::mem::take(&mut session.drain_reconnect_pending);
-    if !large_http_request && previous_response_id.is_none() {
-        checkout_handoff_websocket(session, previous_response_id.as_deref()).await;
-    }
     if !large_http_request {
-        checkout_response_websocket(
-            session,
-            wait_for_drain_reconnect || matches!(&fallback, HttpFallback::WebSocketRequired),
-        )
-        .await;
+        checkout_response_websocket(session).await;
+    }
+    if session.current_model_requires_http() {
+        session.release_idle_websocket().await;
+        if previous_response_id.is_some() {
+            return close_missing_continuation(client).await;
+        }
+        start_http_only_response(session, active, fallback, HttpTraffic::HYBRID_CAPABILITY);
+        return true;
     }
     if !large_http_request && let Some(lease) = session.ready.take() {
         session.connection_id = session
@@ -286,7 +269,7 @@ async fn start_response(
                 reason: "续传请求正在等待可用 WebSocket".to_owned(),
             })
             .await;
-        return close_missing_continuation(client, session).await;
+        return close_missing_continuation(client).await;
     };
     if large_http_request && session.ready.is_some() {
         session
@@ -347,11 +330,20 @@ async fn checkout_handoff_websocket(session: &mut Session, previous_response_id:
     }
 }
 
-async fn checkout_response_websocket(session: &mut Session, wait: bool) {
+async fn checkout_response_websocket(session: &mut Session) {
     if session.ready.is_none() {
-        session.ready = session.handle.checkout().await;
-    }
-    if session.ready.is_none() && wait {
-        session.ready = session.handle.checkout_wait(Duration::from_secs(2)).await;
+        let stop = async {
+            loop {
+                if session.current_model_requires_http() {
+                    return;
+                }
+                session.state.capability_cache.changed().await;
+            }
+        };
+        let ready = session
+            .handle
+            .checkout_wait_until(Duration::from_secs(2), stop)
+            .await;
+        session.ready = ready;
     }
 }

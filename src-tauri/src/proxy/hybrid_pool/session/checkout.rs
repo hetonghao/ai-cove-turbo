@@ -13,6 +13,7 @@ pub(super) struct CheckoutLeaseGuard {
     session_id: u64,
     owner_active: Arc<AtomicBool>,
     upstream: Option<PrivateUpstream>,
+    waiting: bool,
 }
 
 impl CheckoutLeaseGuard {
@@ -28,7 +29,12 @@ impl CheckoutLeaseGuard {
             session_id,
             owner_active,
             upstream: None,
+            waiting: false,
         }
+    }
+
+    pub(super) const fn set_waiting(&mut self, waiting: bool) {
+        self.waiting = waiting;
     }
 
     pub(super) fn set_upstream(&mut self, upstream: PrivateUpstream) {
@@ -48,6 +54,14 @@ impl CheckoutLeaseGuard {
 impl Drop for CheckoutLeaseGuard {
     fn drop(&mut self) {
         self.owner_active.store(false, Ordering::Release);
+        if self.waiting {
+            let pool = self.pool.clone();
+            let scope = self.scope.clone();
+            let session_id = self.session_id;
+            super::super::cleanup::spawn_cleanup("turbo-hybrid-demand-cleanup", async move {
+                pool.finish_request(&scope, session_id).await;
+            });
+        }
         let Some(upstream) = self.upstream.take() else {
             return;
         };

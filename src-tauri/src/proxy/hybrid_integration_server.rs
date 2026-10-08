@@ -145,9 +145,6 @@ impl Fixture {
         websocket: &mut FixtureWebSocket,
         previous_response_id: Option<&str>,
     ) -> bool {
-        if matches!(self.config.private, PrivateBehavior::ProbeDelay) {
-            self.state.release_private.notified().await;
-        }
         loop {
             let payload = match websocket.next().await {
                 Some(Ok(Message::Binary(payload))) => payload,
@@ -205,6 +202,7 @@ impl Fixture {
                         if websocket.send(Message::Pong(payload)).await.is_err() {
                             return false;
                         }
+                        if !self.prepare_active_hold(websocket).await { return false; }
                     }
                     _ => return false,
                 }
@@ -280,7 +278,6 @@ impl Fixture {
             | PrivateBehavior::FailFirstBatch
             | PrivateBehavior::HoldResponse
             | PrivateBehavior::HoldResponseNoPong
-            | PrivateBehavior::ProbeDelay
             | PrivateBehavior::HttpPayloadTooLarge
             | PrivateBehavior::IdleError
             | PrivateBehavior::IdleMessage

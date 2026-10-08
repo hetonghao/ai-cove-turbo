@@ -88,6 +88,13 @@ fn append_session_state(snapshot: &mut ConnectionSnapshot, state: &PoolState, no
     }
 
     for (session_id, session) in &state.sessions {
+        if !state
+            .scopes
+            .values()
+            .any(|scope| scope.waiting.contains(session_id))
+        {
+            continue;
+        }
         let ObservedSessionState::Recovering(reason) = &session.state else {
             continue;
         };
@@ -112,7 +119,8 @@ fn append_pool_transitions(snapshot: &mut ConnectionSnapshot, state: &PoolState,
         let mut waiting_count = 0usize;
         let mut waiting_since: Option<Instant> = None;
         for (session_id, session) in &state.sessions {
-            if session.scope_fingerprint != fingerprint
+            if !entry.waiting.contains(session_id)
+                || session.scope_fingerprint != fingerprint
                 || entry.has_lease(*session_id)
                 || matches!(&session.state, ObservedSessionState::Recovering(_))
             {
@@ -161,7 +169,7 @@ fn append_pool_transitions(snapshot: &mut ConnectionSnapshot, state: &PoolState,
             id: "POOL-CONNECT".to_owned(),
             thread_id: None,
             connection_id: None,
-            label: "建立预热连接".to_owned(),
+            label: "按需建立 WS 连接".to_owned(),
             stage: "连接中".to_owned(),
             detail: format!("{connecting} 条连接正在建立"),
             elapsed_seconds: 0,
@@ -178,7 +186,7 @@ fn append_pool_transitions(snapshot: &mut ConnectionSnapshot, state: &PoolState,
             id: "POOL-PROBE".to_owned(),
             thread_id: None,
             connection_id: None,
-            label: "检查预热连接".to_owned(),
+            label: "检查待分配连接".to_owned(),
             stage: "健康检查".to_owned(),
             detail: format!("{probing} 条连接正在检查"),
             elapsed_seconds: 0,

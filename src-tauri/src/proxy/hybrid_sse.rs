@@ -49,7 +49,15 @@ pub(super) fn http_request_payload(payload: &[u8]) -> Result<PreparedResponseCre
         .and_then(Value::as_str)
         .filter(|response_id| !response_id.is_empty())
         .map(str::to_owned);
-    let has_request_source = previous_response_id.is_some()
+    if object
+        .get("generate")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err("generate must be a boolean".to_owned());
+    }
+    let warmup = object.get("generate") == Some(&Value::Bool(false));
+    let has_request_source = (warmup && object.get("input").is_some_and(Value::is_array))
+        || previous_response_id.is_some()
         || ["input", "prompt", "conversation"].into_iter().any(|key| {
             object.get(key).is_some_and(|value| match value {
                 Value::Array(items) => !items.is_empty(),

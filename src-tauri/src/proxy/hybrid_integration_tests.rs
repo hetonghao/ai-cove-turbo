@@ -51,7 +51,7 @@ async fn start_test_proxy_with_policy(
         max_request_body_bytes: 64 * 1024 * 1024,
     };
     let proxy = match policy_path {
-        Some(path) => start_proxy_with_policy(options, Some(path), None, false).await,
+        Some(path) => start_proxy_with_policy(options, Some(path), None).await,
         None => start_proxy(options).await,
     }
     .map_err(io::Error::other)?;
@@ -311,7 +311,6 @@ async fn local_101_stays_responsive_when_pool_prewarm_fails() -> io::Result<()> 
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_private(6).await?;
     client
         .send(Message::Ping(b"probe".to_vec().into()))
         .await
@@ -343,7 +342,6 @@ async fn websocket_gemini_initial_and_continuation_send_reordered_history() -> i
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     // When: initial and continuation response.create frames are sent through the real flow.
     send_gemini_history(&mut client, None).await?;
@@ -378,23 +376,18 @@ async fn websocket_gemini_initial_and_continuation_send_reordered_history() -> i
 }
 
 #[tokio::test]
-async fn failed_initial_prewarm_retries_without_client_traffic() -> io::Result<()> {
-    // Given: every connection in the first prewarm batch is rejected upstream.
+async fn idle_local_sessions_never_start_or_retry_upstream_connections() -> io::Result<()> {
     let server = FixtureServer::start(FixtureConfig {
-        private: PrivateBehavior::FailFirstBatch,
+        private: PrivateBehavior::Fail,
         delay_http: false,
     })
     .await?;
     let (proxy, _) = start_test_proxy(&server).await?;
     let (client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_private(6).await?;
-
-    // When: Codex sends no request and the upstream becomes available.
-    server.fixture.wait_ready(1).await?;
-
-    // Then: the pool retries by itself instead of remaining empty forever.
-    assert!(server.fixture.counts().await.private_handshakes > 6);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_counts(server.fixture.counts().await, 0, 0, 0);
+    assert!(proxy.connection_snapshot().await.transitions.is_empty());
     drop(client);
     proxy.stop().await;
     server.stop().await;
@@ -402,57 +395,22 @@ async fn failed_initial_prewarm_retries_without_client_traffic() -> io::Result<(
 }
 
 #[tokio::test]
-async fn delayed_prewarm_keeps_not_ready_turns_http_then_switches_to_ws() -> io::Result<()> {
+async fn late_connection_after_http_fallback_is_closed_without_refill() -> io::Result<()> {
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::Delay,
         delay_http: false,
     })
     .await?;
-    let (proxy, metrics) = start_test_proxy(&server).await?;
-    let (mut client, status) =
-        tokio::time::timeout(Duration::from_millis(500), connect_local(&proxy))
-            .await
-            .map_err(io::Error::other)??;
-    assert_eq!(status, 101);
+    let (proxy, _) = start_test_proxy(&server).await?;
+    let (mut client, _) = connect_local(&proxy).await?;
     send_create(&mut client).await?;
-    server.fixture.wait_private(2).await?;
-    server.fixture.wait_http(1).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    send_create(&mut client).await?;
-    server.fixture.wait_http(2).await?;
-    assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_eq!(metrics.snapshot().http_fallbacks, 0);
-    assert_counts(server.fixture.counts().await, 6, 0, 2);
-    for _ in 0..2 {
-        server.fixture.release_private();
-    }
-    server.fixture.wait_ready(2).await?;
-    wait_websocket_handshakes(&metrics, 2).await?;
-    send_create(&mut client).await?;
-    server.fixture.wait_messages(1).await?;
-    assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts(server.fixture.counts().await, 7, 1, 2);
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.hybrid_ws, 1);
-    assert_eq!(snapshot.hybrid_cold_start_http, 2);
-    assert_eq!(snapshot.hybrid_recovery_http, 0);
-    assert_eq!(snapshot.direct_http, 0);
-    let routes = metrics
-        .traffic_snapshot()
-        .recent_requests
-        .into_iter()
-        .filter_map(|event| {
-            let event = serde_json::to_value(event).ok()?;
-            if event.get("result")?.as_str()? == "error" {
-                return None;
-            }
-            event.get("route")?.as_str().map(str::to_owned)
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        routes,
-        ["hybridColdStartHttp", "hybridColdStartHttp", "hybridWs"]
-    );
+    assert_counts(server.fixture.counts().await, 1, 0, 1);
+    server.fixture.release_private();
+    server.fixture.wait_normal_closes(1).await?;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_counts(server.fixture.counts().await, 1, 0, 1);
+    assert_eq!(proxy.connection_snapshot().await.current_connections, 0);
     drop(client);
     proxy.stop().await;
     server.stop().await;
@@ -469,7 +427,6 @@ async fn large_create_uses_http_before_ready_websocket_and_session_continues() -
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_create_with_size(&mut client, super::MAX_HYBRID_WEBSOCKET_REQUEST_BYTES - 1).await?;
     server.fixture.wait_messages(1).await?;
@@ -480,13 +437,13 @@ async fn large_create_uses_http_before_ready_websocket_and_session_continues() -
         server.fixture.wait_http(index + 1).await?;
         server.fixture.wait_normal_closes(index + 1).await?;
         assert_eq!(next_event_type(&mut client).await?, "response.completed");
-        assert_counts_with_min_private(server.fixture.counts().await, 6, index + 1, index + 1);
+        assert_counts_with_min_private(server.fixture.counts().await, 1, index + 1, index + 1);
 
         send_create(&mut client).await?;
         server.fixture.wait_messages(index + 2).await?;
         assert_eq!(next_event_type(&mut client).await?, "response.completed");
     }
-    assert_counts_with_min_private(server.fixture.counts().await, 6, 4, 3);
+    assert_counts_with_min_private(server.fixture.counts().await, 1, 4, 3);
     let routes = metrics
         .traffic_snapshot()
         .recent_requests
@@ -511,158 +468,29 @@ async fn large_create_uses_http_before_ready_websocket_and_session_continues() -
 }
 
 #[tokio::test]
-async fn ready_private_websocket_is_reused_by_next_local_connection() -> io::Result<()> {
+async fn private_websocket_is_isolated_by_authorization() -> io::Result<()> {
     let server = FixtureServer::start(FixtureConfig {
-        private: PrivateBehavior::Delay,
-        delay_http: false,
-    })
-    .await?;
-    let (proxy, metrics) = start_test_proxy(&server).await?;
-    let (mut first_client, status) = connect_local(&proxy).await?;
-    assert_eq!(status, 101);
-
-    send_create(&mut first_client).await?;
-    server.fixture.wait_private(1).await?;
-    server.fixture.wait_http(1).await?;
-    assert_eq!(
-        next_event_type(&mut first_client).await?,
-        "response.completed"
-    );
-    server.fixture.wait_private(6).await?;
-    for _ in 0..2 {
-        server.fixture.release_private();
-    }
-    server.fixture.wait_private(7).await?;
-    server.fixture.wait_ready(2).await?;
-    wait_websocket_handshakes(&metrics, 2).await?;
-    first_client
-        .send(Message::Ping(b"ready".to_vec().into()))
-        .await
-        .map_err(io::Error::other)?;
-    let Some(Ok(Message::Pong(_))) = first_client.next().await else {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "first local websocket did not answer probe",
-        ));
-    };
-    drop(first_client);
-
-    let (mut second_client, status) = connect_local(&proxy).await?;
-    assert_eq!(status, 101);
-    send_create(&mut second_client).await?;
-    server.fixture.wait_private(8).await?;
-    server.fixture.wait_messages(1).await?;
-    assert_eq!(
-        next_event_type(&mut second_client).await?,
-        "response.completed"
-    );
-    assert_counts(server.fixture.counts().await, 8, 1, 1);
-
-    drop(second_client);
-    server.fixture.release_private();
-    proxy.stop().await;
-    server.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn ready_private_websocket_is_isolated_by_authorization() -> io::Result<()> {
-    let server = FixtureServer::start(FixtureConfig {
-        private: PrivateBehavior::Delay,
+        private: PrivateBehavior::Persistent,
         delay_http: false,
     })
     .await?;
     let (proxy, _) = start_test_proxy(&server).await?;
-    let (mut first_client, status) =
-        connect_local_with_authorization(&proxy, Some("Bearer account-a")).await?;
-    assert_eq!(status, 101);
-
-    send_create(&mut first_client).await?;
-    server.fixture.wait_private(1).await?;
-    server.fixture.wait_http(1).await?;
-    assert_eq!(
-        next_event_type(&mut first_client).await?,
-        "response.completed"
-    );
-    server.fixture.wait_private(6).await?;
-    for _ in 0..2 {
-        server.fixture.release_private();
-    }
-    server.fixture.wait_private(7).await?;
-    server.fixture.wait_ready(2).await?;
-    first_client
-        .send(Message::Ping(b"ready".to_vec().into()))
-        .await
-        .map_err(io::Error::other)?;
-    let Some(Ok(Message::Pong(_))) = first_client.next().await else {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "first local websocket did not answer probe",
-        ));
-    };
-    drop(first_client);
-
-    let (mut second_client, status) =
-        connect_local_with_authorization(&proxy, Some("Bearer account-b")).await?;
-    assert_eq!(status, 101);
-    send_create(&mut second_client).await?;
-    server.fixture.wait_private(8).await?;
-    server.fixture.wait_http(2).await?;
-    assert_eq!(
-        next_event_type(&mut second_client).await?,
-        "response.completed"
-    );
-    assert_counts_with_min_private(server.fixture.counts().await, 8, 0, 2);
-
-    drop(second_client);
-    for _ in 0..2 {
-        server.fixture.release_private();
-    }
+    let (mut a, _) = connect_local_with_authorization(&proxy, Some("Bearer account-a")).await?;
+    let (mut b, _) = connect_local_with_authorization(&proxy, Some("Bearer account-b")).await?;
+    send_create(&mut a).await?;
+    assert_eq!(next_event_type(&mut a).await?, "response.completed");
+    send_create(&mut b).await?;
+    assert_eq!(next_event_type(&mut b).await?, "response.completed");
+    assert_counts(server.fixture.counts().await, 2, 2, 0);
+    drop(a);
+    drop(b);
     proxy.stop().await;
     server.stop().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn idle_local_connections_do_not_claim_blank_prewarm_before_first_request() -> io::Result<()>
-{
-    let server = FixtureServer::start(FixtureConfig {
-        private: PrivateBehavior::Delay,
-        delay_http: false,
-    })
-    .await?;
-    let (proxy, _) = start_test_proxy(&server).await?;
-    let (first_client, first_status) = connect_local(&proxy).await?;
-    let (second_client, second_status) = connect_local(&proxy).await?;
-    assert_eq!(first_status, 101);
-    assert_eq!(second_status, 101);
-
-    server.fixture.wait_private(6).await?;
-    for _ in 0..6 {
-        server.fixture.release_private();
-    }
-    server.fixture.wait_ready(6).await?;
-
-    let seventh =
-        tokio::time::timeout(Duration::from_millis(200), server.fixture.wait_private(7)).await;
-    assert!(
-        seventh.is_err(),
-        "idle local sessions claimed blank prewarm"
-    );
-    let snapshot = proxy.connection_snapshot().await;
-    assert_eq!(snapshot.current_connections, 6);
-    assert_eq!(snapshot.prewarm, 6);
-    assert!(snapshot.bound_threads.is_empty());
-
-    drop(first_client);
-    drop(second_client);
-    proxy.stop().await;
-    server.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn local_connections_keep_dynamic_warm_reserve() -> io::Result<()> {
+async fn local_connections_open_only_one_websocket_per_request() -> io::Result<()> {
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::Delay,
         delay_http: false,
@@ -674,21 +502,13 @@ async fn local_connections_keep_dynamic_warm_reserve() -> io::Result<()> {
     assert_eq!(first_status, 101);
     assert_eq!(second_status, 101);
 
-    server.fixture.wait_private(6).await?;
-    for _ in 0..6 {
-        server.fixture.release_private();
-    }
-    server.fixture.wait_ready(6).await?;
-    wait_websocket_handshakes(&metrics, 6).await?;
+    assert_counts(server.fixture.counts().await, 0, 0, 0);
 
     send_create(&mut first_client).await?;
     send_create(&mut second_client).await?;
-    server.fixture.wait_private(8).await?;
-    for _ in 0..2 {
-        server.fixture.release_private();
-    }
-    server.fixture.wait_ready(8).await?;
-    wait_websocket_handshakes(&metrics, 8).await?;
+    server.fixture.wait_private(2).await?;
+    server.fixture.release_private_all();
+    wait_websocket_handshakes(&metrics, 2).await?;
     server.fixture.wait_messages(2).await?;
     assert_eq!(
         next_event_type(&mut first_client).await?,
@@ -698,7 +518,7 @@ async fn local_connections_keep_dynamic_warm_reserve() -> io::Result<()> {
         next_event_type(&mut second_client).await?,
         "response.completed"
     );
-    assert_counts_with_min_private(server.fixture.counts().await, 8, 2, 0);
+    assert_counts_with_min_private(server.fixture.counts().await, 2, 2, 0);
 
     drop(first_client);
     drop(second_client);
@@ -717,11 +537,9 @@ async fn released_session_connection_uses_explicit_normal_close() -> io::Result<
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
-    server.fixture.wait_ready(7).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     drop(client);
 
@@ -732,7 +550,7 @@ async fn released_session_connection_uses_explicit_normal_close() -> io::Result<
 }
 
 #[tokio::test]
-async fn idle_1012_reprewarms_before_next_request() -> io::Result<()> {
+async fn idle_1012_reconnects_only_for_next_request() -> io::Result<()> {
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::IdleRestart,
         delay_http: false,
@@ -742,18 +560,13 @@ async fn idle_1012_reprewarms_before_next_request() -> io::Result<()> {
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
     send_create(&mut client).await?;
-    server.fixture.wait_ready(1).await?;
-    server.fixture.wait_http(1).await?;
-    assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     server.fixture.wait_close_frames(1).await?;
-    server.fixture.wait_ready(2).await?;
     send_create(&mut client).await?;
     server.fixture.wait_messages(2).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts_with_min_private(server.fixture.counts().await, 2, 2, 1);
+    assert_counts_with_min_private(server.fixture.counts().await, 2, 2, 0);
     let events = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
         .map_err(io::Error::other)?;
     let failure = events
@@ -782,7 +595,6 @@ async fn request_during_idle_1012_rebuild_waits_for_websocket() -> io::Result<()
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(1).await?;
 
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
@@ -815,7 +627,8 @@ async fn request_during_idle_1012_rebuild_waits_for_websocket() -> io::Result<()
 }
 
 #[tokio::test]
-async fn idle_application_frame_reprewarms_without_closing_client() -> io::Result<()> {
+async fn idle_application_frame_reconnects_on_next_request_without_closing_client() -> io::Result<()>
+{
     let server = FixtureServer::start(FixtureConfig {
         private: PrivateBehavior::IdleMessage,
         delay_http: false,
@@ -825,13 +638,8 @@ async fn idle_application_frame_reprewarms_without_closing_client() -> io::Resul
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
     send_create(&mut client).await?;
-    server.fixture.wait_ready(1).await?;
-    server.fixture.wait_http(1).await?;
-    assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    server.fixture.wait_ready(3).await?;
     client
         .send(Message::Ping(b"still-alive".to_vec().into()))
         .await
@@ -869,11 +677,9 @@ async fn orphan_idle_request_error_is_replaced_without_user_visible_failure() ->
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
-    server.fixture.wait_ready(7).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     server.fixture.wait_normal_closes(1).await?;
 
@@ -917,12 +723,10 @@ async fn idle_unexpected_eof_is_replaced_without_user_visible_failure() -> io::R
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     // When: WebSocket 请求完成、空闲连接断开并由池自动补充。
     observability_integration_tests::send_observed_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
-    server.fixture.wait_ready(7).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     server.fixture.wait_close_frames(1).await?;
     observability_integration_tests::send_observed_create(&mut client).await?;
@@ -967,11 +771,6 @@ async fn active_ws_failure_closes_client_without_replay() -> io::Result<()> {
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    send_create(&mut client).await?;
-    server.fixture.wait_ready(1).await?;
-    server.fixture.wait_http(1).await?;
-    assert_eq!(next_event_type(&mut client).await?, "response.completed");
-
     // When: the warmed private WebSocket fails during the next active request.
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
@@ -1011,7 +810,6 @@ async fn active_ws_1009_keeps_client_and_routes_same_retry_over_http() -> io::Re
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
@@ -1040,7 +838,7 @@ async fn active_ws_1009_keeps_client_and_routes_same_retry_over_http() -> io::Re
     send_create(&mut client).await?;
     server.fixture.wait_http(1).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts_with_min_private(server.fixture.counts().await, 6, 1, 1);
+    assert_counts_with_min_private(server.fixture.counts().await, 1, 1, 1);
 
     client
         .send(Message::Text(
@@ -1050,7 +848,7 @@ async fn active_ws_1009_keeps_client_and_routes_same_retry_over_http() -> io::Re
         .map_err(io::Error::other)?;
     server.fixture.wait_messages(2).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts_with_min_private(server.fixture.counts().await, 6, 2, 1);
+    assert_counts_with_min_private(server.fixture.counts().await, 1, 2, 1);
 
     drop(client);
     proxy.stop().await;
@@ -1068,7 +866,6 @@ async fn large_http_413_keeps_client_with_context_length_failure() -> io::Result
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_create_with_size(&mut client, 18_700_000).await?;
     server.fixture.wait_http(1).await?;
@@ -1102,7 +899,7 @@ async fn large_http_413_keeps_client_with_context_length_failure() -> io::Result
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts_with_min_private(server.fixture.counts().await, 6, 1, 1);
+    assert_counts_with_min_private(server.fixture.counts().await, 1, 1, 1);
 
     drop(client);
     proxy.stop().await;
@@ -1120,7 +917,6 @@ async fn active_ws_silence_pings_and_pong_keeps_the_request_alive() -> io::Resul
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
     server.fixture.wait_active_ready(1).await?;
@@ -1130,12 +926,15 @@ async fn active_ws_silence_pings_and_pong_keeps_the_request_alive() -> io::Resul
     assert_eq!(server.fixture.counts().await.active_pings, 0);
     tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(1)).await;
     server.fixture.wait_active_pings(1).await?;
+    tokio::time::resume();
+    server.fixture.wait_active_ready(2).await?;
+    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(29)).await;
     server.fixture.release_private();
 
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     assert_eq!(server.fixture.counts().await.active_pings, 1);
-    assert_counts_with_min_private(server.fixture.counts().await, 6, 1, 0);
+    assert_counts_with_min_private(server.fixture.counts().await, 1, 1, 0);
     drop(client);
     proxy.stop().await;
     server.stop().await;
@@ -1152,7 +951,6 @@ async fn websocket_request_records_model_and_codex_context() -> io::Result<()> {
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_create_with_metadata(&mut client).await?;
     server.fixture.wait_messages(1).await?;
@@ -1194,7 +992,6 @@ async fn active_ws_missing_pong_closes_client_without_replaying_the_request() ->
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
     server.fixture.wait_active_ready(1).await?;
@@ -1220,7 +1017,7 @@ async fn active_ws_missing_pong_closes_client_without_replaying_the_request() ->
         Some(&Value::from("private websocket keepalive timed out"))
     );
     assert_eq!(metrics.snapshot().hybrid_ws, 1);
-    assert_counts_with_min_private(server.fixture.counts().await, 6, 1, 0);
+    assert_counts_with_min_private(server.fixture.counts().await, 1, 1, 0);
     let close = client
         .next()
         .now_or_never()
@@ -1246,10 +1043,6 @@ async fn failed_terminal_then_1012_records_one_active_failure_without_replay() -
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    send_create(&mut client).await?;
-    server.fixture.wait_ready(1).await?;
-    server.fixture.wait_http(1).await?;
-    assert_eq!(next_event_type(&mut client).await?, "response.completed");
 
     // When: the next request receives the real failure sequence.
     send_create(&mut client).await?;
@@ -1267,7 +1060,7 @@ async fn failed_terminal_then_1012_records_one_active_failure_without_replay() -
     server.fixture.wait_close_frames(1).await?;
 
     // Then: Turbo does not replay, keeps the local session, and records one active failure.
-    assert_counts_with_min_private(server.fixture.counts().await, 1, 1, 1);
+    assert_counts_with_min_private(server.fixture.counts().await, 1, 1, 0);
     let events = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
         .map_err(io::Error::other)?;
     let hybrid_events = events
@@ -1295,7 +1088,6 @@ async fn failed_terminal_then_1012_records_one_active_failure_without_replay() -
     assert!(failure.get("firstFrameMs").is_some());
     send_create(&mut client).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    server.fixture.wait_ready(2).await?;
 
     drop(client);
     proxy.stop().await;
@@ -1313,17 +1105,13 @@ async fn cancelled_terminal_reuses_the_same_healthy_websocket() -> io::Result<()
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    send_create(&mut client).await?;
-    server.fixture.wait_ready(1).await?;
-    server.fixture.wait_http(1).await?;
-    assert_eq!(next_event_type(&mut client).await?, "response.completed");
 
     send_create(&mut client).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.cancelled");
     send_create(&mut client).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     server.fixture.wait_messages(2).await?;
-    assert_counts_with_min_private(server.fixture.counts().await, 1, 2, 1);
+    assert_counts_with_min_private(server.fixture.counts().await, 1, 2, 0);
     let cancelled = metrics
         .traffic_snapshot()
         .recent_requests
@@ -1359,137 +1147,12 @@ async fn concurrent_create_cancel_and_client_close_do_not_replay() -> io::Result
     server.fixture.release_http();
     send_create(&mut client).await?;
     server.fixture.wait_http(2).await?;
-    server.fixture.wait_private(6).await?;
     drop(client);
     server.fixture.release_http();
     for _ in 0..2 {
         server.fixture.release_private();
     }
-    assert_counts(server.fixture.counts().await, 6, 0, 2);
-    proxy.stop().await;
-    server.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn maintenance_probes_multiple_scopes_concurrently_without_application_payloads()
--> io::Result<()> {
-    // Given: independent connection groups with idle upstream sockets that hold probe Pongs.
-    const PROBE_TIMEOUT: Duration = Duration::from_millis(50);
-    let server = FixtureServer::start(FixtureConfig {
-        private: PrivateBehavior::ProbeDelay,
-        delay_http: false,
-    })
-    .await?;
-    let (proxy, metrics) = start_test_proxy(&server).await?;
-    let scope_states = [
-        "scope-a", "scope-b", "scope-c", "scope-d", "scope-e", "scope-f", "scope-g", "scope-h",
-        "scope-i", "scope-j", "scope-k", "scope-l",
-    ];
-    let mut clients = Vec::with_capacity(scope_states.len());
-    for scope_state in scope_states {
-        let (client, status) =
-            connect_local_with_headers(&proxy, None, None, Some(scope_state)).await?;
-        assert_eq!(status, 101);
-        clients.push(client);
-        server.fixture.wait_ready_for_scope(scope_state).await?;
-    }
-    assert!(proxy.wait_for_prewarm_for_test(6).await);
-
-    // When: one maintenance round probes every scope with a short timeout.
-    proxy.run_maintenance_cycle_for_test(PROBE_TIMEOUT).await;
-    server.fixture.release_private_all();
-
-    // Then: probes are bounded and carry no application payload.
-    let metrics_snapshot = metrics.snapshot();
-    assert!(metrics_snapshot.maintenance_probe_started >= 1);
-    assert_eq!(
-        metrics_snapshot.maintenance_probe_completed,
-        metrics_snapshot.maintenance_probe_started
-    );
-    let probe_count = metrics_snapshot.maintenance_probe_started;
-    assert_eq!(metrics_snapshot.maintenance_probe_timeouts, probe_count);
-    assert_eq!(metrics_snapshot.maintenance_probe_failed, probe_count);
-    assert_eq!(metrics_snapshot.maintenance_slow_cycles, 1);
-    let serial_baseline_ms =
-        u64::try_from(PROBE_TIMEOUT.as_millis()).unwrap_or(u64::MAX) * probe_count;
-    if probe_count >= 4 {
-        assert_eq!(metrics_snapshot.maintenance_probe_max_concurrency, 4);
-        assert!(metrics_snapshot.maintenance_cycle_elapsed_ms < serial_baseline_ms * 3 / 4);
-    } else {
-        assert!(metrics_snapshot.maintenance_probe_max_concurrency <= 4);
-    }
-    assert_eq!(server.fixture.counts().await.private_messages, 0);
-    drop(clients);
-    proxy.stop().await;
-    server.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn cancelled_maintenance_probe_closes_socket_without_application_payloads() -> io::Result<()>
-{
-    // Given: one idle upstream socket whose probe Pong is held by the fixture.
-    const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
-    const SCOPE: &str = "cancelled-scope";
-    let server = FixtureServer::start(FixtureConfig {
-        private: PrivateBehavior::ProbeDelay,
-        delay_http: false,
-    })
-    .await?;
-    let (proxy, metrics) = start_test_proxy(&server).await?;
-    let (client, status) = connect_local_with_headers(&proxy, None, None, Some(SCOPE)).await?;
-    assert_eq!(status, 101);
-    server
-        .fixture
-        .wait_ready_for_scope(SCOPE)
-        .await
-        .map_err(|error| io::Error::other(format!("ready: {error}")))?;
-    assert!(proxy.wait_for_prewarm_for_test(1).await);
-    let ready_before = server.fixture.ready_for_scope_count(SCOPE).await;
-
-    // When: the maintenance future is cancelled while its probe is in flight.
-    let mut maintenance = Box::pin(proxy.run_maintenance_cycle_for_test(PROBE_TIMEOUT));
-    tokio::select! {
-        () = &mut maintenance => {
-            return Err(io::Error::other("maintenance round completed before probe started"));
-        }
-        ready = metrics.wait_maintenance_probes_for_test(1) => {
-            if !ready {
-                return Err(io::Error::other("maintenance probe did not start"));
-            }
-        }
-    }
-    drop(maintenance);
-    server.fixture.release_private_all();
-
-    // Then: the guard closes the physical socket and records a failed probe, without payload.
-    server
-        .fixture
-        .wait_normal_closes(1)
-        .await
-        .map_err(|error| io::Error::other(format!("close: {error}")))?;
-    let snapshot = metrics.snapshot();
-    assert!(snapshot.maintenance_probe_started >= 1);
-    assert!(snapshot.maintenance_probe_completed >= 1);
-    assert!(snapshot.maintenance_probe_failed >= 1);
-    assert!(
-        server
-            .fixture
-            .wait_ready_for_scope_count(SCOPE, ready_before + 1)
-            .await
-            .is_ok()
-    );
-    let connection_snapshot = proxy.connection_snapshot().await;
-    assert!(
-        !connection_snapshot
-            .transitions
-            .iter()
-            .any(|transition| transition.id == "POOL-PROBE")
-    );
-    assert_eq!(server.fixture.counts().await.private_messages, 0);
-
-    drop(client);
+    assert_counts(server.fixture.counts().await, 1, 0, 2);
     proxy.stop().await;
     server.stop().await;
     Ok(())

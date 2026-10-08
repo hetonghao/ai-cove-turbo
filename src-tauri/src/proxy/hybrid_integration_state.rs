@@ -15,7 +15,6 @@ pub(super) enum PrivateBehavior {
     FailFirstBatch,
     HoldResponse,
     HoldResponseNoPong,
-    ProbeDelay,
     HttpPayloadTooLarge,
     IdleError,
     IdleMessage,
@@ -46,7 +45,6 @@ impl PrivateBehavior {
             self,
             Self::HoldResponse
                 | Self::HoldResponseNoPong
-                | Self::ProbeDelay
                 | Self::HttpPayloadTooLarge
                 | Self::IdleError
                 | Self::IdleMessage
@@ -72,7 +70,6 @@ impl PrivateBehavior {
             | Self::FailFirstBatch
             | Self::HoldResponse
             | Self::HoldResponseNoPong
-            | Self::ProbeDelay
             | Self::HttpPayloadTooLarge
             | Self::IdleError
             | Self::IdleMessage
@@ -136,7 +133,6 @@ pub(super) struct FixtureServer {
 #[derive(Clone, Copy, Debug)]
 enum CountKind {
     PrivateHandshake,
-    PrivateReady,
     PrivateMessage,
     ActiveReady,
     PrivateNormalClose,
@@ -189,52 +185,6 @@ impl FixtureServer {
 impl Fixture {
     pub(super) async fn wait_private(&self, expected: usize) -> io::Result<()> {
         self.wait_count(CountKind::PrivateHandshake, expected).await
-    }
-
-    pub(super) async fn wait_ready(&self, expected: usize) -> io::Result<()> {
-        self.wait_count(CountKind::PrivateReady, expected).await
-    }
-
-    pub(super) async fn wait_ready_for_scope(&self, scope: &str) -> io::Result<()> {
-        self.wait_ready_for_scope_count(scope, 1).await
-    }
-
-    pub(super) async fn ready_for_scope_count(&self, scope: &str) -> usize {
-        self.state
-            .counts
-            .lock()
-            .await
-            .private_ready_by_scope
-            .get(scope)
-            .copied()
-            .unwrap_or_default()
-    }
-
-    pub(super) async fn wait_ready_for_scope_count(
-        &self,
-        scope: &str,
-        expected: usize,
-    ) -> io::Result<()> {
-        let scope = scope.to_owned();
-        let wait = async {
-            loop {
-                let changed = self.state.changed.notified();
-                tokio::pin!(changed);
-                changed.as_mut().enable();
-                if self.ready_for_scope_count(&scope).await >= expected {
-                    return;
-                }
-                changed.as_mut().await;
-            }
-        };
-        tokio::time::timeout(Duration::from_secs(10), wait)
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "scope prewarm did not become ready",
-                )
-            })
     }
 
     pub(super) async fn wait_messages(&self, expected: usize) -> io::Result<()> {
@@ -327,7 +277,6 @@ impl Fixture {
                     let counts = self.state.counts.lock().await;
                     match kind {
                         CountKind::PrivateHandshake => counts.private_handshakes,
-                        CountKind::PrivateReady => counts.private_ready,
                         CountKind::PrivateMessage => counts.private_messages,
                         CountKind::ActiveReady => counts.active_ready,
                         CountKind::PrivateNormalClose => counts.private_normal_closes,

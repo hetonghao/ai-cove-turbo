@@ -45,9 +45,6 @@ pub(super) async fn handle_idle_upstream(
             };
             session.state.metrics.record_websocket_closed();
             session.discard(retirement).await;
-            if code == 1012 {
-                session.drain_reconnect_pending = true;
-            }
             if matches!(code, 1011 | 1012) {
                 return true;
             }
@@ -158,6 +155,10 @@ async fn recover_unexpected_idle_message(session: &mut Session, reason: &str) ->
 }
 
 pub(super) async fn handle_idle_keepalive(session: &mut Session) -> bool {
+    if session.current_model_requires_http() {
+        session.release_idle_websocket().await;
+        return true;
+    }
     let Some(mut lease) = session.ready.take() else {
         return true;
     };

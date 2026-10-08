@@ -72,102 +72,7 @@ async fn idle_private_websocket_is_removed_after_pong_timeout() -> io::Result<()
 }
 
 #[tokio::test]
-async fn active_scope_reclaims_dormant_pool_capacity() -> io::Result<()> {
-    let pair_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
-    let pair_address = pair_listener.local_addr()?;
-    let mut idle = Vec::new();
-    let mut servers = Vec::new();
-    for _ in 0..MAX_POOL_CONNECTIONS {
-        let client_stream = TcpStream::connect(pair_address).await?;
-        let (server_stream, _) = pair_listener.accept().await?;
-        idle.push(
-            WebSocketStream::from_raw_socket(
-                MaybeTlsStream::Plain(client_stream),
-                Role::Client,
-                None,
-            )
-            .await,
-        );
-        servers.push(WebSocketStream::from_raw_socket(server_stream, Role::Server, None).await);
-    }
-    let connect_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
-    let target = Url::parse(&format!(
-        "http://{}/v1/responses",
-        connect_listener.local_addr()?
-    ))
-    .map_err(io::Error::other)?;
-    let active_scope = HybridScope::new(&target, &HeaderMap::new());
-    let metrics = Arc::new(Metrics::default());
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(RootCertStore::empty())
-        .with_no_client_auth();
-    let pool = HybridPool::new(PrivateTlsConfig::new(Arc::new(tls_config)), metrics);
-    {
-        let mut state = pool.inner.state.lock().await;
-        for (index, upstream) in idle.into_iter().enumerate() {
-            let connection_id = u64::try_from(index.saturating_add(1)).map_err(io::Error::other)?;
-            let scope = HybridScope {
-                target: format!("dormant-{index}"),
-                headers: Vec::new(),
-            };
-            state.scopes.insert(
-                scope,
-                ScopeBackend {
-                    target: target.clone(),
-                    headers: HeaderMap::new(),
-                    diagnostics: ScopeDiagnostics::default(),
-                    initialized: true,
-                    active_local: 0,
-                    leased: HashMap::new(),
-                    connecting: 0,
-                    probing: 0,
-                    idle: vec![PoolConnection {
-                        id: connection_id,
-                        upstream,
-                        server_trace: None,
-                        ordinal: 0,
-                        metadata: ConnectionMetadata::fresh(),
-                    }],
-                },
-            );
-        }
-        state.scopes.insert(
-            active_scope.clone(),
-            ScopeBackend {
-                target,
-                headers: HeaderMap::new(),
-                diagnostics: ScopeDiagnostics::default(),
-                initialized: false,
-                active_local: 1,
-                leased: HashMap::new(),
-                connecting: 0,
-                probing: 0,
-                idle: Vec::new(),
-            },
-        );
-    }
-
-    pool.refill(&active_scope).await;
-
-    let state = pool.inner.state.lock().await;
-    let active = state
-        .scopes
-        .get(&active_scope)
-        .ok_or_else(|| io::Error::other("active scope missing"))?;
-    assert_eq!(active.connecting, 6);
-    assert_eq!(
-        state.scopes.values().map(total_connections).sum::<usize>(),
-        6
-    );
-    assert_eq!(state.scopes.len(), 1);
-    drop(state);
-    drop(servers);
-    drop(connect_listener);
-    Ok(())
-}
-
-#[tokio::test]
-async fn inactive_scope_keeps_full_warm_reserve() -> io::Result<()> {
+async fn inactive_scope_releases_all_blank_connections() -> io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let address = listener.local_addr()?;
     let mut clients = Vec::new();
@@ -219,6 +124,7 @@ async fn inactive_scope_keeps_full_warm_reserve() -> io::Result<()> {
                 diagnostics: ScopeDiagnostics::default(),
                 initialized: true,
                 active_local: 1,
+                waiting: HashSet::new(),
                 leased: HashMap::new(),
                 connecting: 0,
                 probing: 0,
@@ -230,14 +136,10 @@ async fn inactive_scope_keeps_full_warm_reserve() -> io::Result<()> {
     pool.unregister(&scope, session_id).await;
 
     let state = pool.inner.state.lock().await;
-    let entry = state
-        .scopes
-        .get(&scope)
-        .ok_or_else(|| io::Error::other("inactive scope missing"))?;
-    assert_eq!(entry.idle.len(), 6);
+    assert!(!state.scopes.contains_key(&scope));
     assert_eq!(
         state.scopes.values().map(total_connections).sum::<usize>(),
-        6
+        0
     );
     drop(state);
     drop(servers);
@@ -275,6 +177,7 @@ async fn successful_checkout_cannot_be_cancelled_after_lease_assignment() -> io:
                 diagnostics: ScopeDiagnostics::default(),
                 initialized: true,
                 active_local: 1,
+                waiting: HashSet::new(),
                 leased: HashMap::new(),
                 connecting: 0,
                 probing: 0,
@@ -354,6 +257,7 @@ async fn session_handle_allows_one_typed_lease_and_close_is_terminal() -> io::Re
                 diagnostics: ScopeDiagnostics::default(),
                 initialized: true,
                 active_local: 1,
+                waiting: HashSet::new(),
                 leased: HashMap::new(),
                 connecting: 0,
                 probing: 0,
@@ -476,6 +380,7 @@ fn scope_backend_keeps_local_state_under_shared_capacity_cap() -> io::Result<()>
         diagnostics: ScopeDiagnostics::default(),
         initialized: false,
         active_local: 0,
+        waiting: HashSet::new(),
         leased: HashMap::new(),
         connecting: 0,
         probing: 0,

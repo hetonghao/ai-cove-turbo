@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
 
 use axum::{
     body::Body,
@@ -21,6 +27,7 @@ pub(super) fn start_http_worker(
     payload: Vec<u8>,
     traffic: HttpTraffic,
 ) -> Active {
+    let (payload, warmup) = prepare_http_generation(payload);
     let raw_bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
     session.begin_http_continuation(&payload);
     let (command_tx, command_rx) = mpsc::channel(8);
@@ -31,21 +38,25 @@ pub(super) fn start_http_worker(
         .unwrap_or_else(|| traffic::request_metadata(&session.client_headers, &payload));
     metadata.thread_id = session.thread_id.clone().or(metadata.thread_id);
     session.state.metrics.observe_session_name_hint(&metadata);
-    let context = WorkerContext {
-        state: session.state.clone(),
-        control: Arc::new(HttpTimingControl::default()),
-        path: session.path.clone(),
-        started_at: Instant::now(),
-        raw_bytes,
-        metadata,
-        request: build_http_request(
-            session.client_headers.clone(),
-            session.request_uri.clone(),
-            payload,
-        ),
-        traffic,
+    let task = if let Some(model) = warmup {
+        tokio::spawn(complete_local_warmup(model, event_tx))
+    } else {
+        let context = WorkerContext {
+            state: session.state.clone(),
+            control: Arc::new(HttpTimingControl::default()),
+            path: session.path.clone(),
+            started_at: Instant::now(),
+            raw_bytes,
+            metadata,
+            request: build_http_request(
+                session.client_headers.clone(),
+                session.request_uri.clone(),
+                payload,
+            ),
+            traffic,
+        };
+        tokio::spawn(run_http_worker(context, command_rx, event_tx))
     };
-    let task = tokio::spawn(run_http_worker(context, command_rx, event_tx));
     Active {
         kind: super::ActiveKind::Http,
         http_traffic: Some(traffic),
@@ -56,6 +67,68 @@ pub(super) fn start_http_worker(
         events: event_rx,
         task,
     }
+}
+
+// 所有 Hybrid HTTP 路径共用此入口，预热永远不能变成一次生成。
+fn prepare_http_generation(payload: Vec<u8>) -> (Vec<u8>, Option<String>) {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+        return (payload, None);
+    };
+    let warmup = (value.get("generate") == Some(&serde_json::Value::Bool(false))).then(|| {
+        value
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    });
+    let Some(object) = value.as_object_mut() else {
+        return (payload, None);
+    };
+    if object.remove("generate").is_none() {
+        return (payload, warmup);
+    }
+    (value.to_string().into_bytes(), warmup)
+}
+
+async fn complete_local_warmup(model: String, events: mpsc::Sender<WorkerEvent>) {
+    static NEXT_WARMUP_ID: AtomicU64 = AtomicU64::new(1);
+    let id = format!(
+        "resp_turbo_warmup_{}",
+        NEXT_WARMUP_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut response = serde_json::json!({
+        "id": id, "object": "response", "model": model, "status": "in_progress",
+        "created_at": traffic::now_ms() / 1000, "output": [],
+        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0}},
+    });
+    for (sequence, event) in ["response.created", "response.completed"]
+        .into_iter()
+        .enumerate()
+    {
+        if sequence == 1 {
+            if let Some(status) = response.get_mut("status") {
+                *status = serde_json::Value::from("completed");
+            }
+        }
+        let message = tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "type": event, "sequence_number": sequence, "response": response,
+            })
+            .to_string()
+            .into(),
+        );
+        if events.send(WorkerEvent::Message(message)).await.is_err() {
+            return;
+        }
+    }
+    let _ = events
+        .send(WorkerEvent::Terminal {
+            lease: None,
+            response_id: Some(id),
+        })
+        .await;
 }
 
 struct WorkerContext {

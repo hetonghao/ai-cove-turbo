@@ -288,6 +288,11 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   const row = (slug) => element({ modelSlug: slug });
   return {
     calls,
+    async setCapabilities(capabilities) {
+      status.transportCapabilities = capabilities;
+      await tick?.();
+      await new Promise((resolve) => setImmediate(resolve));
+    },
     skillsActive() { return skillsActive; },
     setHidden(hidden) {
       document.hidden = hidden;
@@ -792,6 +797,23 @@ test("模型缺失传输能力信息时统一升格为 HTTP", async () => {
   assert.match(harness.list.innerHTML, /压缩 HTTP/);
   assert.doesNotMatch(harness.list.innerHTML, /能力未知/);
   assert.doesNotMatch(harness.list.innerHTML, /不可用/);
+  assert.match(harness.list.innerHTML, /能力尚未确认，暂用 HTTP；无需 WS 预热/);
+});
+
+test("过期能力显示实际 HTTP 路由与待刷新状态", async () => {
+  const harness = await catalogHarness({
+    capabilityOverrides: { alpha: { allowed: true, transport: "http", reasonCode: "capability_expired" } },
+  });
+  assert.match(harness.list.innerHTML, /能力已过期，暂用 HTTP；无需 WS 预热/);
+  assert.doesNotMatch(harness.list.innerHTML, /WS 可用/);
+});
+
+test("完整能力快照移除模型后不再保留旧 WS 标签", async () => {
+  const harness = await catalogHarness({ freshStatus: true });
+  assert.match(harness.list.innerHTML, /WS 可用/);
+  await harness.setCapabilities({});
+  assert.doesNotMatch(harness.list.innerHTML, /WS 可用/);
+  assert.match(harness.list.innerHTML, /能力尚未确认，暂用 HTTP/);
 });
 
 test("上游发现失败不应把模型目录标记为保存错误", async () => {

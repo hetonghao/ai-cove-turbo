@@ -1377,7 +1377,6 @@ impl AppRuntime {
             },
             Some(self.paths.model_policy_path()),
             Some(self.paths.config_path.clone()),
-            true,
         )
         .await
         .map_err(|error| error.to_string())?;

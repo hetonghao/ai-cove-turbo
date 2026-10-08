@@ -4,8 +4,8 @@ use futures_util::{StreamExt, stream};
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
 use super::{
-    HybridPool, HybridScope, PONG_TIMEOUT, PoolConnection, PoolState, PrivateUpstream,
-    ScopeBackend, desired_connections, probe::ProbeFailure, probe_idle_detailed, total_connections,
+    HybridPool, HybridScope, PONG_TIMEOUT, PoolConnection, PrivateUpstream, desired_connections,
+    probe::ProbeFailure, probe_idle_detailed, total_connections,
 };
 
 mod connection;
@@ -13,105 +13,36 @@ use connection::{ConnectionSpec, spawn_connection};
 
 const MAINTENANCE_CONCURRENCY: usize = 4;
 
-fn reclaim_idle(state: &mut PoolState, scope: &HybridScope, count: usize) -> Vec<PoolConnection> {
-    let mut reclaimed = Vec::new();
-    for candidate_is_active in [false, true] {
-        for (candidate_scope, candidate) in &mut state.scopes {
-            if candidate_scope == scope || (candidate.active_local > 0) != candidate_is_active {
-                continue;
-            }
-            let take = count
-                .saturating_sub(reclaimed.len())
-                .min(candidate.idle_len());
-            reclaimed.extend(
-                candidate
-                    .idle
-                    .drain(candidate.idle_len().saturating_sub(take)..),
-            );
-            if reclaimed.len() == count {
-                return reclaimed;
-            }
-        }
-    }
-    if let Some(candidate) = state.scopes.get_mut(scope) {
-        let take = count
-            .saturating_sub(reclaimed.len())
-            .min(candidate.idle_len());
-        reclaimed.extend(
-            candidate
-                .idle
-                .drain(candidate.idle_len().saturating_sub(take)..),
-        );
-    }
-    reclaimed
-}
-
 impl HybridPool {
     pub(super) async fn refill(&self, scope: &HybridScope) {
-        let plan = {
-            let mut state = self.inner.state.lock().await;
-            let bootstrap_scope = state.bootstrap_scopes.contains(scope);
-            let global_total = state.scopes.values().map(total_connections).sum::<usize>();
-            let global_leased = state
-                .scopes
-                .values()
-                .map(ScopeBackend::leased_len)
-                .sum::<usize>();
-            let global_desired = desired_connections(global_leased);
-            let available = global_desired.saturating_sub(global_total);
-            let excess = global_total.saturating_sub(global_desired);
-            let inactive_idle = state
-                .scopes
-                .iter()
-                .filter(|(candidate_scope, candidate)| {
-                    *candidate_scope != scope && candidate.active_local == 0
-                })
-                .map(|(_, candidate)| candidate.idle_len())
-                .sum::<usize>();
-            let Some(entry) = state.scopes.get(scope) else {
-                return;
-            };
-            let current_total = total_connections(entry);
-            if entry.active_local == 0 && current_total == 0 && !bootstrap_scope {
-                state.scopes.remove(scope);
-                return;
-            }
-            let active_local = entry.active_local;
-            let leased_local = entry.leased.len();
-            let ready_needed = usize::from(
-                active_local > leased_local
-                    && entry.idle_len() == 0
-                    && entry.connecting == 0
-                    && entry.probing == 0,
-            );
-            let needed = desired_connections(leased_local)
-                .saturating_sub(current_total)
-                .min(available.saturating_add(inactive_idle).max(ready_needed));
-            if needed == 0 && excess == 0 {
-                return;
-            }
-            let spec = ConnectionSpec {
-                target: entry.target.clone(),
-                headers: entry.headers.clone(),
-            };
-            let reclaim_target = excess.saturating_add(needed.saturating_sub(available));
-            let reclaimed = reclaim_idle(&mut state, scope, reclaim_target);
-            for connection in &reclaimed {
-                state.push_closed(connection.id, None, "连接池容量回收".to_owned(), true);
-            }
-            state.scopes.retain(|_, candidate| {
-                candidate.active_local > 0 || total_connections(candidate) > 0
-            });
-            let remaining_total = global_total.saturating_sub(reclaimed.len());
-            let connecting = needed.min(global_desired.saturating_sub(remaining_total));
-            if let Some(entry) = state.scopes.get_mut(scope) {
-                entry.add_connecting(connecting);
-            }
-            let plan = (connecting, spec, reclaimed);
-            drop(state);
-            plan
+        let mut state = self.inner.state.lock().await;
+        let global_total =
+            state.scopes.values().map(total_connections).sum::<usize>() + state.handoffs.len();
+        let Some(entry) = state.scopes.get_mut(scope) else {
+            return;
         };
-        let (connecting, spec, reclaimed) = plan;
+        let desired = desired_connections(entry.leased.len() + entry.waiting.len());
+        let excess = total_connections(entry)
+            .saturating_sub(desired)
+            .min(entry.idle.len());
+        let reclaimed = entry.idle.drain(..excess).collect::<Vec<_>>();
+        let connecting = desired
+            .saturating_sub(total_connections(entry))
+            .min(super::MAX_POOL_CONNECTIONS.saturating_sub(global_total.saturating_sub(excess)));
+        let spec = ConnectionSpec {
+            target: entry.target.clone(),
+            headers: entry.headers.clone(),
+        };
+        entry.add_connecting(connecting);
+        for connection in &reclaimed {
+            state.push_closed(
+                connection.id,
+                None,
+                "没有等待 WS 的请求，释放空闲连接".to_owned(),
+                true,
+            );
+        }
+        drop(state);
         self.close_pool_connections_detached(reclaimed);
         for _ in 0..connecting {
             spawn_connection(Arc::clone(&self.inner), scope.clone(), spec.clone());
@@ -161,12 +92,6 @@ impl HybridPool {
         self.inner
             .metrics
             .record_maintenance_cycle(started.elapsed(), slow);
-    }
-
-    #[cfg(test)]
-    pub(in crate::proxy) async fn maintain_for_test(&self, pong_timeout: Duration) {
-        let mut cursor = 0;
-        self.maintain_all(pong_timeout, &mut cursor).await;
     }
 
     pub(super) async fn maintain_once(&self, scope: &HybridScope, pong_timeout: Duration) -> bool {

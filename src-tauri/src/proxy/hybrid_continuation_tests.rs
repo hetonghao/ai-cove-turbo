@@ -26,16 +26,15 @@ async fn continuation_without_handoff_returns_local_state_missing() -> io::Resul
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_continuation(&mut client, "resp_test").await?;
     expect_missing_continuation_close(&mut client).await?;
-    assert_counts(server.fixture.counts().await, 6, 0, 0);
+    assert_counts(server.fixture.counts().await, 0, 0, 0);
     assert_eq!(metrics.snapshot().hybrid_ws, 0);
     assert!(metrics.traffic_snapshot().recent_requests.is_empty());
     let snapshot = proxy.connection_snapshot().await;
-    assert_eq!(snapshot.current_connections, 6);
-    assert_eq!(snapshot.prewarm, 6);
+    assert_eq!(snapshot.current_connections, 0);
+    assert_eq!(snapshot.prewarm, 0);
     drop(client);
     proxy.stop().await;
     server.stop().await;
@@ -53,19 +52,17 @@ async fn stale_continuation_is_rejected_after_upstream_discard() -> io::Result<(
     let (proxy, metrics) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     server.fixture.wait_close_frames(1).await?;
-    server.fixture.wait_ready(7).await?;
 
     // When: the local session tries to continue the response on a replacement connection.
     send_continuation(&mut client, "response-1").await?;
 
     // Then: Turbo rejects the stale continuation locally without an upstream request or failure row.
     expect_missing_continuation_close(&mut client).await?;
-    assert_counts_with_min_private(server.fixture.counts().await, 7, 1, 0);
+    assert_counts_with_min_private(server.fixture.counts().await, 1, 1, 0);
     assert_eq!(metrics.snapshot().hybrid_ws, 1);
     let events = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
         .map_err(io::Error::other)?;
@@ -100,7 +97,6 @@ async fn empty_recovery_payload_is_rejected_and_reconnects_before_upstream() -> 
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     // When: Codex emits a recovery create without any continuation source.
     client
@@ -126,10 +122,10 @@ async fn empty_recovery_payload_is_rejected_and_reconnects_before_upstream() -> 
         ));
     };
     assert_eq!(u16::from(frame.code), 1002);
-    assert_counts(server.fixture.counts().await, 6, 0, 0);
+    assert_counts(server.fixture.counts().await, 0, 0, 0);
     let snapshot = proxy.connection_snapshot().await;
-    assert_eq!(snapshot.current_connections, 6);
-    assert_eq!(snapshot.prewarm, 6);
+    assert_eq!(snapshot.current_connections, 0);
+    assert_eq!(snapshot.prewarm, 0);
     assert!(snapshot.bound_threads.is_empty());
     drop(client);
 
@@ -162,7 +158,7 @@ async fn empty_recovery_payload_is_rejected_and_reconnects_before_upstream() -> 
         ));
     };
     assert_eq!(u16::from(frame.code), 1002);
-    assert_counts(server.fixture.counts().await, 6, 0, 0);
+    assert_counts(server.fixture.counts().await, 0, 0, 0);
     drop(client);
 
     let (mut client, status) = connect_local(&proxy).await?;
@@ -171,7 +167,7 @@ async fn empty_recovery_payload_is_rejected_and_reconnects_before_upstream() -> 
     send_create(&mut client).await?;
     server.fixture.wait_messages(1).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts_with_min_private(server.fixture.counts().await, 6, 1, 0);
+    assert_counts_with_min_private(server.fixture.counts().await, 1, 1, 0);
 
     drop(client);
     proxy.stop().await;
@@ -189,7 +185,6 @@ async fn duplicate_terminal_tail_keeps_session_websocket_reusable() -> io::Resul
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     for expected in 1..=3 {
         send_create(&mut client).await?;
@@ -201,8 +196,7 @@ async fn duplicate_terminal_tail_keeps_session_websocket_reusable() -> io::Resul
             Some(&Value::from(format!("response-{expected}")))
         );
     }
-    server.fixture.wait_ready(7).await?;
-    assert_counts(server.fixture.counts().await, 7, 3, 0);
+    assert_counts(server.fixture.counts().await, 1, 3, 0);
 
     drop(client);
     proxy.stop().await;

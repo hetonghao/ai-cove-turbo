@@ -42,14 +42,29 @@ impl SessionHandle {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::proxy) async fn checkout(&self) -> Option<Lease> {
         self.checkout_with(|| self.pool.checkout(&self.scope, self.session_id))
             .await
     }
 
     pub(in crate::proxy) async fn checkout_wait(&self, wait: Duration) -> Option<Lease> {
-        self.checkout_with(|| self.pool.checkout_wait(&self.scope, self.session_id, wait))
-            .await
+        self.checkout_wait_until(wait, std::future::pending()).await
+    }
+
+    pub(in crate::proxy) async fn checkout_wait_until(
+        &self,
+        wait: Duration,
+        stop: impl Future<Output = ()>,
+    ) -> Option<Lease> {
+        self.checkout_with(|| async {
+            tokio::select! {
+                biased;
+                () = stop => None,
+                upstream = self.pool.checkout_wait(&self.scope, self.session_id, wait) => upstream,
+            }
+        })
+        .await
     }
 
     pub(in crate::proxy) async fn checkout_with<F, Fut>(&self, checkout: F) -> Option<Lease>
@@ -71,11 +86,16 @@ impl SessionHandle {
             self.session_id,
             Arc::clone(&self.lease_active),
         );
-        let Some(upstream) = checkout().await else {
-            self.lease_active.store(false, Ordering::Release);
-            return None;
-        };
-        guard.set_upstream(upstream);
+        guard.set_waiting(true);
+        self.pool
+            .request_connection(&self.scope, self.session_id)
+            .await;
+        if let Some(upstream) = checkout().await {
+            // 先交给守卫，再等待需求清理；取消不能留下已分配的租约。
+            guard.set_upstream(upstream);
+        }
+        self.pool.finish_request(&self.scope, self.session_id).await;
+        guard.set_waiting(false);
         if self.closed.load(Ordering::Acquire) {
             if let Some(upstream) = guard.take_upstream() {
                 spawn_release_cleanup(
@@ -173,6 +193,7 @@ impl SessionHandle {
         self.pool.has_initialized(&self.scope).await
     }
 
+    #[cfg(test)]
     pub(in crate::proxy) async fn checkout_ready(&self) -> Option<Lease> {
         loop {
             if self.is_closed() {

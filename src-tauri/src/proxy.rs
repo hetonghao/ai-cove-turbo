@@ -492,21 +492,6 @@ impl Metrics {
         );
     }
 
-    #[cfg(test)]
-    pub(crate) async fn wait_maintenance_probes_for_test(&self, expected: u64) -> bool {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let notified = self.maintenance_probe_started_notify.notified();
-                if self.snapshot().maintenance_probe_started >= expected {
-                    return;
-                }
-                notified.await;
-            }
-        })
-        .await
-        .is_ok()
-    }
-
     fn record_websocket_closed(&self) {
         let _ =
             self.websocket_active
@@ -828,23 +813,13 @@ pub(crate) struct ProxyHandle {
     hybrid_pool: hybrid_pool::HybridPool,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
-    prewarm_state: Arc<std::sync::Mutex<String>>,
+    websocket_enabled: Arc<AtomicBool>,
     model_policy: Arc<model_policy::ModelPolicyStore>,
     capability_cache: Arc<transport_capability::CapabilityCache>,
     capability_probe: CapabilityProbe,
 }
 
 impl ProxyHandle {
-    #[cfg(test)]
-    pub(crate) async fn run_maintenance_cycle_for_test(&self, pong_timeout: Duration) {
-        self.hybrid_pool.maintain_for_test(pong_timeout).await;
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn wait_for_prewarm_for_test(&self, expected: usize) -> bool {
-        self.hybrid_pool.wait_for_prewarm_for_test(expected).await
-    }
-
     pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -854,9 +829,20 @@ impl ProxyHandle {
     }
 
     pub(crate) fn prewarm_state(&self) -> String {
-        match self.prewarm_state.lock() {
-            Ok(state) => state.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
+        if !self.websocket_enabled.load(Ordering::Relaxed) {
+            return "disabled".to_owned();
+        }
+        let statuses = self.capability_cache.statuses();
+        let policy = self.model_policy.reload();
+        if !statuses.is_empty()
+            && statuses.iter().all(|(model, status)| {
+                status.transport == transport_capability::CapabilityTransport::HttpOnly
+                    || policy.transport_for(Some(model)) == model_policy::Transport::Http
+            })
+        {
+            "not_needed".to_owned()
+        } else {
+            "on_demand".to_owned()
         }
     }
 
@@ -868,7 +854,9 @@ impl ProxyHandle {
         &self,
         update: model_policy::ModelPolicyUpdate,
     ) -> Result<model_policy::ModelPolicyStatus, String> {
-        self.model_policy.update(update)
+        let status = self.model_policy.update(update)?;
+        self.capability_cache.notify_changed();
+        Ok(status)
     }
 
     pub(crate) fn capability_statuses(
@@ -997,7 +985,7 @@ impl CapabilityProbe {
 
 #[cfg(test)]
 pub(crate) async fn start_proxy(options: ProxyOptions) -> Result<ProxyHandle, ProxyError> {
-    start_proxy_with_policy(options, None, None, false).await
+    start_proxy_with_policy(options, None, None).await
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1005,7 +993,6 @@ pub(crate) async fn start_proxy_with_policy(
     options: ProxyOptions,
     model_policy_path: Option<std::path::PathBuf>,
     codex_config_path: Option<std::path::PathBuf>,
-    enable_bootstrap_prewarm: bool,
 ) -> Result<ProxyHandle, ProxyError> {
     let listener = bind_preferred(&options.preferred_ports).await?;
     let address = listener.local_addr().map_err(ProxyError::Bind)?;
@@ -1091,33 +1078,7 @@ pub(crate) async fn start_proxy_with_policy(
         capability_cache: Arc::clone(&capability_cache),
         capability_probe: capability_probe.clone(),
     };
-    let bootstrap = if enable_bootstrap_prewarm
-        && state.ai_cove_private_websocket_zstd
-        && state.websocket_enabled.load(Ordering::Relaxed)
-    {
-        startup_auth_headers.map(|headers| {
-            let target = resolve_target(&state.upstream, &Uri::from_static("/v1/responses"));
-            let scope = hybrid_pool::HybridScope::new(&target, &headers);
-            (target, scope, headers)
-        })
-    } else {
-        None
-    };
-    let prewarm_state =
-        Arc::new(std::sync::Mutex::new(
-            if state.ai_cove_private_websocket_zstd
-                && state.websocket_enabled.load(Ordering::Relaxed)
-            {
-                if bootstrap.is_some() {
-                    "starting"
-                } else {
-                    "waiting_auth"
-                }
-            } else {
-                "disabled"
-            }
-            .to_owned(),
-        ));
+    let websocket_enabled = Arc::clone(&state.websocket_enabled);
     let app = Router::new()
         .route("/healthz", get(health))
         .fallback(proxy_request)
@@ -1136,32 +1097,12 @@ pub(crate) async fn start_proxy_with_policy(
         return Err(error);
     }
 
-    if let Some((target, scope, headers)) = bootstrap {
-        let pool = hybrid_pool.clone();
-        let state = Arc::clone(&prewarm_state);
-        tokio::spawn(async move {
-            pool.prewarm(&scope, target, headers).await;
-            for _ in 0..100 {
-                if pool.connection_snapshot().await.prewarm > 0 {
-                    if let Ok(mut status) = state.lock() {
-                        "ready".clone_into(&mut status);
-                    }
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            if let Ok(mut status) = state.lock() {
-                "failed".clone_into(&mut status);
-            }
-        });
-    }
-
     Ok(ProxyHandle {
         endpoint,
         hybrid_pool,
         shutdown: Some(shutdown_tx),
         task,
-        prewarm_state,
+        websocket_enabled,
         model_policy,
         capability_cache,
         capability_probe,
@@ -3788,7 +3729,6 @@ data: {"type":"response.completed"}
             },
             Some(directory.path().join("policy.json")),
             None,
-            false,
         )
         .await?;
 

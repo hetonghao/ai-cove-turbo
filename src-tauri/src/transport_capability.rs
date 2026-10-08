@@ -91,16 +91,38 @@ impl CapabilityResponse {
 #[derive(Debug, Default)]
 struct CacheState {
     expires_at: Option<Instant>,
+    retry_after: Option<Instant>,
     models: Vec<String>,
     reason: Option<String>,
     refreshing: bool,
     statuses: HashMap<String, CapabilityModelStatus>,
 }
 
+impl CacheState {
+    fn effective_status(&self, status: &CapabilityModelStatus) -> CapabilityModelStatus {
+        let mut status = status.clone();
+        if self.expires_at.is_none_or(|at| Instant::now() >= at) {
+            status.transport = CapabilityTransport::HttpOnly;
+            if status.allowed {
+                "capability_expired".clone_into(&mut status.reason_code);
+            }
+        }
+        status
+    }
+}
+
 #[derive(Debug, Default)]
-pub(super) struct CapabilityCache(Mutex<CacheState>);
+pub(super) struct CapabilityCache(Mutex<CacheState>, tokio::sync::Notify);
 
 impl CapabilityCache {
+    pub(super) async fn changed(&self) {
+        self.1.notified().await;
+    }
+
+    pub(super) fn notify_changed(&self) {
+        self.1.notify_waiters();
+    }
+
     #[cfg(test)]
     pub(super) fn load(path: &Path) -> Self {
         Self::load_for_scope(path, "")
@@ -151,6 +173,9 @@ impl CapabilityCache {
         state.refreshing = false;
         state.expires_at = Some(Instant::now() + ttl);
         state.reason = None;
+        state.retry_after = None;
+        drop(state);
+        self.notify_changed();
     }
 
     pub(super) fn needs_refresh(&self, models: &[String]) -> bool {
@@ -175,7 +200,12 @@ impl CapabilityCache {
     }
 
     pub(super) fn statuses(&self) -> HashMap<String, CapabilityModelStatus> {
-        lock(&self.0).statuses.clone()
+        let state = lock(&self.0);
+        state
+            .statuses
+            .iter()
+            .map(|(model, status)| (model.clone(), state.effective_status(status)))
+            .collect()
     }
 
     pub(super) fn reason(&self) -> Option<String> {
@@ -192,16 +222,10 @@ impl CapabilityCache {
 
     pub(super) fn known_transport_for(&self, model: &str) -> Option<CapabilityTransport> {
         let state = lock(&self.0);
-        let expired = state
-            .expires_at
-            .is_none_or(|expires_at| Instant::now() >= expires_at);
-        state.statuses.get(model).map(|status| {
-            if expired && status.transport == CapabilityTransport::WebSocket {
-                CapabilityTransport::HttpOnly
-            } else {
-                status.transport
-            }
-        })
+        state
+            .statuses
+            .get(model)
+            .map(|status| state.effective_status(status).transport)
     }
 
     pub(super) fn snapshot_response(&self) -> CapabilityResponse {
@@ -234,7 +258,7 @@ impl CapabilityCache {
 
     pub(super) fn begin_refresh(&self) -> bool {
         let mut state = lock(&self.0);
-        if state.refreshing {
+        if state.refreshing || state.retry_after.is_some_and(|at| Instant::now() < at) {
             return false;
         }
         state.refreshing = true;
@@ -246,7 +270,7 @@ impl CapabilityCache {
         state.refreshing = false;
         state.reason = reason;
         if state.reason.is_some() {
-            state.expires_at = Some(Instant::now() + Duration::from_secs(5));
+            state.retry_after = Some(Instant::now() + Duration::from_secs(5));
         }
     }
 
@@ -267,6 +291,8 @@ impl CapabilityCache {
             },
         );
         state.expires_at = Some(Instant::now() + CAPABILITY_TTL);
+        drop(state);
+        self.notify_changed();
     }
 }
 
@@ -398,6 +424,22 @@ mod tests {
     };
     use std::{error::Error, fs, time::Duration};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn failed_refresh_never_revives_expired_websocket_capability() {
+        let cache = CapabilityCache::default();
+        cache.set_for_test("gpt-ws", super::CapabilityTransport::WebSocket);
+        cache.expire_for_test();
+        cache.mark_attempt(&["gpt-ws".to_owned()], Some("request_failed".to_owned()));
+        assert_eq!(
+            cache.known_transport_for("gpt-ws"),
+            Some(super::CapabilityTransport::HttpOnly)
+        );
+        let status = cache.statuses().remove("gpt-ws").expect("known model");
+        assert_eq!(status.transport, super::CapabilityTransport::HttpOnly);
+        assert_eq!(status.reason_code, "capability_expired");
+        assert!(!cache.begin_refresh(), "failed refresh must back off");
+    }
 
     #[tokio::test]
     async fn root_upstream_reaches_v1_capability_endpoint() -> Result<(), Box<dyn Error>> {

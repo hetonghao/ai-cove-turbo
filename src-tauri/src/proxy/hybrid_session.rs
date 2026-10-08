@@ -48,8 +48,6 @@ pub(super) struct Session {
     pub(super) capture_deepseek_tool_calls: bool,
     pub(super) pending_http_continuation: Option<PendingHttpContinuation>,
     pub(super) last_http_continuation: Option<HttpContinuation>,
-    pub(super) response_started: bool,
-    pub(super) drain_reconnect_pending: bool,
     pub(super) policy: ModelPolicy,
 }
 
@@ -92,8 +90,6 @@ impl Session {
             capture_deepseek_tool_calls: false,
             pending_http_continuation: None,
             last_http_continuation: None,
-            response_started: false,
-            drain_reconnect_pending: false,
             policy,
         }
     }
@@ -258,14 +254,41 @@ impl Session {
         self.state.capability_probe.refresh(&models);
     }
 
-    pub(super) fn auto_uses_http(&self, payload: &[u8]) -> bool {
-        let Some(model) = ModelPolicy::model_from_payload(payload) else {
-            return self.is_ai_cove_upstream();
-        };
-        if let Some(transport) = self.state.capability_cache.known_transport_for(&model) {
-            return transport == super::super::transport_capability::CapabilityTransport::HttpOnly;
+    pub(super) fn current_model_requires_http(&self) -> bool {
+        let model = self
+            .request_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.model.as_deref());
+        self.state.model_policy.reload().transport_for(model)
+            == super::super::model_policy::Transport::Http
+            || self.capability_requires_http(model)
+    }
+
+    pub(super) async fn release_idle_websocket(&mut self) {
+        if let Some(mut lease) = self.ready.take() {
+            lease.release().await;
         }
-        self.is_ai_cove_upstream()
+        self.connection_id = None;
+    }
+
+    pub(super) fn auto_uses_http(&self, payload: &[u8]) -> bool {
+        self.capability_requires_http(ModelPolicy::model_from_payload(payload).as_deref())
+    }
+
+    fn capability_requires_http(&self, model: Option<&str>) -> bool {
+        !self
+            .state
+            .websocket_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || model
+                .and_then(|model| self.state.capability_cache.known_transport_for(model))
+                .map_or_else(
+                    || self.is_ai_cove_upstream(),
+                    |transport| {
+                        transport
+                            == super::super::transport_capability::CapabilityTransport::HttpOnly
+                    },
+                )
     }
 
     fn is_ai_cove_upstream(&self) -> bool {

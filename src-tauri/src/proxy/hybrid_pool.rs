@@ -58,9 +58,6 @@ mod scope_tests;
 mod resource_truth_tests;
 
 const MAX_POOL_CONNECTIONS: usize = 100;
-const MAX_PREWARM_CONNECTIONS: usize = 6;
-const MIN_PREWARM_CONNECTIONS: usize = 1;
-const ACTIVE_CONNECTIONS_PER_PREWARM_REDUCTION: usize = 5;
 pub(super) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 pub(super) const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const CHECKOUT_REPLACEMENT_WAIT: Duration = Duration::from_secs(2);
@@ -91,7 +88,6 @@ struct PoolState {
     handoffs: Vec<ParkedConnection>,
     next_closed_id: u64,
     recent_closed: std::collections::VecDeque<ClosedRecord>,
-    bootstrap_scopes: HashSet<HybridScope>,
 }
 
 pub(super) struct ScopeBackend {
@@ -100,6 +96,7 @@ pub(super) struct ScopeBackend {
     diagnostics: ScopeDiagnostics,
     initialized: bool,
     active_local: usize,
+    waiting: HashSet<u64>,
     leased: HashMap<u64, ConnectionLease>,
     connecting: usize,
     probing: usize,
@@ -125,6 +122,7 @@ impl ScopeBackend {
     }
 
     fn insert_lease(&mut self, session_id: u64, connection: &PoolConnection) {
+        self.waiting.remove(&session_id);
         self.leased.insert(
             session_id,
             ConnectionLease {
@@ -378,7 +376,7 @@ impl HybridPool {
         headers: HeaderMap,
     ) -> u64 {
         let headers = blank_connection_headers(&headers);
-        let session_id = {
+        {
             let mut state = self.inner.state.lock().await;
             let scope_fingerprint = scope.fingerprint(state.scopes.hasher());
             let entry = state
@@ -390,6 +388,7 @@ impl HybridPool {
                     diagnostics: ScopeDiagnostics::default(),
                     initialized: false,
                     active_local: 0,
+                    waiting: HashSet::new(),
                     leased: HashMap::new(),
                     connecting: 0,
                     probing: 0,
@@ -397,31 +396,29 @@ impl HybridPool {
                 });
             entry.add_active_local();
             state.register_session(scope_fingerprint)
-        };
-        self.refill(scope).await;
-        session_id
+        }
     }
 
-    pub(super) async fn prewarm(&self, scope: &HybridScope, target: Url, headers: HeaderMap) {
-        let headers = blank_connection_headers(&headers);
-        {
-            let mut state = self.inner.state.lock().await;
-            state
-                .scopes
-                .entry(scope.clone())
-                .or_insert_with(|| ScopeBackend {
-                    target,
-                    headers,
-                    diagnostics: ScopeDiagnostics::default(),
-                    initialized: false,
-                    active_local: 0,
-                    leased: HashMap::new(),
-                    connecting: 0,
-                    probing: 0,
-                    idle: Vec::new(),
-                });
-            state.bootstrap_scopes.insert(scope.clone());
+    pub(super) async fn request_connection(&self, scope: &HybridScope, session_id: u64) {
+        let mut state = self.inner.state.lock().await;
+        if !state.sessions.contains_key(&session_id) {
+            return;
         }
+        if let Some(entry) = state.scopes.get_mut(scope) {
+            if !entry.has_lease(session_id) {
+                entry.waiting.insert(session_id);
+            }
+        }
+        drop(state);
+        self.refill(scope).await;
+    }
+
+    pub(super) async fn finish_request(&self, scope: &HybridScope, session_id: u64) {
+        let mut state = self.inner.state.lock().await;
+        if let Some(entry) = state.scopes.get_mut(scope) {
+            entry.waiting.remove(&session_id);
+        }
+        drop(state);
         self.refill(scope).await;
     }
 
@@ -444,10 +441,11 @@ impl HybridPool {
             };
             let (connection_id, to_close) = {
                 entry.remove_active_local();
+                entry.waiting.remove(&session_id);
                 let connection_id = entry
                     .remove_lease(session_id)
                     .map(|lease| lease.connection_id);
-                let desired = desired_connections(entry.leased.len());
+                let desired = desired_connections(entry.leased.len() + entry.waiting.len());
                 let excess = total_connections(entry).saturating_sub(desired);
                 let close_count = excess.min(entry.idle.len());
                 let to_close = entry
@@ -467,6 +465,7 @@ impl HybridPool {
             to_close
         };
         self.close_pool_connections_detached(to_close);
+        self.inner.ready.notify_waiters();
     }
 
     pub(super) async fn checkout(
@@ -599,21 +598,6 @@ impl HybridPool {
             .is_some_and(ScopeBackend::is_initialized)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn wait_for_prewarm_for_test(&self, expected: usize) -> bool {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let notified = self.inner.ready.notified();
-                if self.connection_snapshot().await.prewarm >= expected {
-                    return;
-                }
-                notified.await;
-            }
-        })
-        .await
-        .is_ok()
-    }
-
     pub(super) async fn release_session_connection(
         &self,
         scope: &HybridScope,
@@ -633,6 +617,7 @@ impl HybridPool {
         if let Some(upstream) = upstream {
             self.close_all(vec![upstream]).await;
         }
+        self.inner.ready.notify_waiters();
     }
 
     pub(super) async fn park_session_connection(
@@ -824,19 +809,11 @@ impl HybridPool {
     }
 }
 
-const fn desired_connections(leased_connections: usize) -> usize {
-    let reduced = MAX_PREWARM_CONNECTIONS
-        .saturating_sub(leased_connections / ACTIVE_CONNECTIONS_PER_PREWARM_REDUCTION);
-    let reserve = if reduced < MIN_PREWARM_CONNECTIONS {
-        MIN_PREWARM_CONNECTIONS
-    } else {
-        reduced
-    };
-    let desired = leased_connections.saturating_add(reserve);
-    if desired > MAX_POOL_CONNECTIONS {
+const fn desired_connections(demand: usize) -> usize {
+    if demand > MAX_POOL_CONNECTIONS {
         MAX_POOL_CONNECTIONS
     } else {
-        desired
+        demand
     }
 }
 

@@ -4,8 +4,7 @@ use axum::http::HeaderMap;
 use url::Url;
 
 use super::super::{
-    HybridPool, HybridScope, PONG_TIMEOUT, PoolConnection, PoolInner, desired_connections,
-    total_connections,
+    HybridPool, HybridScope, PONG_TIMEOUT, PoolConnection, PoolInner, total_connections,
 };
 use crate::proxy::private_websocket;
 
@@ -31,7 +30,7 @@ pub(super) fn spawn_connection(inner: Arc<PoolInner>, scope: HybridScope, spec: 
                     entry.record_failure(failure);
                     (
                         entry.active_local == 0 && total_connections(entry) == 0,
-                        entry.active_local > 0,
+                        !entry.waiting.is_empty(),
                     )
                 } else {
                     (false, false)
@@ -50,23 +49,18 @@ pub(super) fn spawn_connection(inner: Arc<PoolInner>, scope: HybridScope, spec: 
         let mut upstream = Some(upstream);
         let accepted = {
             let mut state = inner.state.lock().await;
-            let global_total = state.scopes.values().map(total_connections).sum::<usize>();
-            let global_leased = state
-                .scopes
-                .values()
-                .map(|candidate| candidate.leased.len())
-                .sum::<usize>();
             let Some(entry) = state.scopes.get_mut(&scope) else {
                 return;
             };
             entry.connecting = entry.connecting.saturating_sub(1);
-            let keep = global_total <= desired_connections(global_leased)
-                && total_connections(entry) < desired_connections(entry.leased.len());
+            let keep = entry.waiting.len() > entry.idle.len() + entry.probing;
             let connection_id = keep.then(|| state.allocate_connection_id());
             let Some(entry) = state.scopes.get_mut(&scope) else {
                 return;
             };
-            if let (Some(connection_id), Some(upstream)) = (connection_id, upstream.take()) {
+            if let Some(connection_id) = connection_id
+                && let Some(upstream) = upstream.take()
+            {
                 entry.idle.push(PoolConnection {
                     id: connection_id,
                     upstream,
@@ -83,7 +77,15 @@ pub(super) fn spawn_connection(inner: Arc<PoolInner>, scope: HybridScope, spec: 
             inner.metrics.record_websocket_connected();
             inner.ready.notify_waiters();
         } else if let Some(mut upstream) = upstream {
-            let _ = tokio::time::timeout(PONG_TIMEOUT, upstream.close(None)).await;
+            let _ = tokio::time::timeout(
+                PONG_TIMEOUT,
+                upstream.close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code:
+                        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                    reason: "".into(),
+                })),
+            )
+            .await;
         }
     });
 }

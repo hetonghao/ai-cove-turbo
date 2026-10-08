@@ -69,17 +69,15 @@ async fn local_websocket_rejects_switching_codex_threads() -> io::Result<()> {
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_thread_create(&mut client, "parent-thread").await?;
     server.fixture.wait_messages(1).await?;
-    server.fixture.wait_ready(7).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
 
     send_thread_create(&mut client, "cloned-thread").await?;
     assert_eq!(next_event_type(&mut client).await?, "error");
     expect_protocol_close(&mut client).await?;
-    assert_counts(server.fixture.counts().await, 7, 1, 0);
+    assert_counts(server.fixture.counts().await, 1, 1, 0);
 
     drop(client);
     proxy.stop().await;
@@ -98,13 +96,11 @@ async fn canonical_first_request_overrides_stale_handshake_thread() -> io::Resul
     let (mut client, status) =
         connect_local_with_headers(&proxy, None, Some("stale-parent-thread"), None).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_thread_create(&mut client, "cloned-thread").await?;
     server.fixture.wait_messages(1).await?;
-    server.fixture.wait_ready(7).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts(server.fixture.counts().await, 7, 1, 0);
+    assert_counts(server.fixture.counts().await, 1, 1, 0);
 
     drop(client);
     proxy.stop().await;
@@ -122,14 +118,13 @@ async fn active_response_rejects_switching_codex_threads() -> io::Result<()> {
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_private(6).await?;
 
     send_thread_create(&mut client, "parent-thread").await?;
     server.fixture.wait_http(1).await?;
     send_thread_create(&mut client, "cloned-thread").await?;
     assert_eq!(next_event_type(&mut client).await?, "error");
     expect_protocol_close(&mut client).await?;
-    assert_counts(server.fixture.counts().await, 6, 0, 1);
+    assert_counts(server.fixture.counts().await, 1, 0, 1);
 
     server.fixture.release_http();
     for _ in 0..6 {
@@ -150,16 +145,14 @@ async fn local_websocket_keeps_same_codex_thread_across_turns() -> io::Result<()
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut client, status) = connect_local(&proxy).await?;
     assert_eq!(status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_thread_create(&mut client, "parent-thread").await?;
     server.fixture.wait_messages(1).await?;
-    server.fixture.wait_ready(7).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
     send_thread_create(&mut client, "parent-thread").await?;
     server.fixture.wait_messages(2).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts(server.fixture.counts().await, 7, 2, 0);
+    assert_counts(server.fixture.counts().await, 1, 2, 0);
 
     drop(client);
     proxy.stop().await;
@@ -188,12 +181,11 @@ async fn cancelled_response_allows_next_serial_create() -> io::Result<()> {
     server.fixture.release_http();
     send_create(&mut client).await?;
     server.fixture.wait_http(2).await?;
-    server.fixture.wait_private(6).await?;
     server.fixture.release_http();
 
     // Then: the next serial request completes once without replaying either request.
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
-    assert_counts(server.fixture.counts().await, 6, 0, 2);
+    assert_counts(server.fixture.counts().await, 1, 0, 2);
     let cancelled = metrics
         .traffic_snapshot()
         .recent_requests
@@ -224,7 +216,6 @@ async fn same_codex_thread_can_use_two_isolated_websockets_concurrently() -> io:
     let (mut second, second_status) = connect_local(&proxy).await?;
     assert_eq!(first_status, 101);
     assert_eq!(second_status, 101);
-    server.fixture.wait_ready(6).await?;
 
     let (first_send, second_send) = tokio::join!(
         send_thread_create(&mut first, "shared-thread"),
@@ -233,10 +224,9 @@ async fn same_codex_thread_can_use_two_isolated_websockets_concurrently() -> io:
     first_send?;
     second_send?;
     server.fixture.wait_messages(2).await?;
-    server.fixture.wait_ready(8).await?;
     assert_eq!(next_event_type(&mut first).await?, "response.completed");
     assert_eq!(next_event_type(&mut second).await?, "response.completed");
-    assert_counts(server.fixture.counts().await, 8, 2, 0);
+    assert_counts(server.fixture.counts().await, 2, 2, 0);
 
     drop(first);
     drop(second);
@@ -255,7 +245,6 @@ async fn same_thread_reconnect_reclaims_its_stateful_websocket() -> io::Result<(
     let (proxy, _) = start_test_proxy(&server).await?;
     let (mut first, first_status) = connect_local(&proxy).await?;
     assert_eq!(first_status, 101);
-    server.fixture.wait_ready(6).await?;
 
     send_thread_create(&mut first, "reconnecting-thread").await?;
     server.fixture.wait_messages(1).await?;
