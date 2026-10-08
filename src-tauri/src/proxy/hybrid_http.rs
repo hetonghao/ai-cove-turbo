@@ -39,7 +39,7 @@ pub(super) fn start_http_worker(
     metadata.thread_id = session.thread_id.clone().or(metadata.thread_id);
     session.state.metrics.observe_session_name_hint(&metadata);
     let task = if let Some(model) = warmup {
-        tokio::spawn(complete_local_warmup(model, event_tx))
+        tokio::spawn(complete_local_warmup(model, command_rx, event_tx))
     } else {
         let context = WorkerContext {
             state: session.state.clone(),
@@ -90,7 +90,11 @@ fn prepare_http_generation(payload: Vec<u8>) -> (Vec<u8>, Option<String>) {
     (value.to_string().into_bytes(), warmup)
 }
 
-async fn complete_local_warmup(model: String, events: mpsc::Sender<WorkerEvent>) {
+async fn complete_local_warmup(
+    model: String,
+    mut commands: mpsc::Receiver<WorkerCommand>,
+    events: mpsc::Sender<WorkerEvent>,
+) {
     static NEXT_WARMUP_ID: AtomicU64 = AtomicU64::new(1);
     let id = format!(
         "resp_turbo_warmup_{}",
@@ -107,6 +111,12 @@ async fn complete_local_warmup(model: String, events: mpsc::Sender<WorkerEvent>)
         .into_iter()
         .enumerate()
     {
+        if matches!(commands.try_recv(), Ok(WorkerCommand::Cancel(_))) {
+            let _ = events.send(WorkerEvent::Cancelled { lease: None }).await;
+            // 保持取消通道，直到会话消费终态并释放 Active。
+            while commands.recv().await.is_some() {}
+            return;
+        }
         if sequence == 1 {
             if let Some(status) = response.get_mut("status") {
                 *status = serde_json::Value::from("completed");
@@ -129,6 +139,8 @@ async fn complete_local_warmup(model: String, events: mpsc::Sender<WorkerEvent>)
             response_id: Some(id),
         })
         .await;
+    // 完成已排队，晚到的取消不能关闭本地 WS，也不能产生第二个终态。
+    while commands.recv().await.is_some() {}
 }
 
 struct WorkerContext {

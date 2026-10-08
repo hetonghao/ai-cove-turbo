@@ -259,9 +259,13 @@ impl Session {
             .request_metadata
             .as_ref()
             .and_then(|metadata| metadata.model.as_deref());
-        self.state.model_policy.reload().transport_for(model)
+        Self::model_requires_http(&self.state, model)
+    }
+
+    fn model_requires_http(state: &ProxyState, model: Option<&str>) -> bool {
+        state.model_policy.reload().transport_for(model)
             == super::super::model_policy::Transport::Http
-            || self.capability_requires_http(model)
+            || Self::capability_requires_http(state, model)
     }
 
     pub(super) async fn release_idle_websocket(&mut self) {
@@ -272,18 +276,24 @@ impl Session {
     }
 
     pub(super) fn auto_uses_http(&self, payload: &[u8]) -> bool {
-        self.capability_requires_http(ModelPolicy::model_from_payload(payload).as_deref())
+        Self::capability_requires_http(
+            &self.state,
+            ModelPolicy::model_from_payload(payload).as_deref(),
+        )
     }
 
-    fn capability_requires_http(&self, model: Option<&str>) -> bool {
-        !self
-            .state
+    fn capability_requires_http(state: &ProxyState, model: Option<&str>) -> bool {
+        !state
             .websocket_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
             || model
-                .and_then(|model| self.state.capability_cache.known_transport_for(model))
+                .and_then(|model| state.capability_cache.known_transport_for(model))
                 .map_or_else(
-                    || self.is_ai_cove_upstream(),
+                    || {
+                        state.upstream.host_str().is_some_and(|host| {
+                            host == "ai-cove.com" || host.ends_with(".ai-cove.com")
+                        })
+                    },
                     |transport| {
                         transport
                             == super::super::transport_capability::CapabilityTransport::HttpOnly
@@ -291,11 +301,16 @@ impl Session {
                 )
     }
 
-    fn is_ai_cove_upstream(&self) -> bool {
-        self.state
-            .upstream
-            .host_str()
-            .is_some_and(|host| host == "ai-cove.com" || host.ends_with(".ai-cove.com"))
+    pub(super) async fn wait_for_http_route(state: ProxyState, model: Option<String>) {
+        loop {
+            if Self::model_requires_http(&state, model.as_deref()) {
+                return;
+            }
+            tokio::select! {
+                () = state.capability_cache.changed() => {},
+                () = tokio::time::sleep(super::super::hybrid_pool::KEEPALIVE_INTERVAL) => {},
+            }
+        }
     }
 
     pub(super) async fn retire_idle_upstream(&mut self, retirement: LeaseRetirement) {
@@ -362,14 +377,20 @@ async fn cleanup(session: &mut Session, active: &mut Option<Active>) {
             session.handle.release_unleased().await;
         }
     }
-    if session.last_response_transport == Some(ResponseTransport::WebSocket)
+    if !session.current_model_requires_http()
+        && session.last_response_transport == Some(ResponseTransport::WebSocket)
         && let (Some(thread_id), Some(response_id)) = (
             session.thread_id.clone(),
             session.last_terminal_response_id.clone(),
         )
         && let Some(mut lease) = session.ready.take()
     {
-        if lease.park(thread_id, response_id).await.is_ok() {
+        let model = session
+            .request_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.model.clone());
+        let stop = Session::wait_for_http_route(session.state.clone(), model);
+        if lease.park(thread_id, response_id, stop).await.is_ok() {
             session.handle.detach_after_park();
             return;
         }

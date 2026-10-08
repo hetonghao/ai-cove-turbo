@@ -110,6 +110,7 @@ impl Lease {
         &mut self,
         thread_id: String,
         response_id: String,
+        stop: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), LeaseParkError> {
         if self.state != LeaseState::Active {
             return Ok(());
@@ -125,9 +126,9 @@ impl Lease {
             .park_session_connection(
                 &self.scope,
                 self.session_id,
-                thread_id,
-                response_id,
+                (thread_id, response_id),
                 upstream,
+                stop,
             )
             .await
         {

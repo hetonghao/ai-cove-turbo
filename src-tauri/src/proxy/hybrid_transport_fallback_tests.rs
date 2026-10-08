@@ -731,3 +731,95 @@ async fn failed_http_fallback_does_not_start_another_transport_attempt() -> io::
     server.stop().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn cancelling_local_warmup_keeps_client_session_usable() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("test", CapabilityTransport::HttpOnly);
+    let (mut client, _) = connect_local(&proxy).await?;
+    client
+        .feed(Message::Text(
+            serde_json::json!({
+                "type":"response.create", "model":"test", "input":[], "generate":false,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .map_err(io::Error::other)?;
+    client
+        .feed(Message::Text(
+            serde_json::json!({"type":"response.cancel"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .map_err(io::Error::other)?;
+    client.flush().await.map_err(io::Error::other)?;
+    loop {
+        let event = next_event_type(&mut client).await?;
+        if event == "response.completed" || event == "response.cancelled" {
+            break;
+        }
+        assert_eq!(event, "response.created");
+    }
+    assert_counts(server.fixture.counts().await, 0, 0, 0);
+    send_create(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_counts(server.fixture.counts().await, 0, 0, 1);
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_shutdown_reclaims_parked_handoff_before_expiry() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("test", CapabilityTransport::WebSocket);
+    let (mut client, _) =
+        connect_local_with_headers(&proxy, None, Some("parked-thread"), None).await?;
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type":"response.create", "model":"test", "input":"test",
+                "client_metadata":{"thread_id":"parked-thread"},
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .map_err(io::Error::other)?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    client.close(None).await.map_err(io::Error::other)?;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(30),
+            server.fixture.wait_normal_closes(1)
+        )
+        .await
+        .is_err()
+    );
+    proxy.set_capability_for_test("test", CapabilityTransport::HttpOnly);
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        server.fixture.wait_normal_closes(1),
+    )
+    .await
+    .map_err(io::Error::other)??;
+    assert_eq!(proxy.connection_snapshot().await.current_connections, 0);
+    assert_counts(server.fixture.counts().await, 1, 1, 0);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}

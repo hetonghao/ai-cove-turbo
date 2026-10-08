@@ -624,9 +624,9 @@ impl HybridPool {
         &self,
         scope: &HybridScope,
         session_id: u64,
-        thread_id: String,
-        response_id: String,
+        (thread_id, response_id): (String, String),
         upstream: PrivateUpstream,
+        stop: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), PrivateUpstream> {
         let connection_id = {
             let mut state = self.inner.state.lock().await;
@@ -662,7 +662,10 @@ impl HybridPool {
         self.inner.ready.notify_waiters();
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
-            tokio::time::sleep(HANDOFF_WINDOW).await;
+            tokio::select! {
+                () = tokio::time::sleep(HANDOFF_WINDOW) => {},
+                () = stop => {},
+            }
             if let Some(inner) = inner.upgrade() {
                 Self { inner }
                     .expire_handoff(session_id, connection_id)

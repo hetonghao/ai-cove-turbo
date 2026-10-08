@@ -44,8 +44,13 @@ impl SessionHandle {
 
     #[cfg(test)]
     pub(in crate::proxy) async fn checkout(&self) -> Option<Lease> {
-        self.checkout_with(|| self.pool.checkout(&self.scope, self.session_id))
-            .await
+        self.checkout_with(|| async {
+            self.pool
+                .request_connection(&self.scope, self.session_id)
+                .await;
+            self.pool.checkout(&self.scope, self.session_id).await
+        })
+        .await
     }
 
     pub(in crate::proxy) async fn checkout_wait(&self, wait: Duration) -> Option<Lease> {
@@ -61,7 +66,10 @@ impl SessionHandle {
             tokio::select! {
                 biased;
                 () = stop => None,
-                upstream = self.pool.checkout_wait(&self.scope, self.session_id, wait) => upstream,
+                upstream = async {
+                    self.pool.request_connection(&self.scope, self.session_id).await;
+                    self.pool.checkout_wait(&self.scope, self.session_id, wait).await
+                } => upstream,
             }
         })
         .await
@@ -87,9 +95,6 @@ impl SessionHandle {
             Arc::clone(&self.lease_active),
         );
         guard.set_waiting(true);
-        self.pool
-            .request_connection(&self.scope, self.session_id)
-            .await;
         if let Some(upstream) = checkout().await {
             // 先交给守卫，再等待需求清理；取消不能留下已分配的租约。
             guard.set_upstream(upstream);

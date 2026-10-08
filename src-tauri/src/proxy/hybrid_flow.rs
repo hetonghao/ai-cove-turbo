@@ -332,14 +332,11 @@ async fn checkout_handoff_websocket(session: &mut Session, previous_response_id:
 
 async fn checkout_response_websocket(session: &mut Session) {
     if session.ready.is_none() {
-        let stop = async {
-            loop {
-                if session.current_model_requires_http() {
-                    return;
-                }
-                session.state.capability_cache.changed().await;
-            }
-        };
+        let model = session
+            .request_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.model.clone());
+        let stop = Session::wait_for_http_route(session.state.clone(), model);
         let ready = session
             .handle
             .checkout_wait_until(Duration::from_secs(2), stop)

@@ -361,7 +361,11 @@ async fn typed_lease_terminal_transitions_are_idempotent() -> io::Result<()> {
         Lease::active_without_upstream(pool, scope, 2, Arc::clone(&owner_active));
     assert!(
         park_without_connection
-            .park("thread-1".to_owned(), "response-1".to_owned())
+            .park(
+                "thread-1".to_owned(),
+                "response-1".to_owned(),
+                std::future::pending()
+            )
             .await
             .is_err()
     );
@@ -400,5 +404,34 @@ fn scope_backend_keeps_local_state_under_shared_capacity_cap() -> io::Result<()>
     assert_eq!(second.probing, 1);
     assert_eq!(total_connections(&second), 1);
     assert_eq!(MAX_POOL_CONNECTIONS, 100);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopped_checkout_never_opens_an_upstream_socket() -> io::Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let target = Url::parse(&format!("http://{}/v1/responses", listener.local_addr()?))
+        .map_err(io::Error::other)?;
+    let scope = HybridScope::new(&target, &HeaderMap::new());
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth();
+    let pool = HybridPool::new(
+        PrivateTlsConfig::new(Arc::new(tls_config)),
+        Arc::new(Metrics::default()),
+    );
+    let session = pool.open_session(&scope, target, HeaderMap::new()).await;
+    assert!(
+        session
+            .checkout_wait_until(Duration::from_secs(1), std::future::ready(()))
+            .await
+            .is_none()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err()
+    );
+    session.close().await;
     Ok(())
 }
