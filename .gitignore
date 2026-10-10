@@ -6,3 +6,7 @@ src-tauri/target/
 src-tauri/gen/
 desktop-release/
 graphify-out/
+
+# AOCI agent host integration (machine-bound; do not commit)
+.codex/config.toml
+.codex/config.toml.backup.*

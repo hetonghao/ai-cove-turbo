@@ -1,0 +1,243 @@
+#AOCI-CODE-VOLUME: 1
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/===
+.gitattributes[FG4T]: F:统一文本检出为LF，保证AOCI原始字节基线跨平台稳定 | R:- | A:- | S:二进制由Git自动识别，不改写字节
+.gitignore[FV4T]: F:排除构建产物、图谱与机器绑定Codex配置 | R:- | A:- | S:根认知资产不在忽略集合
+AGENTS.md[SQ7S]: F:约束Turbo运行进程保护、隔离构建清理与AOCI治理 | R:- | A:- | S:现有Turbo不能停止或重启；新实例须先证明资源隔离
+CONTEXT.md[SG8T]: F:定义Turbo配置接管、连接租约、真实验证与恢复的领域术语 | R:code:src-tauri/src/config.rs,code:src-tauri/src/runtime.rs | A:- | S:配置写入不等于生效；外部字段修改取得所有权
+DESIGN.md[SU7T]: F:规定桌面三页、模型目录和连接检查器的视觉及交互契约 | R:code:src/index.html,code:src/app.js,code:src/styles.css | A:- | S:真实测量与基准估算分开；关闭设置窗口不退出服务
+THIRD_PARTY_NOTICES.md[SV5T]: F:记录Strands来源与第三方许可证条件 | R:code:src/strands.js | A:- | S:可嵌入产品但不能单独售卖或再分发组件
+clippy.toml[FQ4T]: F:设置Rust静态检查复杂度阈值与测试豁免 | R:- | A:- | S:-
+package-lock.json[FV4M]: F:锁定Tauri命令行工具及各平台可选安装包版本 | R:code:package.json | A:- | S:-
+package.json[FV6T]: F:提供桌面构建测试、原型预览及显式公网基准入口 | R:code:src-tauri/Cargo.toml,code:scripts/desktop-release.mjs | A:npm scripts | S:check和test包含Rust编译；benchmark显式运行ignored用例
+rust-toolchain.toml[FV4T]: F:选用stable Rust及最小rustfmt和Clippy组件 | R:- | A:- | S:-
+rustfmt.toml[FQ4T]: F:规定Rust2024、Unix换行及导入整理的格式 | R:- | A:- | S:-
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/.github/workflows/===
+desktop-release.yml[OV8S]: F:双平台原生构建、签名并汇总Turbo更新与安装产物 | R:code:scripts/desktop-release.mjs,code:package.json | A:workflow_dispatch；turbo-v标签推送 | S:私钥由Actions Secrets注入；Artifacts不是正式更新源
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/docs/adr/===
+0001-tauri-rust-native-core.md[SG5T]: F:记录Tauri2与Rust原生核心的架构选择 | R:code:src-tauri/Cargo.toml | A:- | S:Windows依赖WebView2
+0002-reuse-tauri-update-release-pipeline.md[SV5T]: F:记录复用Tauri签名更新及双端发布流程的决策 | R:code:.github/workflows/desktop-release.yml | A:- | S:Turbo独立签名密钥，不复制Node sidecar
+0003-publish-signed-updates-from-ai-cove.md[SV6T]: F:界定正式AI Cove静态签名更新源与Actions构建交付 | R:code:src-tauri/tauri.conf.json | A:- | S:Actions产物只供交付备份，不能当客户端更新源
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/docs/release/===
+DESKTOP_RELEASE.md[SV7T]: F:描述双平台签名构建、下载产物与WebSocket上线门禁 | R:code:.github/workflows/desktop-release.yml,code:scripts/desktop-release.mjs | A:- | S:线上用例显式忽略且需凭据授权；文内版本为历史快照
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/docs/specs/===
+2026-08-03-ai-cove-turbo-mvp.md[SB7S]: F:定义本机Codex请求加速桌面MVP及安全验收范围 | R:code:CONTEXT.md,code:src-tauri/src/config.rs | A:- | S:只接管根选中Provider；不保存正文、密钥或历史数据库
+2026-10-08-ws-on-demand.md[SN7T]: F:限定WS按需连接、HTTP本地预热与有效能力一致性 | R:code:src-tauri/src/proxy/hybrid_http.rs,code:src-tauri/src/proxy/hybrid_pool.rs | A:- | S:禁止重放已提交请求；不按能力改写Provider全局WS偏好
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/docs/verification/===
+2026-08-03-websocket-live.md[TN5T]: F:记录真实认证Upgrade及隔离Codex请求的历史验收 | R:code:src-tauri/src/proxy.rs | A:- | S:101不证明扩展压缩协商；不修改用户Codex配置
+2026-08-04-three-by-three-fair-benchmark.md[SP6T]: F:记录冷启动生命周期公平的三路径三负载基准 | R:code:src-tauri/src/benchmark/live.rs | A:- | S:暖请求收益不等于总E2E稳定胜出
+2026-08-04-three-path-benchmark.md[SP4M]: F:归档被公平三乘三基准取代的旧性能测量 | R:code:docs/verification/2026-08-04-three-by-three-fair-benchmark.md | A:- | S:旧HTTP与WS生命周期不公平，数据不能再用于产品路径判断
+2026-08-04-ui-ux-critique.md[SU5T]: F:记录桌面窗口、状态链路和指标语义的历史UI评审 | R:code:DESIGN.md,code:src/app.js | A:- | S:调整已确认视觉基线的建议需同步产品契约
+2026-08-06-downstream-zstd-research.md[SN6T]: F:分析私有WS和HTTP流式下行压缩的证据与验证门槛 | R:code:src-tauri/src/proxy/private_websocket/codec.rs | A:- | S:增加响应头前须证明流式解码不聚合事件
+2026-08-10-real-workload-calibration.md[SP7T]: F:规定匿名历史分布与机制基准合成候选收益常量的方法 | R:code:src-tauri/src/benchmark/calibration.rs | A:- | S:公网基准产生付费请求需授权；历史差异不可全归因Turbo
+2026-08-10-workload-profile.example.json[FP4S]: F:提供匿名分桶历史与当前流量profile的完整样例 | R:code:src-tauri/src/benchmark/calibration.rs | A:- | S:-
+2026-08-13-turbo-speed-candidate.json[SP5T]: F:保存未应用的实测候选常量、匹配覆盖与机制证据 | R:code:docs/verification/2026-08-10-real-workload-calibration.md | A:- | S:完整耗时收益未达标而保留旧常量；并非已发布配置
+2026-09-17-hybrid-http-stream-end.md[SN6S]: F:分析Hybrid正常终态导致Gateway误记client_gone的时序 | R:code:src-tauri/src/proxy/hybrid_http.rs | A:- | S:终态后断开与终态前取消须区别；不可一律忽略client_gone
+2026-10-08-ws-on-demand.md[TQ6T]: F:记录WS按需连接改动的验证、既有失败和交付边界 | R:code:docs/specs/2026-10-08-ws-on-demand.md | A:- | S:历史验证含既有Skills失败与Clippy问题，未发布或重启
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/prototype/===
+DESIGN.md[SU5T]: F:约束一次性原型的三页布局、状态和键盘交互 | R:code:prototype/app.js,code:prototype/styles.css | A:- | S:数据和系统动作仅内存模拟，速度占位不可当实测
+app.js[AU5L]: F:驱动三页原型Tab、状态开关、模拟请求与滚动统计 | R:code:prototype/index.html,code:prototype/styles.css | A:DOMContentLoaded | S:不操作真实配置或进程；只保留100条模拟请求
+index.html[EU4S]: F:提供模拟实时、统计与配置三页原型结构 | R:code:prototype/app.js,code:prototype/styles.css | A:- | S:-
+server.mjs[XN6S]: F:在回环地址提供安全路径解析的无缓存静态原型服务器 | R:code:package.json | A:PORT或位置参数 | S:拒绝越过原型根目录的路径，不绑定公网
+styles.css[FU4L]: F:实现三页原型共用令牌、状态控制台及响应式样式 | R:code:prototype/index.html | A:- | S:-
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/prototype/home-download/===
+DESIGN.md[SU4T]: F:限定首页下载入口三种一次性布局比较与可访问反馈 | R:code:prototype/home-download/app.js | A:- | S:下载、签名及安装均未接入
+app.js[AU5S]: F:切换三种首页下载方案并模拟下载、展开与键盘反馈 | R:code:prototype/home-download/index.html | A:点击、方向键、popstate | S:下载被拦截为原型说明
+index.html[EU4M]: F:承载首页双应用下载模块三方案和ARIA面板 | R:code:prototype/home-download/app.js,code:prototype/home-download/styles.css | A:- | S:-
+qa-metrics.json[TQ4L]: F:保存三方案多视口的ARIA、可见性与布局测量快照 | R:code:prototype/home-download/index.html | A:- | S:只代表采集时的原型状态
+styles.css[FU4L]: F:实现首页嵌入下载模块的浅色令牌、变体和响应式布局 | R:code:prototype/home-download/index.html | A:- | S:减少动态偏好关闭非必要动效
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/prototype/model-catalog/===
+app.js[AU5S]: F:比较三种紧凑模型候选布局并模拟可见性和传输策略 | R:code:prototype/model-catalog/index.html | A:点击、键盘 | S:候选仅保存在当前页面内存
+index.html[EU4T]: F:提供模型目录原型外壳、布局切换和模型容器 | R:code:prototype/model-catalog/app.js,code:prototype/model-catalog/styles.css | A:- | S:-
+styles.css[FU4M]: F:定义模型目录三种密度布局、窄屏及焦点样式 | R:code:prototype/model-catalog/index.html | A:- | S:-
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/prototype/update-check/===
+app.js[AU5M]: F:模拟每日更新检查、忽略与品牌Tilt气泡及安装跳转 | R:code:prototype/update-check/index.html | A:点击、URL day | S:检查与安装均为计时器模拟
+index.html[EU4S]: F:承载每日更新提示原型、状态检查器和模拟更新页 | R:code:prototype/update-check/app.js,code:prototype/update-check/styles.css | A:- | S:-
+styles.css[FU4T]: F:提供更新提示气泡倾斜、尾角和页面布局样式 | R:code:prototype/update-check/index.html | A:- | S:-
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/prototype/update-progress/===
+app.js[AU5S]: F:切换三种进度设计与下载、验证、安装状态fixture | R:code:prototype/update-progress/index.html | A:variant和scenario参数 | S:不执行真实下载或应用替换
+index.html[EU4S]: F:展示更新进度三种方案和模拟场景控件 | R:code:prototype/update-progress/app.js,code:prototype/update-progress/styles.css | A:- | S:-
+styles.css[FU4L]: F:定义更新进度轨、迁移带和阶段流水线布局 | R:code:prototype/update-progress/index.html | A:- | S:-
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/prototype/ws-connections-panel/===
+app.js[AU5L]: F:模拟连接检查器四方案及会话连接密度和恢复倒计时 | R:code:prototype/ws-connections-panel/index.html | A:connectionDensity；面板事件 | S:不读取业务连接，所有场景为fixture
+index.html[EU4T]: F:承载WebSocket连接面板原型与四方案切换入口 | R:code:prototype/ws-connections-panel/app.js,code:prototype/ws-connections-panel/styles.css | A:- | S:-
+styles.css[FU4M]: F:实现连接面板抽屉、泳道和双列会话密度视觉 | R:code:prototype/ws-connections-panel/index.html | A:- | S:原型最小宽920px，不代表正式窄屏支持
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/scripts/===
+desktop-release.mjs[OV8M]: F:构建或汇总签名桌面更新产物并校验清单和文件对应 | R:code:src-tauri/tauri.conf.json,code:.github/workflows/desktop-release.yml | A:assemble-ci；validate；buildLocalRelease | S:汇总先清空输出目录；仅核对签名文本一致不做密码学验证
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/===
+Cargo.lock[FV5L]: F:冻结Rust桌面、网络和压缩依赖的完整解析版本 | R:code:src-tauri/Cargo.toml | A:- | S:基准默认长输入取锁文件固定片段并绑定指纹
+Cargo.toml[FV7T]: F:声明Turbo Rust包、Tauri网络依赖和严格编译检查策略 | R:code:src-tauri/Cargo.lock,code:src-tauri/build.rs | A:cargo包配置 | S:release功能使用Tauri自定义协议；unsafe需显式块
+build.rs[EV4T]: F:调用Tauri构建期配置生成器 | R:code:src-tauri/Cargo.toml | A:main | S:-
+tauri.conf.json[FV7T]: F:定义桌面标识、隐藏窗口、打包图标和签名更新端点 | R:code:src-tauri/src/lib.rs,code:.github/workflows/desktop-release.yml | A:- | S:开发默认不产updater，公钥为空须构建注入；主窗口初始不可见
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/capabilities/===
+main.json[FS6T]: F:仅向主窗口授权基础Tauri与拖拽命令能力 | R:code:src-tauri/tauri.conf.json | A:- | S:能力绑定main窗口
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/icons/===
+tray-template-v3.svg[FU3T]: F:保留第三版黑色托盘轮廓SVG素材 | R:- | A:- | S:-
+tray-template-v4.svg[FU3T]: F:提供第四版涡轮托盘图标的单色矢量结构 | R:- | A:- | S:-
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/===
+benchmark.rs[AP6M]: F:定义四路基准样本、终态识别、响应ID续传与指标差分 | R:code:src-tauri/src/benchmark/live.rs,code:src-tauri/src/benchmark/report.rs | A:- | S:Responses终态由completed或done判断，不能以DONE替代
+catalog.rs[AD8L]: F:接管固定Codex模型目录并同步根目录、用户模型及恢复所有权 | R:code:src-tauri/src/catalog_storage.rs,code:src-tauri/src/catalog_types.rs | A:ensure_catalog；sync_catalog；preview_catalog_models | S:指针所有权和预期摘要不匹配拒绝；重接管不覆盖用户新增模型
+catalog_diff.rs[KD5S]: F:按slug比较模型字段并生成目录变化明细 | R:code:src-tauri/src/catalog.rs | A:diff_models；models_document | S:-
+catalog_discovery.rs[IN7M]: F:以当前密钥从HTTPS模型端点发现候选及字段来源 | R:code:src-tauri/src/catalog.rs | A:fetch | S:8秒超时，仅透传Authorization，不携带Cookie和其他密钥头
+catalog_storage.rs[PD7L]: F:原子保存目录及元数据并读写Codex模型目录指针 | R:code:src-tauri/src/catalog.rs,code:src-tauri/src/catalog_diff.rs | A:write_atomic；parse_models | S:同目录临时文件sync后替换并保留原权限
+catalog_types.rs[DD6L]: F:定义模型能力、字段来源、目录状态和所有权恢复契约 | R:code:src-tauri/src/catalog.rs | A:CatalogModel::validate_complete | S:缺失输入模态默认text加image，写成仅text会拒绝拖图
+codex_auth.rs[IS7M]: F:解析当前Provider凭据并应用显式转发密钥覆盖 | R:code:src-tauri/src/proxy.rs,code:src-tauri/src/config.rs | A:effective_auth_headers；persist_api_key | S:未设覆盖保持Authorization透传；OAuth不能伪造Bearer密钥
+codex_desktop_windows.rs[IH6T]: F:精准识别Windows Codex桌面可执行文件并定位主进程 | R:code:src-tauri/src/windows_process.rs | A:is_codex_desktop_image；main_process_id | S:CLI和内置资源目录codex.exe排除
+codex_thread_title.rs[ID6M]: F:通过只读sqlite CLI批量获取Codex会话名称与父会话信息 | R:code:src-tauri/src/session_names.rs | A:read；read_batch | S:仅接受UUID；名称来自name或子代理昵称而非首条title
+codex_thread_title_tests.rs[TI5S]: F:验证会话UUID边界、只读CLI参数和批量结果映射 | R:code:src-tauri/src/codex_thread_title.rs | A:- | S:-
+config.rs[AC9L]: F:验证Codex根Provider并按字段所有权接管、恢复端点与WS配置 | R:code:src-tauri/src/runtime.rs | A:preflight；take_over；restore | S:先写恢复记录再改配置；外部修改字段不恢复；只允许回环受管端点
+lib.rs[EG8L]: F:装配Tauri托盘、运行时及前端命令并管理签名更新和退出 | R:code:src-tauri/src/runtime.rs,code:src-tauri/tauri.conf.json | A:run；Tauri commands | S:关闭窗口隐藏；恢复失败阻止退出并显示窗口
+main.rs[EG6T]: F:启动Turbo桌面原生核心 | R:code:src-tauri/src/lib.rs | A:main | S:Windows release隐藏控制台
+model_policy.rs[PC7M]: F:加载并原子保存精确模型的auto或HTTP传输策略 | R:code:src-tauri/src/proxy.rs | A:ModelPolicyStore::reload；update | S:坏文件保留最后有效快照；文件删除回到内置auto
+proxy.rs[EN9L]: F:提供本机HTTP与WS请求转发、压缩、能力缓存和真实指标 | R:code:src-tauri/src/proxy/hybrid.rs,code:src-tauri/src/proxy/private_websocket.rs,code:src-tauri/src/transport_capability.rs | A:start_proxy；Metrics::snapshot | S:仅回环监听；请求上限128MiB；压缩仅对合格JSON且更小时启用
+runtime.rs[AG9L]: F:编排配置接管、代理、模型联合保存、偏好与安全退出 | R:code:src-tauri/src/config.rs,code:src-tauri/src/catalog.rs,code:src-tauri/src/proxy.rs | A:AppRuntime::initialize；status；shutdown | S:监听成功再接管；联合写入journal按摘要恢复；外部冲突不覆盖；只重启桌面应用
+session_name_state.rs[DD6S]: F:管理会话名称批量资格、失败退避和缓存清理状态 | R:code:src-tauri/src/session_names.rs | A:SessionNameState::select_due；apply_result | S:每批128且最小60秒，失败1/5/10分后第4次耗尽
+session_names.rs[AD7M]: F:后台批量读取活跃Codex会话名并接收暂时提示 | R:code:src-tauri/src/codex_thread_title.rs,code:src-tauri/src/session_name_state.rs | A:SessionNameCache | S:批次3秒超时；20分钟刷新；请求可见名保留而无连接停止刷新
+session_names_tests.rs[TD5M]: F:验证名称查询退避、批次守卫、暂名与资源清理 | R:code:src-tauri/src/session_names.rs | A:- | S:仅实际查询条目消耗重试次数
+skills.rs[AE8L]: F:提供官方技能状态、安装更新和备份卸载的桌面入口 | R:code:src-tauri/src/skills_catalog.rs,code:src-tauri/src/skills_install.rs | A:SkillsManager::status；install；uninstall | S:目录缓存5分钟；stale不能用于未经刷新安装；锁覆盖修改操作
+skills_catalog.rs[IE9L]: F:获取并校验技能目录、manifest和归档或逐文件内容 | R:code:src-tauri/src/skills_install.rs | A:CatalogClient::load；download_files | S:禁止跨源和重定向逃逸；校验hash、size和声明路径；总32MiB至多256文件
+skills_install.rs[PE9L]: F:以锁、摘要复检、journal和备份执行技能安装及卸载恢复 | R:code:src-tauri/src/skills.rs | A:install_staged；uninstall；recover_pending | S:拒绝符号链接和版本降级；修改目录需确认；卸载移动到备份而非删除
+skills_tests.rs[TE8L]: F:验证技能网络完整性、路径防护、事务恢复和本地冲突 | R:code:src-tauri/src/skills.rs,code:src-tauri/src/skills_catalog.rs,code:src-tauri/src/skills_install.rs | A:- | S:真实Imagine fixture含固定版本断言，历史记录已有漂移失败
+transport_ack_benchmark.rs[TN7M]: F:约束transport ACK六字段协议及压缩字节相关验收 | R:code:src-tauri/src/transport_ack_benchmark/live.rs | A:parse_ack；ack_url；validate_ack | S:默认仅回环；生产必须显式允许且精确AI Cove端点
+transport_capability.rs[PC8L]: F:解析并按认证作用域缓存、持久化和刷新模型传输能力 | R:code:src-tauri/src/proxy/hybrid_flow.rs,code:src-tauri/src/runtime.rs | A:CapabilityCache；fetch_batch | S:TTL5分钟，失败退避不能延长能力；过期降HTTP，新快照整体替换
+windows_process.rs[IH7S]: F:通过Windows进程快照和真实映像路径识别Codex桌面 | R:code:src-tauri/src/codex_desktop_windows.rs | A:codex_desktop_process_id；hidden_command | S:只查询有限权限，RAII关闭句柄，不依名称批量操作CLI
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/benchmark/===
+calibration.rs[KP7L]: F:严格解析匿名工作分布并计算历史匹配和候选常量 | R:code:src-tauri/src/benchmark/stability.rs,code:docs/verification/2026-08-10-real-workload-calibration.md | A:generate_candidate_artifacts | S:拒绝未知字段；低覆盖或不足历史不生成候选，不自动应用
+live.rs[AP6M]: F:组织直连、HTTP、私有WS和Hybrid样本的连接生命周期 | R:code:src-tauri/src/benchmark/live/http.rs,code:src-tauri/src/benchmark/live/websocket.rs | A:- | S:临时上游错误仅完整重试一次并标记，不混入干净样本
+report.rs[KP6L]: F:汇总有效样本的耗时、真实字节与连接生命周期范围 | R:code:src-tauri/src/benchmark/report/render.rs,code:src-tauri/src/benchmark/report/artifact.rs | A:case_report | S:重试恢复样本分开披露；Hybrid按实际传输拆轮次
+settings.rs[FP6S]: F:解析基准环境参数并生成带指纹固定工作负载 | R:code:src-tauri/src/benchmark/live.rs | A:BenchmarkSettings::from_env | S:runs须为4的正整数倍；长输入取Cargo.lock固定片段
+stability.rs[KP6S]: F:验证干净样本数并计算前后半方向一致的配对收益 | R:code:src-tauri/src/benchmark/calibration.rs | A:paired_savings | S:至少8对无重试样本，任一半负收益不合格
+tests.rs[TP5S]: F:验证基准摘要、终态、续传payload与四路轮转条件 | R:code:src-tauri/src/benchmark.rs,code:src-tauri/src/benchmark/settings.rs | A:- | S:-
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/benchmark/live/===
+collection.rs[AP5S]: F:轮转采样并隔离失败路径及压缩验收 | R:code:src-tauri/src/benchmark/live.rs | A:collect_scenario | S:压缩门禁只使用无重试样本
+connection_tests.rs[TP5M]: F:验证常驻HTTP连接复用、重试和失败上下文报告 | R:code:src-tauri/src/benchmark/live.rs | A:- | S:使用回环临时上游
+http.rs[IN6L]: F:发送HTTP续传轮次并流式测量SSE首事件和终态 | R:code:src-tauri/src/benchmark.rs | A:collect_sample | S:续传轮次需要response.id；429和5xx标为可重试基准失败
+runner.rs[TP6M]: F:显式执行付费四路径与Hybrid生命周期公网门禁 | R:code:src-tauri/src/benchmark/live.rs,code:src-tauri/src/benchmark/calibration.rs | A:ignored测试 | S:profile和candidate输出必须成对配置
+websocket.rs[IN6L]: F:采样私有WS和Hybrid续传、首事件及真实连接资源计数 | R:code:src-tauri/src/benchmark/live.rs | A:collect_sample | S:只按应用帧计首事件，控制帧不算模型响应
+websocket_tests.rs[TN5M]: F:验证WS基准终态、错误分类、续传链和资源计数 | R:code:src-tauri/src/benchmark/live/websocket.rs | A:- | S:-
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/benchmark/report/===
+artifact.rs[AP6S]: F:按需输出版本化性能artifact并裁定回归 | R:code:src-tauri/src/benchmark/report/artifact/compare.rs,code:src-tauri/src/benchmark/report/artifact/metrics.rs | A:TURBO_METRICS_OUT | S:无外部基线时采用直连路径作基准；不含正文凭据
+artifact_tests.rs[TP4T]: F:提供性能artifact测试共用固定样本与设置 | R:code:src-tauri/src/benchmark/report/artifact.rs | A:- | S:-
+artifact_tests_comparison.rs[TP5S]: F:验证耗时、字节和连接回归及不可比较条件 | R:code:src-tauri/src/benchmark/report/artifact/compare.rs | A:- | S:-
+artifact_tests_shape.rs[TP5S]: F:验证artifact版本结构、真实压缩字段和隐私边界 | R:code:src-tauri/src/benchmark/report/artifact/types.rs | A:- | S:禁止把fixture正文序列化进证据
+render.rs[AP5L]: F:渲染四路径逐样本和汇总报告并分开理论上传收益 | R:code:src-tauri/src/benchmark/report.rs | A:print_report | S:10Mbps模型估算不等于真实E2E收益
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/benchmark/report/artifact/===
+compare.rs[KP6S]: F:验证artifact可比较身份并计算带符号指标差 | R:code:src-tauri/src/benchmark/report/artifact/types.rs | A:validate_metadata；deltas | S:夹具、策略和工具链必须一致，Turbo提交号允许不同
+metadata.rs[FP5T]: F:绑定性能报告的版本、工具链、夹具指纹与策略常量 | R:code:src-tauri/src/benchmark/settings.rs | A:metadata；fixture | S:夹具为空拒绝，取不到工具版本标unknown
+metrics.rs[KP5S]: F:映射真实样本与汇总为可序列化性能指标 | R:code:src-tauri/src/benchmark/report.rs | A:raw_metrics | S:保留观测到的压缩与连接计数，缺失指标不伪造
+types.rs[FP5S]: F:定义性能artifact的元数据、样本、差值与判定结构 | R:code:src-tauri/src/benchmark/report/artifact.rs | A:- | S:JSON契约统一camelCase
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/proxy/===
+compression.rs[CP5T]: F:导出共享压缩调度器和指标快照 | R:code:src-tauri/src/proxy/compression/scheduler.rs,code:src-tauri/src/proxy/compression/metrics.rs | A:- | S:-
+continuation_merge.rs[KN8M]: F:收集HTTP响应输出并把状态续传展开成完整自包含请求 | R:code:src-tauri/src/proxy/hybrid_session.rs | A:PendingHttpContinuation；expand | S:终态output为权威；无法配对工具输出拒绝展开；增量ID覆盖历史
+continuation_merge_tests.rs[TN6M]: F:验证HTTP续传字段继承、工具配对和去重规则 | R:code:src-tauri/src/proxy/continuation_merge.rs | A:- | S:-
+deepseek_history.rs[KN7S]: F:修复DeepSeek工具历史并缓存真实响应工具调用 | R:code:src-tauri/src/proxy/hybrid_flow.rs | A:repair_deepseek_tool_history | S:仅deepseek前缀，不能编造无缓存的调用
+deepseek_history_tests.rs[TN5S]: F:验证DeepSeek调用输出配对与缓存补齐范围 | R:code:src-tauri/src/proxy/deepseek_history.rs | A:- | S:非目标模型原样保留
+gemini_history.rs[KN7M]: F:在可证明唯一配对时归整Gemini函数历史顺序 | R:code:src-tauri/src/proxy/hybrid_flow.rs | A:normalize_gemini_function_history | S:重复ID、不完整配对或跨用户边界不猜测修复
+gemini_history_tests.rs[TN6S]: F:验证Gemini初始与续传修复及危险历史原字节保留 | R:code:src-tauri/src/proxy/gemini_history.rs | A:- | S:-
+hybrid.rs[AN8S]: F:装配本地WS升级后Hybrid会话与HTTP和私有WS工作流 | R:code:src-tauri/src/proxy/hybrid_flow.rs,code:src-tauri/src/proxy/hybrid_session.rs | A:spawn | S:本地帧上限128MiB；上游WS请求上限15MiB
+hybrid_active.rs[AR7S]: F:处理Hybrid空闲上游ping、尾帧和异常连接恢复 | R:code:src-tauri/src/proxy/hybrid_session.rs,code:src-tauri/src/proxy/hybrid_sse.rs | A:handle_idle_upstream；handle_idle_keepalive | S:丢弃异常连接不重放已提交请求
+hybrid_common.rs[CN6T]: F:构造Hybrid协议错误、文本帧与关闭消息 | R:code:src-tauri/src/proxy/hybrid.rs | A:send_error；close_client | S:同一连接切换thread身份被拒绝
+hybrid_continuation_tests.rs[TN7M]: F:验证无底稿、失效续传和重复终态的本地处理 | R:code:src-tauri/src/proxy/hybrid_flow.rs | A:- | S:状态缺失不能向上游猜测重放
+hybrid_flow.rs[AN8M]: F:按策略与有效能力路由Hybrid请求并绑定会话和续传租约 | R:code:src-tauri/src/proxy/hybrid_session.rs,code:src-tauri/src/proxy/hybrid_http.rs | A:handle_idle；start_response | S:响应ID须匹配会话终态；HTTP历史展开后不回放上游状态
+hybrid_http.rs[IN8M]: F:统一Hybrid HTTP worker、本地预热和SSE终态转WS | R:code:src-tauri/src/proxy/hybrid_sse.rs,code:src-tauri/src/proxy/hybrid_worker.rs | A:start_http_worker | S:generate=false只本地零用量终态；完成排队后晚取消不产生第二终态
+hybrid_integration_server.rs[TN5L]: F:提供HTTP和私有WS集成测试上游及故障注入行为 | R:code:src-tauri/src/proxy/hybrid_integration_state.rs | A:upstream_request | S:仅测试fixture，HTTP固定工具调用供续传展开
+hybrid_integration_state.rs[TN5M]: F:提供Hybrid集成测试状态、计数等待与故障行为枚举 | R:code:src-tauri/src/proxy/hybrid_integration_server.rs | A:- | S:-
+hybrid_integration_tests.rs[TN7L]: F:验证按需WS、HTTP本地预热、续传、能力切换和取消集成 | R:code:src-tauri/src/proxy/hybrid_integration_state.rs,code:src-tauri/src/proxy/hybrid_flow.rs | A:- | S:仅回环fixture，不需要生产请求
+hybrid_legacy.rs[IN7M]: F:为非标准Responses帧提供私有或标准WS兼容转发 | R:code:src-tauri/src/proxy/hybrid.rs,code:src-tauri/src/proxy/private_websocket/relay.rs | A:start_legacy_response | S:标准通道按每次终态记录结果，初始化帧不计成功请求
+hybrid_legacy_fixture.rs[TN4S]: F:提供标准WS兼容集成用临时上游与失败fixture | R:code:src-tauri/src/proxy/hybrid_legacy_integration_tests.rs | A:- | S:-
+hybrid_legacy_integration_tests.rs[TN6S]: F:验证标准兼容转发每个终态唯一记账与异常关闭 | R:code:src-tauri/src/proxy/hybrid_legacy.rs | A:- | S:-
+hybrid_observability_integration_tests.rs[TO6M]: F:验证真实Hybrid活跃、空闲、恢复和关闭连接快照 | R:code:src-tauri/src/proxy/hybrid_pool/observability.rs | A:- | S:HTTP下行不能伪报为专属WS接收
+hybrid_pool.rs[AR9L]: F:按隔离作用域管理需求驱动连接、唯一租约和续传移交 | R:code:src-tauri/src/proxy/hybrid_pool/session.rs,code:src-tauri/src/proxy/hybrid_pool/maintenance.rs | A:HybridPool；open_session | S:全池上限100；没有等待WS需求不留备用；会话连接不回空白池
+hybrid_pool_capacity_tests.rs[TP6T]: F:验证无备用需求容量和释放连接不回空白池 | R:code:src-tauri/src/proxy/hybrid_pool.rs | A:- | S:-
+hybrid_pool_maintenance_tests.rs[TR6L]: F:验证健康探测不阻塞领取与取消后探测槽释放 | R:code:src-tauri/src/proxy/hybrid_pool/maintenance.rs | A:- | S:-
+hybrid_pool_tests.rs[TR7L]: F:验证唯一租约、幂等关闭与取消领取资源回收 | R:code:src-tauri/src/proxy/hybrid_pool/session.rs,code:src-tauri/src/proxy/hybrid_pool/lease.rs | A:- | S:-
+hybrid_scope_tests.rs[TS7S]: F:验证动态元数据共享而认证和turn-state隔离作用域 | R:code:src-tauri/src/proxy/hybrid_pool/scope.rs | A:- | S:客户端trace不能进入预热握手
+hybrid_session.rs[AN8L]: F:持有Hybrid线程身份、续传底稿、能力与活跃worker状态 | R:code:src-tauri/src/proxy/hybrid_flow.rs,code:src-tauri/src/proxy/continuation_merge.rs | A:Session | S:同连接线程身份不变；仅成功终态固化HTTP续传底稿
+hybrid_session_isolation_tests.rs[TS7M]: F:验证同根会话中线程隔离与取消后串行复用 | R:code:src-tauri/src/proxy/hybrid_session.rs | A:- | S:握手旧thread不得覆盖首次请求规范身份
+hybrid_sse.rs[KN7M]: F:解析Responses创建帧、HTTP回退payload与分块SSE终态 | R:code:src-tauri/src/proxy/hybrid_http.rs,code:src-tauri/src/proxy/hybrid_flow.rs | A:http_request_payload；SseParser | S:状态续传不能去掉响应ID后假装完整请求；孤立idle诊断只留安全码
+hybrid_tests.rs[TN6M]: F:验证SSE分块、终态、来源形态和idle事件优先级 | R:code:src-tauri/src/proxy/hybrid_sse.rs | A:- | S:DONE不转发为WS应用终态
+hybrid_transport_fallback.rs[AR8T]: F:只在精确未提交证据下把WS工作转为HTTP | R:code:src-tauri/src/proxy/hybrid_websocket.rs,code:src-tauri/src/proxy/hybrid_http.rs | A:apply | S:已转发输出或请求取消不能HTTP重放
+hybrid_transport_fallback_tests.rs[TR8L]: F:验证能力关闭、HTTP预热、策略优先及安全回退全链路 | R:code:src-tauri/src/proxy/hybrid_transport_fallback.rs,code:src-tauri/src/proxy/hybrid_flow.rs | A:- | S:已提交或已有输出、取消的请求禁止回退重放
+hybrid_websocket.rs[IN8L]: F:持独占租约执行私有WS请求、取消和活跃keepalive | R:code:src-tauri/src/proxy/private_websocket.rs,code:src-tauri/src/proxy/hybrid_worker.rs | A:start_websocket_worker | S:回退必须503加http加not_submitted加指定错误码；普通失败不证明未提交
+hybrid_worker.rs[AN8M]: F:处理活跃客户端指令、worker事件与唯一结果记账 | R:code:src-tauri/src/proxy/hybrid_session.rs,code:src-tauri/src/proxy/timing.rs | A:handle_active_client_message；handle_worker_event | S:不允许并行response.create切换线程；已转发首帧决定安全边界
+network_diagnostics.rs[IO6M]: F:用错误类型与有界DNS探测分类网络失败阶段 | R:code:src-tauri/src/proxy/timing.rs | A:classify_request_error | S:输出固定脱敏阶段，不把原始错误正文当用户诊断
+private_websocket.rs[IN8M]: F:协商私有WS子协议、共享TLS配置与安全服务器trace | R:code:src-tauri/src/proxy/private_websocket/codec.rs,code:src-tauri/src/proxy/private_websocket/relay.rs | A:connect_private | S:握手限10秒；客户端trace剥离，服务端trace须32位十六进制
+private_websocket_benchmark.rs[TP6S]: F:提供不含Hybrid路径的私有WS基准代理 | R:code:src-tauri/src/benchmark/live.rs | A:start | S:本地101须等公网私有握手成功
+private_websocket_benchmark_test.rs[TN5S]: F:验证私有基准本地升级不能早于公网握手 | R:code:src-tauri/src/proxy/private_websocket_benchmark.rs | A:- | S:-
+private_websocket_test.rs[TN6M]: F:验证私有连接TLS复用、trace校验及脱敏错误种类 | R:code:src-tauri/src/proxy/private_websocket.rs | A:- | S:使用测试证书和回环服务器
+session_name_hint.rs[KU5S]: F:从用户输入提取短临时会话提示名 | R:code:src-tauri/src/proxy/traffic.rs,code:src-tauri/src/proxy/hybrid_sse.rs | A:from_value | S:最多30个Unicode字符，归并空白且忽略非用户输入
+timing.rs[AO8M]: F:流式观测HTTP首帧首输出与唯一完成或失败结果 | R:code:src-tauri/src/proxy/traffic.rs,code:src-tauri/src/proxy/network_diagnostics.rs | A:HttpTimingControl；HttpTiming | S:记录权原子抢占；取消499与流读取失败区别；Drop也完成记账
+traffic.rs[PO8L]: F:保存请求指标和滚动流量桶并有界持久化JSONL | R:code:src-tauri/src/proxy/traffic/window.rs | A:TrafficStore::load；save；compact | S:仅100条最近请求、25小时桶；不持久化正文和临时提示名；损坏尾行可忽略
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/proxy/compression/===
+metrics.rs[CO5T]: F:维护压缩执行、等待、失败和快速路径原子计数 | R:code:src-tauri/src/proxy/compression/scheduler.rs | A:snapshot | S:-
+scheduler.rs[KP8S]: F:以共享四并发预算调度HTTP与私有WS压缩解码 | R:code:src-tauri/src/proxy/private_websocket/codec.rs | A:CompressionScheduler::run；encode_http | S:许可由blocking任务持有到结束，取消等待不释放仍执行的预算
+tests.rs[TP6S]: F:验证共享压缩许可、阈值、错误计数与取消资源归属 | R:code:src-tauri/src/proxy/compression/scheduler.rs | A:- | S:-
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/proxy/hybrid_pool/===
+cleanup.rs[RR6T]: F:在租约丢弃和运行时缺失时完成异步资源清理 | R:code:src-tauri/src/proxy/hybrid_pool/lease.rs | A:spawn_cleanup | S:无当前Tokio运行时则新建临时runtime执行清理
+diagnostics.rs[DO5T]: F:保存作用域握手失败次数与最后脱敏失败类型 | R:code:src-tauri/src/proxy/hybrid_pool/maintenance/connection.rs | A:record_failure | S:-
+lease.rs[AR8S]: F:提供连接独占租约的释放、丢弃和移交状态转换 | R:code:src-tauri/src/proxy/hybrid_pool.rs,code:src-tauri/src/proxy/hybrid_pool/cleanup.rs | A:Lease | S:仅Active Drop清理；终态幂等，不复制上游资源
+maintenance.rs[AR8M]: F:按等待需求补连并在锁外并发健康检查和关闭 | R:code:src-tauri/src/proxy/hybrid_pool/maintenance/connection.rs,code:src-tauri/src/proxy/hybrid_pool/probe.rs | A:refill；maintain_once | S:健康探测离锁执行，探测取消由守卫清理；维护并发4
+observability.rs[DO7M]: F:维护会话活动、恢复和真实连接关闭记录 | R:code:src-tauri/src/proxy/hybrid_pool/observability_snapshot.rs | A:ConnectionObservation；PoolState | S:近期关闭最多8条且只显示5分钟内记录
+observability_snapshot.rs[AO7M]: F:由实际池租约生成连接计数、绑定和恢复快照 | R:code:src-tauri/src/proxy/hybrid_pool/observability.rs | A:connection_snapshot | S:调用者声明没有实际租约不能投影为绑定资源
+probe.rs[IN7T]: F:以特定ping和匹配pong验证空闲WS健康 | R:code:src-tauri/src/proxy/hybrid_pool/maintenance.rs | A:probe_idle_detailed | S:应用帧或关闭视为异常，不消耗业务响应继续复用
+resource_truth_tests.rs[TO5T]: F:保证空池不因观察者声明而虚构连接归属 | R:code:src-tauri/src/proxy/hybrid_pool/observability_snapshot.rs | A:- | S:-
+scope.rs[DS8T]: F:用目标URL及稳定请求头定义连接隔离身份 | R:code:src-tauri/src/proxy/hybrid_pool.rs | A:HybridScope::new | S:剥离动态线程和握手头但保留Authorization及turn-state隔离，Debug不打印凭据
+session.rs[AR8M]: F:提供可取消连接领取、唯一持有和会话关闭合同 | R:code:src-tauri/src/proxy/hybrid_pool/session/checkout.rs,code:src-tauri/src/proxy/hybrid_pool/lease.rs | A:SessionHandle | S:停止信号先于创建；分配后先交守卫再等待，取消不留幽灵租约
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/proxy/hybrid_pool/maintenance/===
+connection.rs[IN7T]: F:异步握手并只在仍有等待需求时接纳新连接 | R:code:src-tauri/src/proxy/hybrid_pool/maintenance.rs | A:spawn_connection | S:失败1秒后仅对等待者重试；需求消失关闭已握手连接
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/proxy/hybrid_pool/session/===
+checkout.rs[RR7T]: F:守护连接领取过程的等待标志和已分配资源 | R:code:src-tauri/src/proxy/hybrid_pool/session.rs | A:CheckoutLeaseGuard | S:Drop清除等待并释放未交付上游，finish转移资源
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/proxy/private_websocket/===
+codec.rs[KN9M]: F:编码解码AICZ信封、原始帧类型及逐消息自适应zstd | R:code:src-tauri/src/proxy/private_websocket.rs | A:encode_private_message_with_metadata；decode_private_message | S:限制解压128MiB及窗口log27；版本、标志、长度须验证；仅更小时压缩
+relay.rs[IN8M]: F:双向转发普通客户端与私有信封应用帧及关闭状态 | R:code:src-tauri/src/proxy/private_websocket.rs | A:relay_private_from_message | S:协议错误同步关闭两端；保持原text或binary语义
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/proxy/private_websocket/relay/===
+tests.rs[TP4T]: F:验证私有编码跨阈值才交给blocking调度 | R:code:src-tauri/src/proxy/private_websocket.rs | A:- | S:-
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/proxy/traffic/===
+tests.rs[TO6L]: F:验证滚动窗口、JSONL损坏尾行及诊断隐私边界 | R:code:src-tauri/src/proxy/traffic.rs | A:- | S:idle内部诊断不增加用户请求统计
+window.rs[KO6T]: F:把10秒基础桶聚合成分钟、10分、小时和日窗口 | R:code:src-tauri/src/proxy/traffic.rs | A:build_windows | S:右端始终为当前周期，传输与结果六类分别累计
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/transport_ack_benchmark/===
+live.rs[TN6M]: F:显式运行直连及Turbo HTTP和WS的ACK传输门禁 | R:code:src-tauri/src/transport_ack_benchmark.rs | A:live_transport_ack_benchmark | S:ignored用例需环境配置；不进行模型生成
+measure.rs[TP5S]: F:测量多尺寸HTTP和私有WS编码开销与阈值边界 | R:code:src-tauri/src/proxy/compression/scheduler.rs | A:measure_current_encoding_paths | S:重复fixture是编码成本样本，不代表真实用户负载
+observe.rs[AO5S]: F:渲染ACK往返、握手及上游收发解码的脱敏观测 | R:code:src-tauri/src/transport_ack_benchmark.rs | A:render_observation | S:输出不含payload或凭据
+tls_session_reuse.rs[TP6M]: F:比较连续私有WS连接的冷与暖TLS握手ACK成本 | R:code:src-tauri/src/transport_ack_benchmark/tls_session_reuse/report.rs | A:production_ack_tls_session_reuse_has_cold_and_warm_samples | S:生产精确端点显式opt-in，12个独立连接样本
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src-tauri/src/transport_ack_benchmark/tls_session_reuse/===
+report.rs[AP5S]: F:输出TLS会话复用逐样本与冷暖中位数区间 | R:code:src-tauri/src/transport_ack_benchmark/tls_session_reuse.rs | A:print_report | S:空样本拒绝；冷暖摘要不替代完整样本披露
+
+===/Users/hetonghao/dev/hth-project/ai-cove/turbo/src/===
+app.js[AU8L]: F:驱动实时统计配置、模型编辑、连接检查器和更新交互 | R:code:src/index.html,code:src/telemetry.js,code:src-tauri/src/lib.rs | A:DOMContentLoaded；Tauri invoke | S:真实状态轮询在文档隐藏时暂停；模型草稿保留；能力与策略分开，重启需显式动作
+connection-dom.js[CU6S]: F:按连接键增量协调DOM并取消重现节点的退出动画 | R:code:src/app.js | A:TurboConnectionDom.reconcileList | S:退出节点inert且180ms兜底移除，重现可取消删除
+index.html[EU7M]: F:提供桌面三页、连接检查器、模型及技能对话框结构 | R:code:src/app.js,code:src/skills.js,code:src/styles.css | A:- | S:Tab和dialog使用原生ARIA及键盘语义
+skills.js[AU8L]: F:显示官方技能状态与差异并确认冲突替换或备份卸载 | R:code:src-tauri/src/skills.rs,code:src/index.html | A:TurboSkills.activate | S:提交期望本地及发布摘要；请求stamp拒绝陈旧响应；不把stale目录当可安装
+strands.js[IU6M]: F:以WebGL2绘制五项验证状态Strands及真实节省脉冲 | R:code:THIRD_PARTY_NOTICES.md,code:src/app.js | A:TurboStrands.setCount；pulse | S:隐藏或减少动态偏好停止脉冲，固定来源许可证保留
+styles.css[FU7L]: F:统一桌面令牌、模型编辑、连接面板和可访问动效样式 | R:code:src/index.html,code:DESIGN.md | A:- | S:portal详情使用全局tooltip背景；减少动态偏好禁用非必要动画
+telemetry.js[KP7S]: F:格式化指标并按真实字节、WS轮次估算收益 | R:code:src/app.js,code:docs/verification/2026-08-13-turbo-speed-candidate.json | A:TurboTelemetry | S:排除error；10Mbps与校准常量只估算，缺失观测不替代真实耗时
