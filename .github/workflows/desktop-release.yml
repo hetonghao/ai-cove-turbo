@@ -22,7 +22,7 @@ jobs:
       matrix:
         include:
           - platform: darwin-aarch64
-            os: macos-14
+            os: macos-15
             bundles: app,dmg
             apple_signing_identity: "-"
           - platform: windows-x86_64
