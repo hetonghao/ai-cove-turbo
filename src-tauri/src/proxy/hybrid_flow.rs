@@ -196,9 +196,18 @@ async fn start_response(
     if previous_response_id.is_some()
         && session.last_response_transport == Some(super::ResponseTransport::Http)
     {
-        let traffic = session
-            .last_http_traffic
-            .unwrap_or(HttpTraffic::HYBRID_CAPABILITY);
+        let traffic = if policy_requires_http(session, &payload) {
+            HttpTraffic::HYBRID_POLICY
+        } else if session.auto_uses_http(&payload) {
+            HttpTraffic::HYBRID_CAPABILITY
+        } else {
+            session
+                .last_http_traffic
+                .filter(|traffic| {
+                    !matches!(traffic.route, traffic::TrafficRoute::HybridRecoveryHttp)
+                })
+                .unwrap_or(HttpTraffic::HYBRID_CAPABILITY)
+        };
         let Some(http_payload) =
             session.expand_http_continuation(&payload, previous_response_id.as_deref())
         else {

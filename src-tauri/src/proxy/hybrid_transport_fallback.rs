@@ -29,6 +29,17 @@ pub(super) async fn apply(
         code,
         reason,
     } = fallback;
+    // Learning the transport fact never authorizes replay of this request.
+    if let Some(model) = session
+        .request_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.model.as_deref())
+    {
+        session
+            .state
+            .capability_probe
+            .mark_websocket_unavailable(model);
+    }
     let http_payload = active.as_mut().and_then(|item| {
         (item.kind == ActiveKind::WebSocket && !item.output_forwarded && !item.cancel_requested)
             .then(|| item.http_fallback.take())

@@ -832,7 +832,7 @@ impl ProxyHandle {
         if !self.websocket_enabled.load(Ordering::Relaxed) {
             return "disabled".to_owned();
         }
-        let statuses = self.capability_cache.statuses();
+        let statuses = self.current_capability_probe().cache.statuses();
         let policy = self.model_policy.reload();
         if !statuses.is_empty()
             && statuses.iter().all(|(model, status)| {
@@ -862,15 +862,25 @@ impl ProxyHandle {
     pub(crate) fn capability_statuses(
         &self,
     ) -> std::collections::HashMap<String, CapabilityModelStatus> {
-        self.capability_cache.statuses()
+        self.current_capability_probe().cache.statuses()
+    }
+
+    pub(crate) fn capability_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.capability_cache.subscribe()
     }
 
     pub(crate) fn capability_reason(&self) -> Option<String> {
-        self.capability_cache.reason()
+        self.current_capability_probe().cache.reason()
     }
 
     pub(crate) fn refresh_capabilities(&self, models: &[String]) {
-        self.capability_probe.refresh(models);
+        self.current_capability_probe().refresh(models);
+    }
+
+    fn current_capability_probe(&self) -> CapabilityProbe {
+        let mut headers = self.capability_probe.headers.clone();
+        codex_auth::apply_forwarded_auth_override(&mut headers);
+        self.capability_probe.for_headers(&headers)
     }
 
     #[cfg(test)]
@@ -882,7 +892,25 @@ impl ProxyHandle {
         self.capability_cache.set_for_test(model, transport);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_capability_for_auth_for_test(
+        &self,
+        model: &str,
+        authorization: &'static str,
+    ) {
+        let mut headers = self.capability_probe.headers.clone();
+        headers.insert(
+            header::AUTHORIZATION,
+            header::HeaderValue::from_static(authorization),
+        );
+        self.capability_probe
+            .for_headers(&headers)
+            .cache
+            .set_for_test(model, transport_capability::CapabilityTransport::WebSocket);
+    }
+
     pub(crate) async fn stop(mut self) {
+        self.capability_probe.stop();
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -940,16 +968,105 @@ struct CapabilityProbe {
     cache: Arc<transport_capability::CapabilityCache>,
     snapshot_path: PathBuf,
     scope: String,
+    snapshot_scope: String,
+    persistence_stopped: Arc<Mutex<bool>>,
+    scoped_caches: Arc<Mutex<HashMap<String, Arc<transport_capability::CapabilityCache>>>>,
 }
 
 impl CapabilityProbe {
+    fn for_headers(&self, headers: &HeaderMap) -> Self {
+        if !self.enabled {
+            return self.clone();
+        }
+        let scope = transport_capability::scope_key(&self.upstream, headers);
+        let mut caches = self
+            .scoped_caches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut probe = self.clone();
+        probe.scope = scope.clone();
+        probe.headers = headers.clone();
+        if let Some(cache) = caches.get(&scope) {
+            probe.cache = Arc::clone(cache);
+        } else {
+            // ponytail: retain at most 32 credential contexts; excess contexts stay
+            // conservatively HTTP until an unused context can be evicted.
+            if caches.len() >= 32 {
+                if let Some(key) = caches
+                    .iter()
+                    .find(|(key, cache)| {
+                        *key != &self.snapshot_scope && Arc::strong_count(cache) == 1
+                    })
+                    .map(|(key, _)| key.clone())
+                {
+                    caches.remove(&key);
+                }
+            }
+            probe.cache = Arc::new(self.cache.new_context());
+            if caches.len() < 32 {
+                caches.insert(scope, Arc::clone(&probe.cache));
+            } else {
+                probe.enabled = false;
+            }
+        }
+        probe
+    }
+    fn stop(&self) {
+        *self
+            .persistence_stopped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+    }
+
+    fn mark_websocket_unavailable(&self, model: &str) {
+        let stopped = self
+            .persistence_stopped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *stopped {
+            return;
+        }
+        self.cache.mark_websocket_unavailable(model);
+        if self.scope == self.snapshot_scope {
+            let _ = transport_capability::persist_snapshot_for_scope(
+                &self.snapshot_path,
+                &self.cache.unavailable_snapshot(),
+                &self.scope,
+            );
+        }
+    }
+
     fn refresh(&self, models: &[String]) {
+        self.refresh_with_demand(models, false);
+    }
+
+    fn refresh_for_request(&self, models: &[String]) {
+        self.refresh_with_demand(models, true);
+    }
+
+    fn refresh_with_demand(&self, models: &[String], on_request: bool) {
         let mut models = models.to_vec();
+        // The endpoint returns a complete batch snapshot; retain other known models
+        // in that batch rather than turning a one-model refresh into a global downgrade.
+        models.extend(self.cache.model_slugs());
+        if !on_request {
+            self.cache.exclude_unavailable(&mut models);
+        }
         models.sort_unstable();
         models.dedup();
         if !self.enabled
+            || *self
+                .persistence_stopped
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
             || models.is_empty()
-            || !self.cache.needs_refresh(&models)
+            || !(if on_request {
+                models
+                    .iter()
+                    .any(|model| self.cache.needs_refresh_for(model))
+            } else {
+                self.cache.needs_refresh(&models)
+            })
             || !self.cache.begin_refresh()
         {
             return;
@@ -960,6 +1077,8 @@ impl CapabilityProbe {
         let headers = self.headers.clone();
         let snapshot_path = self.snapshot_path.clone();
         let scope = self.scope.clone();
+        let persist = scope == self.snapshot_scope;
+        let persistence_stopped = Arc::clone(&self.persistence_stopped);
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 Duration::from_secs(5),
@@ -967,15 +1086,29 @@ impl CapabilityProbe {
             )
             .await
             .map_or(Err("request_timeout"), |result| result);
+            // Serialize the in-memory commit and atomic snapshot rename with negative
+            // writes and stop. The network await above never holds this short lock.
+            let stopped = persistence_stopped
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *stopped {
+                return;
+            }
             match result {
                 Ok(response) => {
-                    cache.apply(&response, transport_capability::ttl());
-                    let snapshot = cache.snapshot_response();
-                    let _ = transport_capability::persist_snapshot_for_scope(
-                        &snapshot_path,
-                        &snapshot,
-                        &scope,
-                    );
+                    let applied = if on_request {
+                        cache.apply_for_request(&response, transport_capability::ttl())
+                    } else {
+                        cache.apply(&response, transport_capability::ttl())
+                    };
+                    if applied && persist {
+                        let snapshot = cache.snapshot_response();
+                        let _ = transport_capability::persist_snapshot_for_scope(
+                            &snapshot_path,
+                            &snapshot,
+                            &scope,
+                        );
+                    }
                 }
                 Err(reason) => cache.mark_attempt(&models, Some(reason.to_owned())),
             }
@@ -1019,25 +1152,26 @@ pub(crate) async fn start_proxy_with_policy(
         |parent| parent.join(transport_capability::CAPABILITY_SNAPSHOT_FILE),
     );
     let model_policy = Arc::new(model_policy::ModelPolicyStore::new(model_policy_path));
-    let startup_auth_headers = if options.ai_cove_private_websocket_zstd {
-        codex_auth::effective_auth_headers(codex_config_path.as_deref()).map(|mut headers| {
-            headers.insert(
-                HeaderName::from_static("x-ai-cove-client"),
-                header::HeaderValue::from_static("turbo"),
-            );
-            headers.insert(
-                HeaderName::from_static("x-ai-cove-client-version"),
-                header::HeaderValue::from_static(turbo_client_version()),
-            );
-            headers
-        })
+    let mut startup_auth_headers = if options.ai_cove_private_websocket_zstd {
+        codex_config_path
+            .as_deref()
+            .and_then(|path| codex_auth::effective_auth_headers(Some(path)))
+            .unwrap_or_default()
     } else {
-        None
+        HeaderMap::new()
     };
-    let capability_scope = startup_auth_headers.as_ref().map_or_else(
-        || transport_capability::scope_key(&options.upstream, &HeaderMap::new()),
-        |headers| transport_capability::scope_key(&options.upstream, headers),
-    );
+    if options.ai_cove_private_websocket_zstd {
+        startup_auth_headers.insert(
+            HeaderName::from_static("x-ai-cove-client"),
+            header::HeaderValue::from_static("turbo"),
+        );
+        startup_auth_headers.insert(
+            HeaderName::from_static("x-ai-cove-client-version"),
+            header::HeaderValue::from_static(turbo_client_version()),
+        );
+    }
+    let capability_scope =
+        transport_capability::scope_key(&options.upstream, &startup_auth_headers);
     let capability_cache = Arc::new(if options.ai_cove_private_websocket_zstd {
         transport_capability::CapabilityCache::load_for_scope(
             &capability_snapshot_path,
@@ -1055,10 +1189,16 @@ pub(crate) async fn start_proxy_with_policy(
         enabled: options.ai_cove_private_websocket_zstd,
         client: client.clone(),
         upstream: upstream.clone(),
-        headers: startup_auth_headers.clone().unwrap_or_default(),
+        headers: startup_auth_headers,
         cache: Arc::clone(&capability_cache),
         snapshot_path: capability_snapshot_path.clone(),
-        scope: capability_scope,
+        scope: capability_scope.clone(),
+        snapshot_scope: capability_scope.clone(),
+        persistence_stopped: Arc::new(Mutex::new(false)),
+        scoped_caches: Arc::new(Mutex::new(HashMap::from([(
+            capability_scope,
+            Arc::clone(&capability_cache),
+        )]))),
     };
     let state = ProxyState {
         upstream,

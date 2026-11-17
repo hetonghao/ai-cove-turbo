@@ -49,6 +49,9 @@ pub(crate) async fn start(upstream: Url, metrics: Arc<Metrics>) -> Result<ProxyH
         cache: Arc::clone(&capability_cache),
         snapshot_path: std::path::PathBuf::from("transport-capabilities.json"),
         scope: String::new(),
+        snapshot_scope: String::new(),
+        persistence_stopped: Arc::new(std::sync::Mutex::new(false)),
+        scoped_caches: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
     let app = Router::new()
         .route("/healthz", get(super::health))

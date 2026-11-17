@@ -104,6 +104,7 @@ pub(super) struct Counts {
     pub(super) active_pings: usize,
     pub(super) private_normal_closes: usize,
     pub(super) http_requests: usize,
+    pub(super) capability_requests: usize,
     pub(super) close_frames_sent: usize,
     pub(super) private_ready_by_scope: HashMap<String, usize>,
 }
@@ -112,6 +113,12 @@ pub(super) struct FixtureState {
     pub(super) counts: Mutex<Counts>,
     pub(super) private_payloads: Mutex<Vec<Vec<u8>>>,
     pub(super) http_payloads: Mutex<Vec<Vec<u8>>>,
+    pub(super) http_encodings: Mutex<Vec<Option<String>>>,
+    pub(super) capability_websocket: Mutex<Option<bool>>,
+    pub(super) capability_headers: Mutex<Vec<axum::http::HeaderMap>>,
+    pub(super) capability_models: Mutex<Vec<Vec<String>>>,
+    pub(super) hold_capability: std::sync::atomic::AtomicBool,
+    pub(super) release_capability: Notify,
     pub(super) changed: Notify,
     pub(super) release_private: Notify,
     pub(super) release_http: Notify,
@@ -126,6 +133,7 @@ pub(super) struct Fixture {
 
 pub(super) struct FixtureServer {
     pub(super) fixture: Fixture,
+    pub(super) directory: tempfile::TempDir,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
 }
@@ -137,6 +145,7 @@ enum CountKind {
     ActiveReady,
     PrivateNormalClose,
     Http,
+    Capability,
     CloseFrame,
 }
 
@@ -152,6 +161,12 @@ impl FixtureServer {
                 counts: Mutex::new(Counts::default()),
                 private_payloads: Mutex::new(Vec::new()),
                 http_payloads: Mutex::new(Vec::new()),
+                http_encodings: Mutex::new(Vec::new()),
+                capability_websocket: Mutex::new(None),
+                capability_headers: Mutex::new(Vec::new()),
+                capability_models: Mutex::new(Vec::new()),
+                hold_capability: std::sync::atomic::AtomicBool::new(false),
+                release_capability: Notify::new(),
                 changed: Notify::new(),
                 release_private: Notify::new(),
                 release_http: Notify::new(),
@@ -169,6 +184,7 @@ impl FixtureServer {
         });
         Ok(Self {
             fixture,
+            directory: tempfile::tempdir()?,
             shutdown: Some(shutdown),
             task,
         })
@@ -215,6 +231,11 @@ impl Fixture {
 
     pub(super) async fn wait_http(&self, expected: usize) -> io::Result<()> {
         self.wait_count(CountKind::Http, expected).await
+    }
+
+    pub(super) async fn wait_capabilities(&self, expected: usize) -> io::Result<()> {
+        self.wait_count_with_timeout(CountKind::Capability, expected, Duration::from_secs(1))
+            .await
     }
 
     pub(super) async fn wait_close_frames(&self, expected: usize) -> io::Result<()> {
@@ -281,6 +302,7 @@ impl Fixture {
                         CountKind::ActiveReady => counts.active_ready,
                         CountKind::PrivateNormalClose => counts.private_normal_closes,
                         CountKind::Http => counts.http_requests,
+                        CountKind::Capability => counts.capability_requests,
                         CountKind::CloseFrame => counts.close_frames_sent,
                     }
                 };

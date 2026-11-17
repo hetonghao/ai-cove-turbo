@@ -62,7 +62,7 @@ use runtime::{AppRuntime, AppStatus, RuntimePaths};
 #[cfg(target_os = "macos")]
 use tauri::menu::{IconMenuItem, NativeIcon};
 use tauri::{
-    AppHandle, Manager, RunEvent, State, WindowEvent,
+    AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
 };
@@ -148,6 +148,14 @@ pub fn run() -> tauri::Result<()> {
             let skills_manager = skills::SkillsManager::new(home.clone(), data_dir)?;
             app.manage(Arc::new(skills_manager));
             app.manage(Arc::clone(&runtime));
+            let mut transport_changes = runtime.transport_changes();
+            let event_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while transport_changes.changed().await.is_ok() {
+                    // Invalidation only: no credentials, scope hashes or stale snapshot payloads.
+                    let _ = event_app.emit("turbo-capabilities-changed", ());
+                }
+            });
             initialize_desktop_preferences(app.handle(), &runtime);
             install_tray(app)?;
             if !background_requested() {

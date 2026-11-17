@@ -12,7 +12,7 @@ use url::Url;
 
 use super::integration_state::{CountsSnapshot, FixtureConfig, FixtureServer, PrivateBehavior};
 use crate::proxy::{
-    CapabilityTransport, Metrics, ProxyHandle, ProxyOptions, start_proxy, start_proxy_with_policy,
+    CapabilityTransport, Metrics, ProxyHandle, ProxyOptions, start_proxy_with_policy,
 };
 
 type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -50,11 +50,10 @@ async fn start_test_proxy_with_policy(
         preferred_ports: vec![0],
         max_request_body_bytes: 64 * 1024 * 1024,
     };
-    let proxy = match policy_path {
-        Some(path) => start_proxy_with_policy(options, Some(path), None).await,
-        None => start_proxy(options).await,
-    }
-    .map_err(io::Error::other)?;
+    let policy_path = policy_path.unwrap_or_else(|| server.directory.path().join("policy.json"));
+    let proxy = start_proxy_with_policy(options, Some(policy_path), None)
+        .await
+        .map_err(io::Error::other)?;
     Ok((proxy, metrics))
 }
 
@@ -64,14 +63,14 @@ async fn connect_local(proxy: &ProxyHandle) -> io::Result<(ClientWebSocket, u16)
 
 async fn connect_local_with_authorization(
     proxy: &ProxyHandle,
-    authorization: Option<&'static str>,
+    authorization: Option<&str>,
 ) -> io::Result<(ClientWebSocket, u16)> {
     connect_local_with_headers(proxy, authorization, None, None).await
 }
 
 async fn connect_local_with_headers(
     proxy: &ProxyHandle,
-    authorization: Option<&'static str>,
+    authorization: Option<&str>,
     thread_id: Option<&str>,
     scope_state: Option<&'static str>,
 ) -> io::Result<(ClientWebSocket, u16)> {
@@ -87,7 +86,7 @@ async fn connect_local_with_headers(
     if let Some(authorization) = authorization {
         request.headers_mut().insert(
             header::AUTHORIZATION,
-            HeaderValue::from_static(authorization),
+            HeaderValue::from_str(authorization).map_err(io::Error::other)?,
         );
     }
     if let Some(thread_id) = thread_id {
@@ -475,6 +474,8 @@ async fn private_websocket_is_isolated_by_authorization() -> io::Result<()> {
     })
     .await?;
     let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_auth_for_test("test", "Bearer account-a");
+    proxy.set_capability_for_auth_for_test("test", "Bearer account-b");
     let (mut a, _) = connect_local_with_authorization(&proxy, Some("Bearer account-a")).await?;
     let (mut b, _) = connect_local_with_authorization(&proxy, Some("Bearer account-b")).await?;
     send_create(&mut a).await?;

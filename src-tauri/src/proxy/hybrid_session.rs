@@ -54,12 +54,15 @@ pub(super) struct Session {
 impl Session {
     // ponytail: upgrade yields five independent values; add a context type only for a second caller.
     pub(super) async fn open(
-        state: ProxyState,
+        mut state: ProxyState,
         client_headers: HeaderMap,
         request_uri: Uri,
         target: Url,
         path: String,
     ) -> Self {
+        let probe = state.capability_probe.for_headers(&client_headers);
+        state.capability_cache = std::sync::Arc::clone(&probe.cache);
+        state.capability_probe = probe;
         let pool_scope = HybridScope::new(&target, &client_headers);
         let handle = state
             .hybrid_pool
@@ -231,18 +234,12 @@ impl Session {
     }
 
     pub(super) fn refresh_capability(&self, payload: &[u8]) {
-        if !self
-            .state
-            .upstream
-            .host_str()
-            .is_some_and(|host| host == "ai-cove.com" || host.ends_with(".ai-cove.com"))
-        {
-            return;
-        }
         let Some(model) = ModelPolicy::model_from_payload(payload) else {
             return;
         };
-        if !self.state.capability_cache.needs_refresh_for(&model) {
+        if self.policy.transport_for(Some(&model)) == super::super::model_policy::Transport::Http
+            || !self.state.capability_cache.needs_refresh_for(&model)
+        {
             return;
         }
         let mut models = self.policy.model_slugs();
@@ -251,7 +248,7 @@ impl Session {
         }
         models.sort_unstable();
         models.dedup();
-        self.state.capability_probe.refresh(&models);
+        self.state.capability_probe.refresh_for_request(&models);
     }
 
     pub(super) fn current_model_requires_http(&self) -> bool {
@@ -290,9 +287,10 @@ impl Session {
                 .and_then(|model| state.capability_cache.known_transport_for(model))
                 .map_or_else(
                     || {
-                        state.upstream.host_str().is_some_and(|host| {
-                            host == "ai-cove.com" || host.ends_with(".ai-cove.com")
-                        })
+                        state.capability_probe.scope != state.capability_probe.snapshot_scope
+                            || state.upstream.host_str().is_some_and(|host| {
+                                host == "ai-cove.com" || host.ends_with(".ai-cove.com")
+                            })
                     },
                     |transport| {
                         transport

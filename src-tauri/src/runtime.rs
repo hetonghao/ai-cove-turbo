@@ -304,6 +304,8 @@ pub(crate) struct AppRuntime {
     metrics: Arc<Metrics>,
     managed: Mutex<Option<ManagedConfig>>,
     proxy: AsyncMutex<Option<ProxyHandle>>,
+    transport_changes: tokio::sync::watch::Sender<()>,
+    transport_watch: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     traffic_persistence: AsyncMutex<Option<TrafficPersistence>>,
     lifecycle_lock: AsyncMutex<()>,
     codex_pid_before_restart: Mutex<Option<u32>>,
@@ -348,6 +350,8 @@ impl AppRuntime {
             metrics,
             managed: Mutex::new(None),
             proxy: AsyncMutex::new(None),
+            transport_changes: tokio::sync::watch::channel(()).0,
+            transport_watch: Mutex::new(None),
             traffic_persistence: AsyncMutex::new(None),
             lifecycle_lock: AsyncMutex::new(()),
             codex_pid_before_restart: Mutex::new(None),
@@ -494,7 +498,9 @@ impl AppRuntime {
 
         self.remember_port(&endpoint);
         *lock_mutex(&self.managed) = Some(managed);
+        self.watch_transport_changes(&proxy);
         *self.proxy.lock().await = Some(proxy);
+        self.transport_changes.send_replace(());
         let codex_pid = codex_desktop_process_id();
         self.apply_codex_activation(
             endpoint,
@@ -508,6 +514,27 @@ impl AppRuntime {
         }
         if let Some(error) = clear_session_handoff(&handoff_path) {
             self.report_session_handoff_error(&error);
+        }
+    }
+
+    pub(crate) fn transport_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.transport_changes.subscribe()
+    }
+
+    fn watch_transport_changes(&self, proxy: &ProxyHandle) {
+        self.stop_transport_watch();
+        let mut changes = proxy.capability_changes();
+        let notifications = self.transport_changes.clone();
+        *lock_mutex(&self.transport_watch) = Some(tauri::async_runtime::spawn(async move {
+            while changes.changed().await.is_ok() {
+                notifications.send_replace(());
+            }
+        }));
+    }
+
+    fn stop_transport_watch(&self) {
+        if let Some(task) = lock_mutex(&self.transport_watch).take() {
+            task.abort();
         }
     }
 
@@ -725,6 +752,7 @@ impl AppRuntime {
             status.desktop_restarted = false;
             status.config_message = config_message.to_owned();
         });
+        self.transport_changes.send_replace(());
         Ok(())
     }
 
@@ -1399,12 +1427,14 @@ impl AppRuntime {
         }
         persist_auth_key(&self.paths.config_path, key)?;
         set_auth_override(Some(key.to_owned()));
+        self.transport_changes.send_replace(());
         Ok(())
     }
 
     pub(crate) async fn set_api_key(&self, raw: &str) -> Result<(), String> {
         let key = raw.trim();
         set_auth_override((!key.is_empty()).then(|| key.to_owned()));
+        self.transport_changes.send_replace(());
         Ok(())
     }
 
@@ -1454,6 +1484,7 @@ impl AppRuntime {
             status.service_healthy = false;
         });
 
+        self.stop_transport_watch();
         let old_proxy = self.proxy.lock().await.take();
         if let Some(proxy) = old_proxy {
             proxy.stop().await;
@@ -1473,7 +1504,9 @@ impl AppRuntime {
         let endpoint_changed = previous_endpoint != "—" && previous_endpoint != endpoint;
         self.remember_port(&endpoint);
         *lock_mutex(&self.managed) = Some(managed);
+        self.watch_transport_changes(&proxy);
         *self.proxy.lock().await = Some(proxy);
+        self.transport_changes.send_replace(());
         let codex_pid = codex_desktop_process_id();
         self.reset_activation_baseline();
         *lock_mutex(&self.codex_pid_before_restart) = codex_pid;
@@ -1616,6 +1649,7 @@ impl AppRuntime {
             *lock_mutex(&self.catalog) = restored.clone();
             self.update_status(|status| status.catalog = restored);
         }
+        self.stop_transport_watch();
         let proxy = self.proxy.lock().await.take();
         if let Some(proxy) = proxy {
             proxy.stop().await;
@@ -1677,6 +1711,7 @@ impl AppRuntime {
             Ok(ManagedOwnership::BaseUrlLost) => {
                 let _ = restore(&managed, &self.paths.recovery_path());
                 lock_mutex(&self.managed).take();
+                self.stop_transport_watch();
                 let proxy = self.proxy.lock().await.take();
                 if let Some(proxy) = proxy {
                     proxy.stop().await;
@@ -2191,6 +2226,53 @@ mod tests {
     use crate::proxy::CapabilityTransport;
 
     use super::*;
+
+    #[tokio::test]
+    async fn capability_notifications_reach_runtime_status_without_polling_and_stop_on_shutdown()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path: root.path().join("config.toml"),
+            data_dir: root.path().join("data"),
+        });
+        let proxy = start_proxy_with_policy(
+            ProxyOptions {
+                upstream: Url::parse("http://127.0.0.1:9/v1")?,
+                compression_enabled: Arc::new(AtomicBool::new(true)),
+                websocket_enabled: Arc::new(AtomicBool::new(true)),
+                ai_cove_private_websocket_zstd: true,
+                metrics: Arc::clone(&runtime.metrics),
+                preferred_ports: vec![0],
+                max_request_body_bytes: 1024,
+            },
+            Some(root.path().join("policy.json")),
+            None,
+        )
+        .await?;
+        runtime.watch_transport_changes(&proxy);
+        *runtime.proxy.lock().await = Some(proxy);
+        let mut changed = runtime.transport_changes();
+        runtime
+            .proxy
+            .lock()
+            .await
+            .as_ref()
+            .ok_or("proxy missing")?
+            .set_capability_for_test("test", CapabilityTransport::HttpOnly);
+        tokio::time::timeout(Duration::from_secs(1), changed.changed()).await??;
+        assert_eq!(
+            runtime
+                .status()
+                .await
+                .transport_capabilities
+                .get("test")
+                .map(|status| status.transport),
+            Some(CapabilityTransport::HttpOnly)
+        );
+        runtime.shutdown().await?;
+        assert!(lock_mutex(&runtime.transport_watch).is_none());
+        Ok(())
+    }
 
     #[test]
     fn dock_default_migrates_once_then_preserves_the_saved_choice() -> Result<(), Box<dyn Error>> {

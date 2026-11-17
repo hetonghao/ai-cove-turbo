@@ -54,7 +54,7 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
-async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models, discoveredModels = [], initialTab = "config", initialConfigView = "settings", rootAvailable = false } = {}) {
+async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models, discoveredModels = [], initialTab = "config", initialConfigView = "settings", rootAvailable = false, deferCapabilityListen = false, failCapabilityListen = false } = {}) {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const catalog = {
     path: "/home/test/.codex/model-catalogs/ai_cove_turbo.json",
@@ -233,10 +233,25 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   ]);
   const listeners = new Map();
   const calls = [];
+  const tauriListeners = new Map();
+  const windowListeners = new Map();
+  const intervalDelays = [];
+  let unlistenCalls = 0;
+  let resolveCapabilityListen;
+  let nextStatusDelay;
   let tick;
   const invoke = async (command, args) => {
     calls.push({ command, args });
-    if (command === "get_app_status") return freshStatus ? structuredClone(status) : status;
+    if (command === "get_app_status") {
+      if (nextStatusDelay) {
+        const snapshot = structuredClone(status);
+        const delay = nextStatusDelay;
+        nextStatusDelay = null;
+        await delay;
+        return snapshot;
+      }
+      return freshStatus ? structuredClone(status) : status;
+    }
     if (command === "update_model_catalog") {
       if (failSave) throw new Error("save failed");
       return { ...catalog, models: args.updates, restartRequired: true, loaded: false, revision: "revision-2" };
@@ -274,12 +289,18 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   };
   let skillsActive = false;
   const window = {
-    __TAURI__: { core: { invoke } },
+    __TAURI__: { core: { invoke }, event: { async listen(name, handler) {
+      if (failCapabilityListen) throw new Error("listen unavailable");
+      tauriListeners.set(name, handler);
+      const unlisten = () => { unlistenCalls += 1; tauriListeners.delete(name); };
+      if (deferCapabilityListen) return new Promise((resolve) => { resolveCapabilityListen = () => resolve(unlisten); });
+      return unlisten;
+    } } },
     TurboSkills: { activate(active) { skillsActive = active; } },
     location: { href: `tauri://localhost/?tab=${initialTab}&view=${initialConfigView}` },
     history: { replaceState(_state, _title, url) { window.location.href = String(url); } },
-    addEventListener() {},
-    setInterval(handler) { tick = handler; },
+    addEventListener(name, handler) { windowListeners.set(name, handler); },
+    setInterval(handler, delay) { tick = handler; intervalDelays.push(delay); return intervalDelays.length; },
     matchMedia: () => ({ matches: false }),
   };
   await runApp(source, { document, window, URL, Intl, Error });
@@ -293,6 +314,22 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
       await tick?.();
       await new Promise((resolve) => setImmediate(resolve));
     },
+    async emitCapabilities(capabilities, count = 1) {
+      status.transportCapabilities = capabilities;
+      for (let index = 0; index < count; index += 1) tauriListeners.get("turbo-capabilities-changed")?.({ payload: null });
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+    async holdStatusRefresh() {
+      let release;
+      nextStatusDelay = new Promise((resolve) => { release = resolve; });
+      const running = tick?.();
+      await new Promise((resolve) => setImmediate(resolve));
+      return async () => { release(); await running; await new Promise((resolve) => setImmediate(resolve)); };
+    },
+    pagehide() { windowListeners.get("pagehide")?.(); },
+    async resolveCapabilityListen() { resolveCapabilityListen?.(); await new Promise((resolve) => setImmediate(resolve)); },
+    unlistenCalls() { return unlistenCalls; },
+    intervalDelays() { return intervalDelays; },
     skillsActive() { return skillsActive; },
     setHidden(hidden) {
       document.hidden = hidden;
@@ -806,6 +843,54 @@ test("过期能力显示实际 HTTP 路由与待刷新状态", async () => {
   });
   assert.match(harness.list.innerHTML, /能力已过期，暂用 HTTP；无需 WS 预热/);
   assert.doesNotMatch(harness.list.innerHTML, /WS 可用/);
+});
+
+test("能力变化事件不等待轮询tick即更新现有候选徽标", async () => {
+  const harness = await catalogHarness({ freshStatus: true });
+  assert.match(harness.list.innerHTML, /WS 可用/);
+  await harness.emitCapabilities({ alpha: { allowed: true, transport: "http", reasonCode: "responses_websocket_unavailable" } });
+  assert.doesNotMatch(harness.list.innerHTML, /WS 可用/);
+  assert.match(harness.list.innerHTML, /自动 → 压缩 HTTP/);
+  assert.equal(harness.calls.filter((call) => call.command === "get_app_status").length, 1);
+  assert.deepEqual(harness.intervalDelays(), [5000]);
+  await harness.emitCapabilities({ alpha: { allowed: true, transport: "websocket", reasonCode: "ok" } });
+  assert.match(harness.list.innerHTML, /WS 可用/);
+});
+
+test("能力变化事件在旧状态请求中合并且不被旧响应覆盖", async () => {
+  const harness = await catalogHarness({ freshStatus: true });
+  const release = await harness.holdStatusRefresh();
+  await harness.emitCapabilities({ alpha: { allowed: true, transport: "http", reasonCode: "responses_websocket_unavailable" } }, 32);
+  await release();
+  assert.doesNotMatch(harness.list.innerHTML, /WS 可用/);
+  assert.equal(harness.calls.filter((call) => call.command === "get_app_status").length, 2);
+  assert.deepEqual(harness.intervalDelays(), [5000]);
+});
+
+test("能力监听延迟注册在pagehide后仍清理且不再请求", async () => {
+  const harness = await catalogHarness({ freshStatus: true, deferCapabilityListen: true });
+  harness.pagehide();
+  await harness.resolveCapabilityListen();
+  assert.equal(harness.unlistenCalls(), 1);
+  await harness.emitCapabilities({});
+  assert.equal(harness.calls.filter((call) => call.command === "get_app_status").length, 0);
+});
+
+test("能力监听失败沿用已有轮询且隐藏事件在恢复可见后更新", async () => {
+  const failed = await catalogHarness({ freshStatus: true, failCapabilityListen: true });
+  await failed.setCapabilities({});
+  assert.doesNotMatch(failed.list.innerHTML, /WS 可用/);
+  assert.deepEqual(failed.intervalDelays(), [5000]);
+  const hidden = await catalogHarness({ freshStatus: true });
+  hidden.setHidden(true);
+  await hidden.emitCapabilities({});
+  assert.match(hidden.list.innerHTML, /WS 可用/);
+  assert.equal(hidden.calls.filter((call) => call.command === "get_app_status").length, 0);
+  hidden.setHidden(false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.doesNotMatch(hidden.list.innerHTML, /WS 可用/);
+  hidden.pagehide();
+  assert.equal(hidden.unlistenCalls(), 1);
 });
 
 test("完整能力快照移除模型后不再保留旧 WS 标签", async () => {

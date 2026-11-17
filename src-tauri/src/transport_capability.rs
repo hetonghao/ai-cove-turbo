@@ -4,20 +4,22 @@ use std::{
     io::Write,
     path::Path,
     sync::Mutex,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::http::{HeaderMap, HeaderName, header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
+use tokio::time::Instant;
 use url::Url;
 
+const CAPABILITY_RETRY_DELAY: Duration = Duration::from_secs(30);
 const CAPABILITY_TTL: Duration = Duration::from_secs(5 * 60);
 const CAPABILITY_SNAPSHOT_VERSION: u64 = 1;
 pub(super) const CAPABILITY_SNAPSHOT_FILE: &str = "transport-capabilities.json";
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CapabilityModelStatus {
     pub(crate) allowed: bool,
@@ -92,9 +94,11 @@ impl CapabilityResponse {
 struct CacheState {
     expires_at: Option<Instant>,
     retry_after: Option<Instant>,
-    models: Vec<String>,
     reason: Option<String>,
     refreshing: bool,
+    generation: u64,
+    refresh_generation: u64,
+    unavailable: HashMap<String, Instant>,
     statuses: HashMap<String, CapabilityModelStatus>,
 }
 
@@ -111,16 +115,38 @@ impl CacheState {
     }
 }
 
-#[derive(Debug, Default)]
-pub(super) struct CapabilityCache(Mutex<CacheState>, tokio::sync::Notify);
+#[derive(Debug)]
+pub(super) struct CapabilityCache(
+    Mutex<CacheState>,
+    tokio::sync::Notify,
+    tokio::sync::watch::Sender<()>,
+);
+
+impl Default for CapabilityCache {
+    fn default() -> Self {
+        Self(
+            Mutex::default(),
+            tokio::sync::Notify::new(),
+            tokio::sync::watch::channel(()).0,
+        )
+    }
+}
 
 impl CapabilityCache {
+    pub(super) fn new_context(&self) -> Self {
+        Self(Mutex::default(), tokio::sync::Notify::new(), self.2.clone())
+    }
+
+    pub(super) fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+        self.2.subscribe()
+    }
     pub(super) async fn changed(&self) {
         self.1.notified().await;
     }
 
     pub(super) fn notify_changed(&self) {
         self.1.notify_waiters();
+        self.2.send_replace(());
     }
 
     #[cfg(test)]
@@ -149,7 +175,20 @@ impl CapabilityCache {
         cache
     }
 
-    pub(super) fn apply(&self, response: &CapabilityResponse, ttl: Duration) {
+    pub(super) fn apply(&self, response: &CapabilityResponse, ttl: Duration) -> bool {
+        self.apply_response(response, ttl, false)
+    }
+
+    pub(super) fn apply_for_request(&self, response: &CapabilityResponse, ttl: Duration) -> bool {
+        self.apply_response(response, ttl, true)
+    }
+
+    fn apply_response(
+        &self,
+        response: &CapabilityResponse,
+        ttl: Duration,
+        allow_recovery: bool,
+    ) -> bool {
         let new_statuses = response.data.iter().map(|item| {
             let transport = if item.allowed && item.responses_websocket {
                 CapabilityTransport::WebSocket
@@ -166,16 +205,85 @@ impl CapabilityCache {
             )
         });
         let mut state = lock(&self.0);
-        state.statuses = new_statuses.collect();
-        let mut all_models = state.statuses.keys().cloned().collect::<Vec<_>>();
-        all_models.sort_unstable();
-        state.models = all_models;
+        if state.refreshing && state.refresh_generation != state.generation {
+            state.refreshing = false;
+            return false;
+        }
+        let now = Instant::now();
+        let mut new_statuses: HashMap<_, _> = new_statuses.collect();
+        // A query for another model must not erase a newer, still-cooling negative fact.
+        state.unavailable.retain(|model, until| {
+            if !allow_recovery || now < *until {
+                return true;
+            }
+            match new_statuses.get(model) {
+                Some(status) if status.transport == CapabilityTransport::WebSocket => false,
+                Some(_) => {
+                    *until = now + CAPABILITY_RETRY_DELAY;
+                    true
+                }
+                None => true,
+            }
+        });
+        for model in state.unavailable.keys() {
+            if new_statuses
+                .get(model)
+                .is_none_or(|status| status.transport == CapabilityTransport::WebSocket)
+                && let Some(status) = state.statuses.get(model)
+            {
+                new_statuses.insert(model.clone(), status.clone());
+            }
+        }
+        for (model, status) in &new_statuses {
+            if matches!(
+                status.reason_code.as_str(),
+                "responses_websocket_unavailable" | "no_responses_websocket_channel"
+            ) && !state.unavailable.contains_key(model)
+            {
+                state
+                    .unavailable
+                    .insert(model.clone(), now + CAPABILITY_RETRY_DELAY);
+            }
+        }
+        let changed = state.statuses != new_statuses
+            || state.reason.is_some()
+            || state.expires_at.is_none_or(|at| now >= at);
+        state.statuses = new_statuses;
         state.refreshing = false;
         state.expires_at = Some(Instant::now() + ttl);
         state.reason = None;
         state.retry_after = None;
         drop(state);
-        self.notify_changed();
+        if changed {
+            self.notify_changed();
+        }
+        true
+    }
+
+    pub(super) fn mark_websocket_unavailable(&self, model: &str) {
+        let mut state = lock(&self.0);
+        let changed = state.statuses.get(model).is_none_or(|status| {
+            status.transport != CapabilityTransport::HttpOnly
+                || status.reason_code != "responses_websocket_unavailable"
+        });
+        state.generation = state.generation.wrapping_add(1);
+        state
+            .unavailable
+            .insert(model.to_owned(), Instant::now() + CAPABILITY_RETRY_DELAY);
+        let status = state
+            .statuses
+            .entry(model.to_owned())
+            .or_insert(CapabilityModelStatus {
+                allowed: true,
+                transport: CapabilityTransport::HttpOnly,
+                reason_code: String::new(),
+            });
+        status.transport = CapabilityTransport::HttpOnly;
+        status.reason_code = "responses_websocket_unavailable".to_owned();
+        drop(state);
+        if changed {
+            self.notify_changed();
+        }
     }
 
     pub(super) fn needs_refresh(&self, models: &[String]) -> bool {
@@ -183,20 +291,25 @@ impl CapabilityCache {
         let expired = state
             .expires_at
             .is_none_or(|expires_at| Instant::now() >= expires_at);
-        let needs_refresh = expired
-            || models
-                .iter()
-                .any(|model| !state.statuses.contains_key(model));
+        let needs_refresh = models.iter().any(|model| {
+            !state.unavailable.contains_key(model)
+                && (expired || !state.statuses.contains_key(model))
+        });
         drop(state);
         needs_refresh
     }
 
     pub(super) fn needs_refresh_for(&self, model: &str) -> bool {
         let state = lock(&self.0);
-        state
-            .expires_at
-            .is_none_or(|expires_at| Instant::now() >= expires_at)
-            || !state.statuses.contains_key(model)
+        state.unavailable.get(model).map_or_else(
+            || {
+                state
+                    .expires_at
+                    .is_none_or(|expires_at| Instant::now() >= expires_at)
+                    || !state.statuses.contains_key(model)
+            },
+            |until| Instant::now() >= *until,
+        )
     }
 
     pub(super) fn statuses(&self) -> HashMap<String, CapabilityModelStatus> {
@@ -206,6 +319,15 @@ impl CapabilityCache {
             .iter()
             .map(|(model, status)| (model.clone(), state.effective_status(status)))
             .collect()
+    }
+
+    pub(super) fn model_slugs(&self) -> Vec<String> {
+        lock(&self.0).statuses.keys().cloned().collect()
+    }
+
+    pub(super) fn exclude_unavailable(&self, models: &mut Vec<String>) {
+        let state = lock(&self.0);
+        models.retain(|model| !state.unavailable.contains_key(model));
     }
 
     pub(super) fn reason(&self) -> Option<String> {
@@ -256,12 +378,25 @@ impl CapabilityCache {
         }
     }
 
+    pub(super) fn unavailable_snapshot(&self) -> CapabilityResponse {
+        let mut response = self.snapshot_response();
+        // Persist only the fresh negative facts; never renew unrelated positive TTLs.
+        response.data.retain(|item| {
+            matches!(
+                item.reason_code.as_str(),
+                "responses_websocket_unavailable" | "no_responses_websocket_channel"
+            )
+        });
+        response
+    }
+
     pub(super) fn begin_refresh(&self) -> bool {
         let mut state = lock(&self.0);
         if state.refreshing || state.retry_after.is_some_and(|at| Instant::now() < at) {
             return false;
         }
         state.refreshing = true;
+        state.refresh_generation = state.generation;
         true
     }
 
@@ -270,7 +405,7 @@ impl CapabilityCache {
         state.refreshing = false;
         state.reason = reason;
         if state.reason.is_some() {
-            state.retry_after = Some(Instant::now() + Duration::from_secs(5));
+            state.retry_after = Some(Instant::now() + CAPABILITY_RETRY_DELAY);
         }
     }
 

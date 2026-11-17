@@ -524,15 +524,578 @@ async fn active_ws_not_submitted_fallback_completes_over_http_on_same_client() -
             }))
     );
 
-    // And: a later independent request re-evaluates the unchanged capability and returns to WS.
-    send_create_with_metadata(&mut client).await?;
-    server.fixture.wait_messages(3).await?;
+    // And: explicit unavailability makes the next independent Auto request use HTTP
+    // without another WS application attempt; the first fallback remains historical fact.
+    let input = "x".repeat(128 * 1024);
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type":"response.create", "model":"gpt-5.3-codex", "input":input,
+                "client_metadata":{"session_id":"session-123", "thread_id":"thread-123"},
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .map_err(io::Error::other)?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_eq!(server.fixture.counts().await.http_requests, 2);
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    assert_eq!(
+        proxy
+            .capability_statuses()
+            .get("gpt-5.3-codex")
+            .map(|status| status.transport),
+        Some(CapabilityTransport::HttpOnly)
+    );
     let snapshot = metrics.snapshot();
     assert_eq!(snapshot.hybrid_recovery_http, 1);
-    assert_eq!(snapshot.hybrid_ws, 2);
+    assert_eq!(snapshot.hybrid_capability_http, 1);
+    assert_eq!(snapshot.hybrid_ws, 1);
+    assert_eq!(
+        server
+            .fixture
+            .state
+            .http_encodings
+            .lock()
+            .await
+            .last()
+            .cloned(),
+        Some(Some("zstd".to_owned()))
+    );
+    let bodies = server.fixture.http_payloads().await;
+    let compressed = bodies
+        .last()
+        .ok_or_else(|| io::Error::other("compressed HTTP request missing"))?;
+    let sent: Value = serde_json::from_slice(&zstd::stream::decode_all(compressed.as_slice())?)
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        sent.get("input").and_then(Value::as_str),
+        Some(input.as_str())
+    );
+    assert!(sent.get("type").is_none());
+    let (mut next_session, _) = connect_local(&proxy).await?;
+    send_create_with_metadata(&mut next_session).await?;
+    assert_eq!(
+        next_event_type(&mut next_session).await?,
+        "response.completed"
+    );
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    assert_eq!(server.fixture.counts().await.http_requests, 3);
+    drop(next_session);
+    let events = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
+        .map_err(io::Error::other)?;
+    assert!(
+        events
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| {
+                event.get("route") == Some(&Value::from("hybridCapabilityHttp"))
+                    && event.get("result") == Some(&Value::from("success"))
+            }))
+    );
 
     drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_continuation_after_fallback_records_capability_http_without_rewriting_history()
+-> io::Result<()> {
+    for restore_in_another_session in [false, true] {
+        let server = FixtureServer::start(FixtureConfig {
+            private: PrivateBehavior::ActiveTransportFallback,
+            delay_http: false,
+        })
+        .await?;
+        let (proxy, metrics) = start_test_proxy(&server).await?;
+        proxy.set_capability_for_test("test", CapabilityTransport::WebSocket);
+        let (mut client, _) = connect_local(&proxy).await?;
+        send_transcript_create(&mut client).await?;
+        assert_eq!(next_event_type(&mut client).await?, "response.completed");
+        send_transcript_create(&mut client).await?;
+        let fallback = next_event_value(&mut client).await?;
+        assert_eq!(
+            fallback.get("type"),
+            Some(&Value::from("response.completed"))
+        );
+        let response_id = fallback
+            .pointer("/response/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| io::Error::other("HTTP fallback response missing"))?;
+        assert_eq!(metrics.snapshot().hybrid_recovery_http, 1);
+
+        if restore_in_another_session {
+            *server.fixture.state.capability_websocket.lock().await = Some(true);
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(31)).await;
+            tokio::time::resume();
+            let mut changed = proxy.capability_changes();
+            let (mut other, _) = connect_local(&proxy).await?;
+            send_transcript_create(&mut other).await?;
+            assert_eq!(next_event_type(&mut other).await?, "response.completed");
+            server.fixture.wait_capabilities(1).await?;
+            tokio::time::timeout(Duration::from_secs(1), changed.changed())
+                .await
+                .map_err(io::Error::other)?
+                .map_err(io::Error::other)?;
+            assert_eq!(
+                proxy
+                    .capability_statuses()
+                    .get("test")
+                    .map(|status| status.transport),
+                Some(CapabilityTransport::WebSocket)
+            );
+            // B proves WS is actually usable again; A still owns HTTP continuation state.
+            send_transcript_create(&mut other).await?;
+            assert_eq!(next_event_type(&mut other).await?, "response.completed");
+            assert_eq!(server.fixture.counts().await.private_messages, 3);
+            drop(other);
+        }
+        // This is a new HTTP turn referencing the completed fallback, not a new WS failure.
+        send_tool_output_continuation(&mut client, response_id, "call-fixture-1").await?;
+        assert_eq!(next_event_type(&mut client).await?, "response.completed");
+        assert_eq!(
+            server.fixture.counts().await.private_messages,
+            if restore_in_another_session { 3 } else { 2 }
+        );
+        assert_eq!(
+            server.fixture.counts().await.http_requests,
+            if restore_in_another_session { 3 } else { 2 }
+        );
+        assert_eq!(metrics.snapshot().hybrid_recovery_http, 1);
+        assert_eq!(
+            metrics.snapshot().hybrid_capability_http,
+            if restore_in_another_session { 2 } else { 1 }
+        );
+        let events = serde_json::to_value(metrics.traffic_snapshot().recent_requests)
+            .map_err(io::Error::other)?;
+        let events = events
+            .as_array()
+            .ok_or_else(|| io::Error::other("request records missing"))?;
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |event| event.get("route") == Some(&Value::from("hybridRecoveryHttp"))
+                        && event.get("result") == Some(&Value::from("fallback"))
+                )
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |event| event.get("route") == Some(&Value::from("hybridCapabilityHttp"))
+                        && event.get("result") == Some(&Value::from("success"))
+                )
+                .count(),
+            if restore_in_another_session { 2 } else { 1 }
+        );
+        drop(client);
+        proxy.stop().await;
+        server.stop().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fallback_does_not_borrow_or_poison_another_credentials_capability() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::ActiveTransportFallback,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("gpt-5.3-codex", CapabilityTransport::WebSocket);
+    let (mut first, _) = connect_local(&proxy).await?;
+    send_create_with_metadata(&mut first).await?;
+    assert_eq!(next_event_type(&mut first).await?, "response.completed");
+    send_create_with_metadata(&mut first).await?;
+    assert_eq!(next_event_type(&mut first).await?, "response.completed");
+
+    // A different actual forwarded credential has no right to use the startup
+    // credential's cached WS or negative evidence. It first uses HTTP and probes itself.
+    *server.fixture.state.capability_websocket.lock().await = Some(true);
+    let (mut other, _) = connect_local_with_authorization(&proxy, Some("Bearer other-key")).await?;
+    send_create_with_metadata(&mut other).await?;
+    assert_eq!(next_event_type(&mut other).await?, "response.completed");
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    server.fixture.wait_capabilities(1).await?;
+    assert_eq!(
+        server
+            .fixture
+            .state
+            .capability_headers
+            .lock()
+            .await
+            .first()
+            .and_then(|headers| headers.get(header::AUTHORIZATION))
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer other-key")
+    );
+    send_create_with_metadata(&mut first).await?;
+    assert_eq!(next_event_type(&mut first).await?, "response.completed");
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    // The same model on a different platform has its own transport evidence.
+    let other_platform = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    let (other_proxy, _) = start_test_proxy(&other_platform).await?;
+    other_proxy.set_capability_for_test("gpt-5.3-codex", CapabilityTransport::WebSocket);
+    let (mut platform_client, _) = connect_local(&other_proxy).await?;
+    send_create_with_metadata(&mut platform_client).await?;
+    assert_eq!(
+        next_event_type(&mut platform_client).await?,
+        "response.completed"
+    );
+    assert_eq!(other_platform.fixture.counts().await.private_messages, 1);
+    assert_eq!(other_platform.fixture.counts().await.http_requests, 0);
+    drop(platform_client);
+    other_proxy.stop().await;
+    other_platform.stop().await;
+    drop(first);
+    drop(other);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_model_recovers_on_demand_without_replaying_the_http_turn() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::ActiveTransportFallback,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, metrics) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("gpt-5.3-codex", CapabilityTransport::WebSocket);
+    let (mut client, _) = connect_local(&proxy).await?;
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    *server.fixture.state.capability_websocket.lock().await = Some(false);
+
+    // No wall-clock five-minute sleep: advancing the recovery clock alone sends no probe.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    assert_eq!(
+        server.fixture.state.counts.lock().await.capability_requests,
+        0
+    );
+    let mut changed = proxy.capability_changes();
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    server.fixture.wait_capabilities(1).await?;
+    tokio::time::timeout(Duration::from_secs(1), changed.changed())
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    assert_eq!(metrics.snapshot().hybrid_capability_http, 1);
+    // A confirmed no-WS reply renews the short recovery budget, not a five-minute
+    // detour through status polling. Requests within that budget do not probe.
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_eq!(
+        server.fixture.state.counts.lock().await.capability_requests,
+        1
+    );
+    *server.fixture.state.capability_websocket.lock().await = Some(true);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    let mut changed = proxy.capability_changes();
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    server.fixture.wait_capabilities(2).await?;
+    tokio::time::timeout(Duration::from_secs(1), changed.changed())
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    assert_eq!(metrics.snapshot().hybrid_capability_http, 3);
+
+    // Only a later independent turn may use the newly proven WS capability.
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_eq!(server.fixture.counts().await.private_messages, 3);
+    assert_eq!(
+        server.fixture.state.counts.lock().await.capability_requests,
+        2
+    );
+    assert_eq!(metrics.snapshot().hybrid_recovery_http, 1);
+    assert_eq!(metrics.snapshot().hybrid_ws, 2);
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn earlier_capability_query_cannot_revive_newer_unavailability_and_refreshes_coalesce()
+-> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::ActiveTransportFallback,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("gpt-5.3-codex", CapabilityTransport::WebSocket);
+    let (mut client, _) = connect_local(&proxy).await?;
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    *server.fixture.state.capability_websocket.lock().await = Some(true);
+    server
+        .fixture
+        .state
+        .hold_capability
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let models = ["gpt-5.3-codex".to_owned(), "missing-model".to_owned()];
+    proxy.refresh_capabilities(&models);
+    server.fixture.wait_capabilities(1).await?;
+    for _ in 0..32 {
+        proxy.refresh_capabilities(&models);
+    }
+    assert_eq!(
+        server.fixture.state.counts.lock().await.capability_requests,
+        1
+    );
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+
+    // The entire positive batch began BEFORE the negative fact; it must not
+    // make its previously unknown models appear freshly confirmed either.
+    *server.fixture.state.capability_websocket.lock().await = Some(false);
+    server.fixture.state.release_capability.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            proxy.refresh_capabilities(&models);
+            if server.fixture.state.counts.lock().await.capability_requests == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?;
+    assert_eq!(
+        proxy
+            .capability_statuses()
+            .get("gpt-5.3-codex")
+            .map(|status| status.transport),
+        Some(CapabilityTransport::HttpOnly)
+    );
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    for _ in 0..32 {
+        proxy.refresh_capabilities(&models);
+    }
+    assert_eq!(
+        server.fixture.state.counts.lock().await.capability_requests,
+        2
+    );
+    let mut changed = proxy.capability_changes();
+    server.fixture.state.release_capability.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), changed.changed())
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_refresh_from_status_cannot_recover_a_negative_model() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::ActiveTransportFallback,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("gpt-5.3-codex", CapabilityTransport::WebSocket);
+    proxy.set_capability_for_test("other-model", CapabilityTransport::WebSocket);
+    let (mut client, _) = connect_local(&proxy).await?;
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    *server.fixture.state.capability_websocket.lock().await = Some(true);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(301)).await;
+    tokio::time::resume();
+    let mut changed = proxy.capability_changes();
+    proxy.refresh_capabilities(&["other-model".to_owned()]);
+    server.fixture.wait_capabilities(1).await?;
+    tokio::time::timeout(Duration::from_secs(1), changed.changed())
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    let statuses = proxy.capability_statuses();
+    assert_eq!(
+        statuses.get("gpt-5.3-codex").map(|status| status.transport),
+        Some(CapabilityTransport::HttpOnly)
+    );
+    assert_eq!(
+        statuses.get("other-model").map(|status| status.transport),
+        Some(CapabilityTransport::WebSocket)
+    );
+    let batches = server.fixture.state.capability_models.lock().await.clone();
+    assert_eq!(batches.first(), Some(&vec!["other-model".to_owned()]));
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    // An unknown-model status query must also omit A even if the caller supplies it.
+    let mut changed = proxy.capability_changes();
+    proxy.refresh_capabilities(&["unknown-model".to_owned(), "gpt-5.3-codex".to_owned()]);
+    server.fixture.wait_capabilities(2).await?;
+    tokio::time::timeout(Duration::from_secs(1), changed.changed())
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    let batches = server.fixture.state.capability_models.lock().await.clone();
+    assert!(
+        batches
+            .iter()
+            .all(|batch| !batch.iter().any(|model| model == "gpt-5.3-codex"))
+    );
+    assert_eq!(
+        proxy
+            .capability_statuses()
+            .get("gpt-5.3-codex")
+            .map(|status| status.transport),
+        Some(CapabilityTransport::HttpOnly)
+    );
+    // A new independent business request may include A and prove recovery, but
+    // its already selected HTTP request is never moved to WS.
+    let mut changed = proxy.capability_changes();
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    server.fixture.wait_capabilities(3).await?;
+    tokio::time::timeout(Duration::from_secs(1), changed.changed())
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    assert!(
+        server
+            .fixture
+            .state
+            .capability_models
+            .lock()
+            .await
+            .last()
+            .is_some_and(|batch| batch.iter().any(|model| model == "gpt-5.3-codex"))
+    );
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_refresh_from_stopped_proxy_cannot_overwrite_new_proxy_negative_snapshot()
+-> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::ActiveTransportFallback,
+        delay_http: false,
+    })
+    .await?;
+    let policy_path = server.directory.path().join("shared-policy.json");
+    let (old_proxy, _) = start_test_proxy_with_policy(&server, Some(policy_path.clone())).await?;
+    *server.fixture.state.capability_websocket.lock().await = Some(true);
+    server
+        .fixture
+        .state
+        .hold_capability
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    old_proxy.refresh_capabilities(&["gpt-5.3-codex".to_owned()]);
+    server.fixture.wait_capabilities(1).await?;
+    let mut old_changes = old_proxy.capability_changes();
+    old_proxy.stop().await;
+
+    let (proxy, _) = start_test_proxy_with_policy(&server, Some(policy_path.clone())).await?;
+    proxy.set_capability_for_test("gpt-5.3-codex", CapabilityTransport::WebSocket);
+    let (mut client, _) = connect_local(&proxy).await?;
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    drop(client);
+    proxy.stop().await;
+
+    // The old GET is allowed to finish only after the newer negative snapshot is durable.
+    server.fixture.state.release_capability.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while old_changes.changed().await.is_ok() {}
+    })
+    .await
+    .map_err(io::Error::other)?;
+    let (restarted, _) = start_test_proxy_with_policy(&server, Some(policy_path)).await?;
+    assert_eq!(
+        restarted
+            .capability_statuses()
+            .get("gpt-5.3-codex")
+            .map(|status| status.transport),
+        Some(CapabilityTransport::HttpOnly)
+    );
+    let (mut client, _) = connect_local(&restarted).await?;
+    send_create_with_metadata(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    drop(client);
+    restarted.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_context_capacity_keeps_excess_credentials_http_without_probe_storm()
+-> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Persistent,
+        delay_http: false,
+    })
+    .await?;
+    *server.fixture.state.capability_websocket.lock().await = Some(true);
+    let (proxy, _) = start_test_proxy(&server).await?;
+    let mut clients = Vec::new();
+    for index in 0..32 {
+        let authorization = format!("Bearer fixture-context-{index}");
+        let (mut client, _) =
+            connect_local_with_authorization(&proxy, Some(&authorization)).await?;
+        client
+            .send(Message::Ping(b"ready".to_vec().into()))
+            .await
+            .map_err(io::Error::other)?;
+        if !matches!(client.next().await, Some(Ok(Message::Pong(_)))) {
+            return Err(io::Error::other("local context did not become ready"));
+        }
+        clients.push(client);
+    }
+    // The startup context plus 31 live credential contexts exhaust the retained bound.
+    // The excess context still completes over HTTP and cannot start its own probe loop.
+    let client = clients
+        .last_mut()
+        .ok_or_else(|| io::Error::other("context missing"))?;
+    for _ in 0..3 {
+        send_create_with_metadata(client).await?;
+        assert_eq!(next_event_type(client).await?, "response.completed");
+    }
+    assert_eq!(server.fixture.counts().await.private_handshakes, 0);
+    assert_eq!(server.fixture.counts().await.http_requests, 3);
+    assert_eq!(
+        server.fixture.state.counts.lock().await.capability_requests,
+        0
+    );
+    drop(clients);
     proxy.stop().await;
     server.stop().await;
     Ok(())
@@ -547,6 +1110,8 @@ async fn active_ws_fallback_after_output_does_not_replay_over_http() -> io::Resu
     })
     .await?;
     let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("test", CapabilityTransport::WebSocket);
+    let mut changed = proxy.capability_changes();
     let (mut client, _) = connect_local(&proxy).await?;
     send_create(&mut client).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
@@ -561,6 +1126,22 @@ async fn active_ws_fallback_after_output_does_not_replay_over_http() -> io::Resu
     // Then: Turbo forwards the error and never replays the partial response over HTTP.
     assert_eq!(next_event_type(&mut client).await?, "error");
     assert_counts_with_min_private(server.fixture.counts().await, 1, 2, 0);
+    // The contract is still capability evidence even when this turn cannot be replayed.
+    assert_eq!(
+        proxy
+            .capability_statuses()
+            .get("test")
+            .map(|status| status.transport),
+        Some(CapabilityTransport::HttpOnly)
+    );
+    tokio::time::timeout(Duration::from_secs(1), changed.changed())
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    send_create(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    assert_eq!(server.fixture.counts().await.http_requests, 1);
 
     drop(client);
     proxy.stop().await;
@@ -577,6 +1158,7 @@ async fn active_ws_generic_error_with_fallback_text_does_not_replay_over_http() 
     })
     .await?;
     let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("test", CapabilityTransport::WebSocket);
     let (mut client, _) = connect_local(&proxy).await?;
     send_create(&mut client).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
@@ -587,6 +1169,13 @@ async fn active_ws_generic_error_with_fallback_text_does_not_replay_over_http() 
     // Then: Turbo forwards the generic error and performs no HTTP replay.
     assert_eq!(next_event_type(&mut client).await?, "error");
     assert_counts_with_min_private(server.fixture.counts().await, 1, 2, 0);
+    assert_eq!(
+        proxy
+            .capability_statuses()
+            .get("test")
+            .map(|status| status.transport),
+        Some(CapabilityTransport::WebSocket)
+    );
 
     drop(client);
     proxy.stop().await;
@@ -603,6 +1192,8 @@ async fn active_ws_continuation_fallback_contract_does_not_replay_over_http() ->
     })
     .await?;
     let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("test", CapabilityTransport::WebSocket);
+    let mut changed = proxy.capability_changes();
     let (mut client, _) = connect_local(&proxy).await?;
     send_create(&mut client).await?;
     let completed = next_event_value(&mut client).await?;
@@ -622,6 +1213,22 @@ async fn active_ws_continuation_fallback_contract_does_not_replay_over_http() ->
     // Then: the stateful request remains WebSocket-required and is not sent over HTTP.
     assert_eq!(next_event_type(&mut client).await?, "error");
     assert_counts_with_min_private(server.fixture.counts().await, 1, 2, 0);
+    // The contract is still capability evidence even when this turn cannot be replayed.
+    assert_eq!(
+        proxy
+            .capability_statuses()
+            .get("test")
+            .map(|status| status.transport),
+        Some(CapabilityTransport::HttpOnly)
+    );
+    tokio::time::timeout(Duration::from_secs(1), changed.changed())
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    send_create(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    assert_eq!(server.fixture.counts().await.http_requests, 1);
 
     drop(client);
     proxy.stop().await;
@@ -638,6 +1245,8 @@ async fn active_ws_cancel_before_fallback_contract_does_not_restart_over_http() 
     })
     .await?;
     let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("test", CapabilityTransport::WebSocket);
+    let mut changed = proxy.capability_changes();
     let (mut client, _) = connect_local(&proxy).await?;
     send_create(&mut client).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
@@ -651,6 +1260,22 @@ async fn active_ws_cancel_before_fallback_contract_does_not_restart_over_http() 
     // Then: Turbo forwards the terminal error without restarting the cancelled request.
     assert_eq!(next_event_type(&mut client).await?, "error");
     assert_counts_with_min_private(server.fixture.counts().await, 1, 3, 0);
+    // The contract is still capability evidence even when this turn cannot be replayed.
+    assert_eq!(
+        proxy
+            .capability_statuses()
+            .get("test")
+            .map(|status| status.transport),
+        Some(CapabilityTransport::HttpOnly)
+    );
+    tokio::time::timeout(Duration::from_secs(1), changed.changed())
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    send_create(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_eq!(server.fixture.counts().await.private_messages, 3);
+    assert_eq!(server.fixture.counts().await.http_requests, 1);
 
     drop(client);
     proxy.stop().await;
@@ -668,6 +1293,8 @@ async fn active_ws_cancel_race_with_fallback_contract_does_not_replay_over_http(
     })
     .await?;
     let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("test", CapabilityTransport::WebSocket);
+    let mut changed = proxy.capability_changes();
     let (mut client, _) = connect_local(&proxy).await?;
     send_create(&mut client).await?;
     assert_eq!(next_event_type(&mut client).await?, "response.completed");
@@ -679,6 +1306,22 @@ async fn active_ws_cancel_race_with_fallback_contract_does_not_replay_over_http(
     // Then: Turbo treats the cancellation as a hard no-replay boundary.
     assert_eq!(next_event_type(&mut client).await?, "error");
     assert_counts_with_min_private(server.fixture.counts().await, 1, 2, 0);
+    // The contract is still capability evidence even when this turn cannot be replayed.
+    assert_eq!(
+        proxy
+            .capability_statuses()
+            .get("test")
+            .map(|status| status.transport),
+        Some(CapabilityTransport::HttpOnly)
+    );
+    tokio::time::timeout(Duration::from_secs(1), changed.changed())
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    send_create(&mut client).await?;
+    assert_eq!(next_event_type(&mut client).await?, "response.completed");
+    assert_eq!(server.fixture.counts().await.private_messages, 2);
+    assert_eq!(server.fixture.counts().await.http_requests, 1);
 
     drop(client);
     proxy.stop().await;

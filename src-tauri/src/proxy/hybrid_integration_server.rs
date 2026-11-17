@@ -24,6 +24,56 @@ pub(super) async fn upstream_request(
     State(fixture): State<Fixture>,
     mut request: Request,
 ) -> Response<Body> {
+    if request.uri().path() == "/v1/transport/capabilities" {
+        let Some(websocket) = *fixture.state.capability_websocket.lock().await else {
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::NOT_FOUND;
+            return response;
+        };
+        fixture
+            .state
+            .capability_headers
+            .lock()
+            .await
+            .push(request.headers().clone());
+        fixture
+            .record(|counts| counts.capability_requests += 1)
+            .await;
+        if fixture
+            .state
+            .hold_capability
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            fixture.state.release_capability.notified().await;
+        }
+        let models =
+            url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+                .find(|(key, _)| key == "models")
+                .map(|(_, models)| models.into_owned())
+                .unwrap_or_default();
+        fixture
+            .state
+            .capability_models
+            .lock()
+            .await
+            .push(models.split(',').map(str::to_owned).collect());
+        let data = models
+            .split(',')
+            .map(|model| {
+                serde_json::json!({
+                    "model":model, "allowed":true, "http":true,
+                    "responses_websocket":websocket,
+                    "reason_code":if websocket { "ok" } else { "no_responses_websocket_channel" },
+                })
+            })
+            .collect::<Vec<_>>();
+        return Response::new(Body::from(
+            serde_json::json!({
+                "success":true, "version":1, "object":"transport_capabilities", "data":data,
+            })
+            .to_string(),
+        ));
+    }
     let private = request
         .headers()
         .get(header::SEC_WEBSOCKET_PROTOCOL)
@@ -37,6 +87,13 @@ pub(super) async fn upstream_request(
     if upgrade {
         return upgrade_response(&fixture, &mut request, private).await;
     }
+    fixture.state.http_encodings.lock().await.push(
+        request
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+    );
     let Ok(body) = to_bytes(request.into_body(), 64 * 1024 * 1024).await else {
         return Response::new(Body::empty());
     };

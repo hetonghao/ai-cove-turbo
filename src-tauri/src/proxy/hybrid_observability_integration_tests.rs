@@ -224,6 +224,7 @@ async fn requested_connection_reports_sanitized_handshake_reason() -> io::Result
     })
     .await?;
     let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_auth_for_test("test", "Bearer diagnostic-secret");
     let (mut client, status) =
         connect_local_with_authorization(&proxy, Some("Bearer diagnostic-secret")).await?;
     assert_eq!(status, 101);

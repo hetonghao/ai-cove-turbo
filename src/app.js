@@ -235,6 +235,9 @@
   let pendingAction = "";
   let refreshing = false;
   let statusTimer = 0;
+  let capabilityRefreshPending = false;
+  let capabilityUnlisten = null;
+  let capabilityListenerClosed = false;
   let streamPaused = false;
   let liveTailFollowing = true;
   let unseenLiveRequests = 0;
@@ -2064,6 +2067,7 @@
     renderModelCatalog();
     if (state.tab === "live" && statusHydrated) renderLiveStream(options);
     if (state.tab === "statistics") renderStatistics();
+    if (capabilityRefreshPending && !pendingAction && !refreshing) void refreshStatus();
   }
 
   function renderTab(options = {}) {
@@ -2128,6 +2132,30 @@
     if (options.updateUrl !== false) updateUrl();
     if (tabChanged) startStatusPolling();
     syncSkillsActivation();
+  }
+
+  function bindCapabilityEvents() {
+    const listen = window.__TAURI__?.event?.listen;
+    if (!listen) return;
+    window.addEventListener("pagehide", () => {
+      capabilityListenerClosed = true;
+      capabilityRefreshPending = false;
+      capabilityUnlisten?.();
+      capabilityUnlisten = null;
+    }, { once: true });
+    Promise.resolve().then(() => listen("turbo-capabilities-changed", () => {
+      if (capabilityListenerClosed) return;
+      capabilityRefreshPending = true;
+      void refreshStatus();
+    })).then((unlisten) => {
+      if (capabilityListenerClosed) unlisten();
+      else {
+        capabilityUnlisten = unlisten;
+        // Close the initial-read/listener-registration gap without another timer.
+        capabilityRefreshPending = true;
+        void refreshStatus();
+      }
+    }).catch(() => { /* Existing status polling remains the fallback if events are unavailable. */ });
   }
 
   function statusRefreshMs() {
@@ -3439,7 +3467,8 @@
   }
 
   async function refreshStatus() {
-    if (!invoke || !canRefreshStatus() || refreshing || document.hidden) return;
+    if (!invoke || !canRefreshStatus() || refreshing || document.hidden || capabilityListenerClosed) return;
+    capabilityRefreshPending = false;
     refreshing = true;
     try {
       const status = await invoke("get_app_status");
@@ -3457,6 +3486,7 @@
     } finally {
       refreshing = false;
       if (state.tab === "live") await refreshConnectionSnapshot();
+      if (capabilityRefreshPending) void refreshStatus();
     }
   }
 
@@ -4026,6 +4056,7 @@
     updateUrl();
     syncSkillsActivation();
     if (invoke) {
+      bindCapabilityEvents();
       void (async () => {
         await refreshStatus();
         await checkUpdatesOncePerDay();
