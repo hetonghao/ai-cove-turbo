@@ -7,6 +7,8 @@
   const MAX_COLORS = 3;
   const BASE_INTENSITY = 0.4;
   const PULSE_DURATION = 360;
+  const ANIMATION_SPEED = 0.5;
+  const TAU = Math.PI * 2;
   const VERTEX_SHADER = `#version 300 es
 in vec2 position;
 void main() {
@@ -16,12 +18,12 @@ void main() {
   const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 
-uniform float uTime;
+uniform vec2 uWavePhases[${MAX_STRANDS}];
+uniform float uHuePhase;
 uniform vec2 uResolution;
 uniform vec3 uColors[${MAX_COLORS}];
 uniform int uColorCount;
 uniform int uStrandCount;
-uniform float uSpeed;
 uniform float uAmplitude;
 uniform float uWaviness;
 uniform float uThickness;
@@ -62,17 +64,16 @@ void main() {
     float strand = float(i);
     float phase = strand * 1.7 * uSpread;
     float frequency = (2.0 + strand * 0.35) * uWaviness;
-    float velocity = 1.4 + strand * 1.2;
-    float time = uTime * uSpeed;
-    float wave = sin(uv.x * frequency + time * velocity + phase) * 0.60
-               + sin(uv.x * frequency * 1.1 - time * velocity * 0.7 + phase * 1.7) * 0.40;
+    vec2 wavePhases = uWavePhases[i];
+    float wave = sin(uv.x * frequency + wavePhases.x + phase) * 0.60
+               + sin(uv.x * frequency * 1.1 - wavePhases.y + phase * 1.7) * 0.40;
     float amplitude = (0.1 + 0.02 * energy) * envelope * uAmplitude;
     float distanceToStrand = abs(uv.y - wave * amplitude);
     float thickness = (0.001 + 0.05 * energy) * (0.35 + envelope) * uThickness;
     float light = thickness / (distanceToStrand + thickness * 0.45);
     light *= light;
 
-    float hue = strand / float(uStrandCount) + uv.x * 0.30 + uTime * 0.04 + uHueShift;
+    float hue = strand / float(uStrandCount) + uv.x * 0.30 + uHuePhase + uHueShift;
     col += samplePalette(hue) * light * envelope;
   }
 
@@ -117,12 +118,12 @@ void main() {
 
   const uniform = (name) => gl.getUniformLocation(program, name);
   const uniforms = {
-    time: uniform("uTime"),
+    wavePhases: uniform("uWavePhases[0]"),
+    huePhase: uniform("uHuePhase"),
     resolution: uniform("uResolution"),
     colors: uniform("uColors[0]"),
     colorCount: uniform("uColorCount"),
     strandCount: uniform("uStrandCount"),
-    speed: uniform("uSpeed"),
     amplitude: uniform("uAmplitude"),
     waviness: uniform("uWaviness"),
     thickness: uniform("uThickness"),
@@ -145,6 +146,7 @@ void main() {
         ? [((color >> 16) & 255) / 255, ((color >> 8) & 255) / 255, (color & 255) / 255]
         : [1, 1, 1];
     });
+  const wavePhases = new Float32Array(MAX_STRANDS * 2);
   let count = 0;
   let frame = 0;
   let sized = false;
@@ -157,7 +159,6 @@ void main() {
   gl.useProgram(program);
   gl.uniform3fv(uniforms.colors, new Float32Array(palette));
   gl.uniform1i(uniforms.colorCount, MAX_COLORS);
-  gl.uniform1f(uniforms.speed, 0.5);
   gl.uniform1f(uniforms.amplitude, 1);
   gl.uniform1f(uniforms.waviness, 1);
   gl.uniform1f(uniforms.thickness, 0.7);
@@ -177,7 +178,15 @@ void main() {
     const pulseEnergy = pulseStrength * (1 - pulseProgress) ** 2;
     if (pulseProgress >= 1) pulseStrength = 0;
     gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.uniform1f(uniforms.time, time * 0.001);
+    // 累计时间留在 JS 双精度侧，先按各自周期取模，避免 GPU float32 吞掉像素坐标。
+    const seconds = time * 0.001;
+    for (let strand = 0; strand < MAX_STRANDS; strand += 1) {
+      const phase = seconds * ANIMATION_SPEED * (1.4 + strand * 1.2);
+      wavePhases[strand * 2] = phase % TAU;
+      wavePhases[strand * 2 + 1] = (phase * 0.7) % TAU;
+    }
+    gl.uniform2fv(uniforms.wavePhases, wavePhases);
+    gl.uniform1f(uniforms.huePhase, (seconds * 0.04) % 1);
     gl.uniform1f(uniforms.intensity, BASE_INTENSITY + pulseEnergy);
     gl.uniform1i(uniforms.strandCount, count);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
