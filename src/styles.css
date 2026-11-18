@@ -4627,6 +4627,63 @@ button:disabled {
   margin-top: 7px;
 }
 
+.b-config-heading--catalog > div > .b-model-catalog__fast-note {
+  max-inline-size: 72ch;
+  color: var(--b-muted);
+  font: 0.75rem/1.55 var(--font-sans);
+}
+
+.b-model-catalog__fast-note > span {
+  display: block;
+  margin-block-start: 4px;
+}
+
+.b-model-fast {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-block-size: 32px;
+  padding-inline: 4px;
+  color: var(--b-ink);
+  font: 0.6875rem/1 var(--font-sans);
+}
+
+.b-model-fast input {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.b-model-fast input:focus-visible + .b-switch {
+  outline: 2px solid var(--b-accent);
+  outline-offset: 3px;
+}
+
+.b-model-fast input:checked + .b-switch {
+  background: var(--b-accent);
+}
+
+.b-model-fast input:checked + .b-switch i {
+  background: var(--b-bg);
+  transform: translateX(11px);
+}
+
+.b-model-fast input:disabled {
+  cursor: not-allowed;
+}
+
+.b-model-fast input:disabled + .b-switch {
+  opacity: 0.48;
+}
+
 .b-model-catalog__toolbar {
   display: flex;
   align-items: center;
@@ -6578,6 +6635,18 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
   }
 }
 
+@media (max-width: 760px) {
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row:has(.b-model-fast) {
+    grid-template-columns: 38px minmax(0, 1fr);
+    grid-template-areas: "drag copy" ". actions";
+    row-gap: 3px;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row:has(.b-model-fast) .b-model-row__actions {
+    justify-self: end;
+  }
+}
+
 @media (max-width: 500px) {
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy {
     grid-template-columns: minmax(0, 1fr) minmax(54px, 0.8fr);
@@ -6585,6 +6654,10 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
       "identity details"
       "capability transport";
     row-gap: 2px;
+  }
+
+  body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row:has(.b-model-fast) .b-model-row__copy {
+    grid-template-columns: minmax(0, 1.6fr) minmax(64px, 1fr);
   }
 
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy .state-indicator {

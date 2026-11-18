@@ -3,7 +3,7 @@ use std::io;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::{connect_local, next_event_type};
+use super::{connect_local, next_event_type, next_event_value};
 
 #[path = "hybrid_legacy_fixture.rs"]
 mod fixture;
@@ -14,6 +14,43 @@ const CREATE: &str = r#"{"type":"response.create","model":"test","input":"test"}
 const FAIL_CREATE: &str = r#"{"type":"response.create","model":"close-active","input":"test"}"#;
 const FAILED_TERMINAL_CREATE: &str =
     r#"{"type":"response.create","model":"failed-terminal","input":"test"}"#;
+
+#[tokio::test]
+async fn standard_legacy_relay_applies_fast_on_an_open_connection() -> io::Result<()> {
+    let fixture = StandardFixture::start().await?;
+    let (proxy, _) = start_standard_proxy(&fixture).await?;
+    let (mut client, _) = connect_local(&proxy).await?;
+    client
+        .send(Message::Text(r#"{"type":"session.update"}"#.into()))
+        .await
+        .map_err(io::Error::other)?;
+    for (enabled, tier) in [(false, None), (true, Some("priority")), (false, None)] {
+        proxy
+            .set_model_fast("gpt-6.2-sol".to_owned(), enabled)
+            .map_err(io::Error::other)?;
+        client
+            .send(Message::Text(
+                r#"{"type":"response.create","model":"gpt-6.2-sol","input":"hello"}"#.into(),
+            ))
+            .await
+            .map_err(io::Error::other)?;
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            next_event_value(&mut client),
+        )
+        .await??;
+        assert_eq!(
+            event
+                .pointer("/response/service_tier")
+                .and_then(serde_json::Value::as_str),
+            tier
+        );
+    }
+    drop(client);
+    proxy.stop().await;
+    fixture.stop().await;
+    Ok(())
+}
 
 #[tokio::test]
 async fn standard_legacy_relay_records_each_terminal_once() -> io::Result<()> {

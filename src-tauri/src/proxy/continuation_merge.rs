@@ -106,6 +106,8 @@ pub(super) fn expand(
     let object = expanded.as_object_mut()?;
     object.remove("type");
     object.remove("previous_response_id");
+    // The current turn decides its tier; a previous Fast request must not opt this one in.
+    object.remove("service_tier");
     object.insert("input".to_owned(), Value::Array(merged));
     for (key, value) in continuation {
         if REBUILT_KEYS.contains(&key.as_str()) {

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -7,9 +7,11 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use tempfile::NamedTempFile;
 
 const POLICY_VERSION: u64 = 1;
+const FAST_MODELS_FILE: &str = "ai_cove_turbo_fast_models.json";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Transport {
@@ -64,6 +66,7 @@ struct StoreState {
 pub(super) struct ModelPolicyStore {
     path: PathBuf,
     state: Mutex<StoreState>,
+    fast_models: Mutex<BTreeSet<String>>,
 }
 
 impl Default for ModelPolicy {
@@ -152,10 +155,83 @@ impl ModelPolicy {
 impl ModelPolicyStore {
     pub(super) fn new(path: PathBuf) -> Self {
         let (policy, reason) = ModelPolicy::load(&path, None);
+        let fast_models = fs::read(path.with_file_name(FAST_MODELS_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<BTreeSet<String>>(&bytes).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|slug| is_fast_model(slug))
+            .collect();
         Self {
             path,
             state: Mutex::new(StoreState { policy, reason }),
+            fast_models: Mutex::new(fast_models),
         }
+    }
+
+    pub(super) fn fast_models(&self) -> BTreeSet<String> {
+        lock(&self.fast_models).clone()
+    }
+
+    pub(super) fn set_fast(&self, slug: String, enabled: bool) -> Result<BTreeSet<String>, String> {
+        if !is_fast_model(&slug) {
+            return Err("Fast 模式仅支持 GPT 模型".to_owned());
+        }
+        let mut current = lock(&self.fast_models);
+        let mut next = current.clone();
+        let changed = if enabled {
+            next.insert(slug)
+        } else {
+            next.remove(&slug)
+        };
+        if changed {
+            let bytes = serde_json::to_vec_pretty(&next).map_err(|error| error.to_string())?;
+            write_atomic(&self.path.with_file_name(FAST_MODELS_FILE), &bytes)
+                .map_err(|error| format!("无法保存 Fast 模式：{error}"))?;
+            *current = next;
+        }
+        Ok(current.clone())
+    }
+
+    pub(super) fn apply_fast(
+        &self,
+        payload: &[u8],
+        inherited_model: Option<&str>,
+    ) -> Option<Vec<u8>> {
+        if lock(&self.fast_models).is_empty() {
+            return None;
+        }
+        // Keep nested prompt and schema values byte-for-byte while changing the top-level tier.
+        let mut fields: BTreeMap<String, &RawValue> = serde_json::from_slice(payload).ok()?;
+        if fields
+            .get("generate")
+            .is_some_and(|raw| raw.get() == "false")
+        {
+            return None;
+        }
+        let model = match fields.get("model") {
+            Some(raw) => {
+                let slug: std::borrow::Cow<'_, str> = serde_json::from_str(raw.get()).ok()?;
+                if slug.is_empty() {
+                    std::borrow::Cow::Borrowed(inherited_model?)
+                } else {
+                    slug
+                }
+            }
+            None => std::borrow::Cow::Borrowed(inherited_model?),
+        };
+        if !lock(&self.fast_models).contains(model.as_ref())
+            || fields
+                .get("service_tier")
+                .is_some_and(|raw| raw.get() == "\"priority\"")
+        {
+            return None;
+        }
+        fields.insert(
+            "service_tier".to_owned(),
+            serde_json::from_str("\"priority\"").ok()?,
+        );
+        serde_json::to_vec(&fields).ok()
     }
 
     pub(super) fn reload(&self) -> ModelPolicy {
@@ -203,6 +279,14 @@ impl ModelPolicyStore {
     }
 }
 
+fn is_fast_model(slug: &str) -> bool {
+    slug.len() > 4
+        && slug.trim() == slug
+        && slug
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("gpt-"))
+}
+
 impl Transport {
     const fn as_str(self) -> &'static str {
         match self {
@@ -247,6 +331,28 @@ fn parse_transport(value: &str) -> Option<Transport> {
 mod tests {
     use super::{ModelPolicy, ModelPolicyStore, ModelPolicyUpdate, Transport};
     use std::fs;
+
+    #[test]
+    fn fast_preferences_survive_restart_and_a_failed_write_does_not_enable_fast()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("policy.json");
+        let fast_path = path.with_file_name(super::FAST_MODELS_FILE);
+        let store = ModelPolicyStore::new(path.clone());
+        fs::create_dir(&fast_path)?;
+        assert!(store.set_fast("gpt-6.2-sol".to_owned(), true).is_err());
+        assert!(store.fast_models().is_empty());
+        fs::remove_dir(fast_path)?;
+
+        store.set_fast("gpt-6.2-sol".to_owned(), true)?;
+        let restarted = ModelPolicyStore::new(path);
+        assert_eq!(
+            restarted.fast_models(),
+            std::collections::BTreeSet::from(["gpt-6.2-sol".to_owned()])
+        );
+        assert!(restarted.set_fast("gemini-3".to_owned(), true).is_err());
+        Ok(())
+    }
 
     #[test]
     fn exact_model_match_defaults_to_auto() {

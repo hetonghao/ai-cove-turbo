@@ -90,6 +90,7 @@
     websocketState: "waiting",
     prewarmState: "disabled",
     modelPolicy: { defaultTransport: "auto", models: {}, reason: null },
+    fastModels: [],
     transportCapabilityReason: null,
     websocketHandshakes: 0,
     websocketMessages: 0,
@@ -291,6 +292,7 @@
   let modelPolicyDraft = null;
   let renderedModelCatalogMarkup = "";
   let modelCatalogActionMessage = "";
+  let fastModelUpdateVersion = 0;
   let pendingDeleteSlug = "";
   let modelDeleteTrigger = null;
   let draggedCatalogSlug = "";
@@ -458,8 +460,9 @@
     if (updatePreference.checkedDay === today) return;
     markUpdateCheckedToday();
     updateCheckInFlight = true;
+    const fastVersion = fastModelUpdateVersion;
     try {
-      applyStatus(await invoke("check_for_updates"));
+      applyStatus(await invoke("check_for_updates"), { fastVersion });
     } catch (error) {
       state.updateState = "error";
       state.updateMessage = "检查更新失败，可稍后重试";
@@ -1241,8 +1244,11 @@
       const deleteMarkup = deleteProtected
         ? '<span class="b-model-row__delete-hint" tabindex="0" role="img" aria-label="' + escapeHtml(deleteLabel) + '" data-tooltip="' + escapeHtml(deleteLabel) + '">' + deleteControl + "</span>"
         : deleteControl;
+      const fastMarkup = /^gpt-.+/i.test(model.slug)
+        ? '<label class="b-model-fast"><span>Fast</span><input type="checkbox" switch role="switch" data-model-fast aria-label="' + escapeHtml(modelLabel) + ' Fast 模式" aria-describedby="model-fast-description"><span class="b-switch" aria-hidden="true"><i></i></span></label>'
+        : "";
       const sourceMarkup = source ? (source === "上游" ? conflict ? '<span class="b-model-row__confirm" data-model-source="' + escapeHtml(source) + '">' + escapeHtml(conflict.slice(3)) + '</span>' : "" : '<span data-model-source="' + escapeHtml(source) + '">' + escapeHtml(source + conflict) + '</span>') : conflict ? '<span class="b-model-row__confirm">' + escapeHtml(conflict.slice(3)) + '</span>' : '';
-      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><span class="b-model-row__identity">' + rootModelStatusMarkup(model) + '<strong>' + escapeHtml(modelLabel) + '</strong>' + modelSlugMarkup(model, modelLabel) + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '<div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div></span><span class="b-model-row__actions"><button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button>' + deleteMarkup + '</span></article>';
+      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><span class="b-model-row__identity">' + rootModelStatusMarkup(model) + '<strong>' + escapeHtml(modelLabel) + '</strong>' + modelSlugMarkup(model, modelLabel) + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '<div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div></span><span class="b-model-row__actions">' + fastMarkup + '<button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button>' + deleteMarkup + '</span></article>';
     }).join("");
   }
   function catalogRows() {
@@ -1309,12 +1315,44 @@
     }
     if (!list) return;
     const markup = modelCatalogMarkup();
-    if (!force && (draggedCatalogSlug || draggedCatalogTargetSlug || list.contains?.(document.activeElement))) return;
-    if (markup === renderedModelCatalogMarkup) return;
-    const scrollTop = Number(list.scrollTop) || 0;
-    list.innerHTML = markup;
-    list.scrollTop = scrollTop;
-    renderedModelCatalogMarkup = markup;
+    const canReplaceRows = force || !(draggedCatalogSlug || draggedCatalogTargetSlug || list.contains?.(document.activeElement));
+    if (canReplaceRows && markup !== renderedModelCatalogMarkup) {
+      const scrollTop = Number(list.scrollTop) || 0;
+      list.innerHTML = markup;
+      list.scrollTop = scrollTop;
+      renderedModelCatalogMarkup = markup;
+    }
+    const fastUnavailable = $("[data-model-fast-unavailable]");
+    if (fastUnavailable) fastUnavailable.hidden = state.aiCoveUpstream;
+    all("[data-model-fast]").forEach((control) => {
+      const slug = control.closest("[data-model-slug]").dataset.modelSlug;
+      control.checked = state.fastModels.includes(slug);
+      control.disabled = !state.serviceHealthy || !state.aiCoveUpstream
+        || !catalog.models.some((model) => model.slug === slug);
+    });
+  }
+
+  async function setModelFast(control) {
+    const slug = control.closest("[data-model-slug]").dataset.modelSlug;
+    const enabled = control.checked;
+    control.checked = state.fastModels.includes(slug);
+    if (pendingAction || control.disabled) return;
+    pendingAction = "set-model-fast";
+    renderControls();
+    control.setAttribute("aria-busy", "true");
+    try {
+      state.fastModels = invoke
+        ? await invoke("set_model_fast", { slug, enabled })
+        : enabled ? [...state.fastModels, slug] : state.fastModels.filter((model) => model !== slug);
+      fastModelUpdateVersion += 1;
+      modelCatalogActionMessage = `${slug} 的 Fast 模式已${enabled ? "开启" : "关闭"}，下一次请求生效。`;
+    } catch (error) {
+      modelCatalogActionMessage = `Fast 模式保存失败：${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      pendingAction = "";
+      control.removeAttribute("aria-busy");
+      renderState();
+    }
   }
 
   function cloneModel(model) {
@@ -3171,6 +3209,7 @@
       state = {
         ...state,
         ...status,
+        ...(options.fastVersion != null && options.fastVersion !== fastModelUpdateVersion ? { fastModels: state.fastModels } : {}),
         ...(nextCapabilities ? { transportCapabilities: nextCapabilities } : {}),
         technicalDetail: "",
       };
@@ -3461,12 +3500,13 @@
     if (!invoke || !canRefreshStatus() || refreshing || document.hidden || capabilityListenerClosed) return;
     capabilityRefreshPending = false;
     refreshing = true;
+    const fastVersion = fastModelUpdateVersion;
     try {
       const status = await invoke("get_app_status");
       if (canRefreshStatus()) {
         const animateNew = statusHydrated;
         statusHydrated = true;
-        applyStatus(status, { animateNew });
+        applyStatus(status, { animateNew, fastVersion });
       }
     } catch (error) {
       statusHydrated = true;
@@ -3918,6 +3958,10 @@
       if (connectionTrigger && !connectionTrigger.contains?.(event.relatedTarget)) closeConnectionHoverCardFor(connectionTrigger);
     });
     document.addEventListener("change", (event) => {
+      if (event.target.matches?.("[data-model-fast]")) {
+        void setModelFast(event.target);
+        return;
+      }
       markEditorFieldTouched(event.target);
       if (event.target.matches?.("[data-filter]")) renderStatistics();
       if (event.target.matches?.("[data-model-effort]")) syncEditorReasoningOptions();

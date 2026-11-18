@@ -27,9 +27,10 @@ pub(in crate::proxy) async fn relay_private_from_message(
     initial: Message,
     metrics: Arc<Metrics>,
     path: String,
+    rewrite_request: impl FnMut(Message) -> Message,
 ) {
     if forward_client_message(client, upstream, initial, &metrics, &path).await {
-        relay_private_refs(client, upstream, metrics, path).await;
+        relay_private_refs(client, upstream, metrics, path, rewrite_request).await;
     }
 }
 
@@ -38,6 +39,7 @@ async fn relay_private_refs(
     upstream: &mut PrivateUpstream,
     metrics: Arc<Metrics>,
     path: String,
+    mut rewrite_request: impl FnMut(Message) -> Message,
 ) {
     loop {
         tokio::select! {
@@ -55,7 +57,7 @@ async fn relay_private_refs(
                         break;
                     }
                 };
-                if !forward_client_message(client, upstream, message, &metrics, &path).await {
+                if !forward_client_message(client, upstream, rewrite_request(message), &metrics, &path).await {
                     break;
                 }
             }

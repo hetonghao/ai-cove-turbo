@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -850,6 +850,21 @@ impl ProxyHandle {
         self.model_policy.status()
     }
 
+    pub(crate) fn fast_models(&self) -> BTreeSet<String> {
+        self.model_policy.fast_models()
+    }
+
+    pub(crate) fn set_model_fast(
+        &self,
+        slug: String,
+        enabled: bool,
+    ) -> Result<BTreeSet<String>, String> {
+        if enabled && !self.capability_probe.enabled {
+            return Err("Fast 模式仅适用于 AI Cove 上游".to_owned());
+        }
+        self.model_policy.set_fast(slug, enabled)
+    }
+
     pub(crate) fn update_model_policy(
         &self,
         update: model_policy::ModelPolicyUpdate,
@@ -1386,8 +1401,16 @@ async fn proxy_http_with_control(
         .then(|| deepseek_history::repair_deepseek_tool_history(&raw_body, &[]))
         .flatten();
     let raw_body = repaired.map_or(raw_body, Bytes::from);
-    let should_compress = state.compression_enabled.load(Ordering::Relaxed)
-        && is_compressible_json(&parts.method, &parts.headers);
+    let is_json = is_compressible_json(&parts.method, &parts.headers);
+    // Hybrid HTTP already carries the tier selected when its WebSocket frame arrived.
+    let prioritised = (state.ai_cove_private_websocket_zstd
+        && traffic.route == traffic::TrafficRoute::DirectHttp
+        && is_responses_path(&path)
+        && is_json)
+        .then(|| state.model_policy.apply_fast(&raw_body, None))
+        .flatten();
+    let raw_body = prioritised.map_or(raw_body, Bytes::from);
+    let should_compress = state.compression_enabled.load(Ordering::Relaxed) && is_json;
     let (outbound_body, compressed) = if should_compress {
         match CompressionScheduler::shared()
             .encode_http(raw_body.clone())

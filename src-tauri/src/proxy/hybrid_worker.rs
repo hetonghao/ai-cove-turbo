@@ -137,6 +137,10 @@ pub(super) async fn handle_worker_event(
             });
             session.last_http_traffic = finished.http_traffic;
             session.last_terminal_response_id = response_id.clone();
+            session.last_completed_model = session
+                .request_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.model.clone());
             session.commit_deepseek_tool_calls();
             session.commit_http_continuation(response_id.as_deref());
             if finished.kind == ActiveKind::WebSocket {
@@ -214,6 +218,7 @@ async fn handle_cancelled_event(
         record_websocket_outcome(session, 499, Some("request cancelled by client"));
     }
     session.last_terminal_response_id = None;
+    session.last_completed_model = None;
     session.last_response_transport = None;
     session.last_http_traffic = None;
     session.clear_pending_deepseek_tool_calls();

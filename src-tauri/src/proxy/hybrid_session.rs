@@ -41,6 +41,7 @@ pub(super) struct Session {
     pub(super) request_metadata: Option<RequestMetadata>,
     pub(super) connection_id: Option<String>,
     pub(super) last_terminal_response_id: Option<String>,
+    pub(super) last_completed_model: Option<String>,
     pub(super) last_response_transport: Option<ResponseTransport>,
     pub(super) last_http_traffic: Option<HttpTraffic>,
     pub(super) last_deepseek_tool_calls: Vec<Value>,
@@ -86,6 +87,7 @@ impl Session {
             request_metadata: None,
             connection_id: None,
             last_terminal_response_id: None,
+            last_completed_model: None,
             last_response_transport: None,
             last_http_traffic: None,
             last_deepseek_tool_calls: Vec::new(),
@@ -140,6 +142,7 @@ impl Session {
             self.handle.discard_unleased(retirement).await;
         }
         self.last_terminal_response_id = None;
+        self.last_completed_model = None;
         self.last_response_transport = None;
         self.last_http_traffic = None;
         self.last_deepseek_tool_calls.clear();

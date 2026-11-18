@@ -112,6 +112,7 @@ pub fn run() -> tauri::Result<()> {
             reset_route_metrics,
             get_connection_snapshot,
             update_model_policy,
+            set_model_fast,
             get_codex_thread_info,
             get_model_catalog,
             update_model_catalog,
@@ -359,6 +360,15 @@ async fn update_model_policy(
     update: proxy::ModelPolicyUpdate,
 ) -> Result<proxy::ModelPolicyStatus, String> {
     runtime.update_model_policy(update).await
+}
+
+#[tauri::command]
+async fn set_model_fast(
+    runtime: State<'_, Arc<AppRuntime>>,
+    slug: String,
+    enabled: bool,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    runtime.set_model_fast(slug, enabled).await
 }
 
 #[tauri::command]

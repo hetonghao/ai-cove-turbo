@@ -174,6 +174,7 @@ async fn relay_after_upgrade(
         message,
         Arc::clone(&metrics),
         path,
+        std::convert::identity,
     )
     .await;
     metrics.record_websocket_closed();

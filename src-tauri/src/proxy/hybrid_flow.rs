@@ -134,6 +134,15 @@ async fn start_response(
     if event_type != "response.create" {
         return legacy::start_legacy_response(client, session, payload, original_binary).await;
     }
+    let payload = super::super::is_responses_path(&session.path)
+        .then(|| {
+            session
+                .state
+                .model_policy
+                .apply_fast(&payload, session.last_completed_model.as_deref())
+        })
+        .flatten()
+        .unwrap_or(payload);
     let payload = super::super::gemini_history::normalize_gemini_function_history(&payload)
         .unwrap_or(payload);
     let payload = super::super::deepseek_history::repair_deepseek_tool_history(
@@ -166,6 +175,9 @@ async fn start_response(
         return reject_thread_switch(client).await;
     }
     let mut metadata = traffic::request_metadata(&session.client_headers, &payload);
+    if metadata.model.is_none() {
+        metadata.model.clone_from(&session.last_completed_model);
+    }
     metadata.thread_id = session.thread_id.clone().or(metadata.thread_id);
     metadata.temporary_name = prepared.temporary_name.clone();
     session.state.metrics.observe_session_name_hint(&metadata);

@@ -1,10 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
-        Message,
+        Message, Utf8Bytes,
         protocol::{Role, WebSocketConfig},
     },
 };
@@ -32,6 +33,7 @@ pub(super) async fn start_legacy_response(
             legacy_message(payload, original_binary),
             Arc::clone(&session.state.metrics),
             session.path.clone(),
+            response_create_rewriter(session),
         )
         .await;
         session.state.metrics.record_websocket_closed();
@@ -49,10 +51,52 @@ pub(super) async fn start_legacy_response(
     };
     session.state.metrics.record_websocket_connected();
     StandardRelay::new(&mut upstream, session.state.metrics.as_ref(), &session.path)
-        .run(client, legacy_message(payload, original_binary))
+        .run(
+            client,
+            legacy_message(payload, original_binary),
+            response_create_rewriter(session),
+        )
         .await;
     session.state.metrics.record_websocket_closed();
     false
+}
+
+fn response_create_rewriter(session: &Session) -> impl FnMut(Message) -> Message + '_ {
+    #[derive(Deserialize)]
+    struct Create {
+        #[serde(rename = "type")]
+        event_type: String,
+        model: Option<String>,
+    }
+
+    let mut inherited_model = session.last_completed_model.clone();
+    let policy = &session.state.model_policy;
+    let responses = super::super::is_responses_path(&session.path);
+    move |message| {
+        if !responses {
+            return message;
+        }
+        let Some(bytes) = application_payload(&message) else {
+            return message;
+        };
+        let Ok(create) = serde_json::from_slice::<Create>(bytes) else {
+            return message;
+        };
+        if create.event_type != "response.create" {
+            return message;
+        }
+        if inherited_model.is_none() {
+            inherited_model = create.model.filter(|slug| !slug.trim().is_empty());
+        }
+        let Some(payload) = policy.apply_fast(bytes, inherited_model.as_deref()) else {
+            return message;
+        };
+        if message.is_binary() {
+            Message::Binary(payload.into())
+        } else {
+            Utf8Bytes::try_from(payload).map_or(message, Message::Text)
+        }
+    }
 }
 
 fn legacy_message(payload: Vec<u8>, original_binary: bool) -> Message {
@@ -101,7 +145,7 @@ struct StandardRelay<'a> {
     upstream: &'a mut ClientWebSocket,
     metrics: &'a Metrics,
     path: &'a str,
-    active_request_bytes: Option<u64>,
+    active_request_bytes: Option<(u64, u64)>,
 }
 
 impl<'a> StandardRelay<'a> {
@@ -114,7 +158,12 @@ impl<'a> StandardRelay<'a> {
         }
     }
 
-    async fn run(&mut self, client: &mut ClientWebSocket, initial: Message) {
+    async fn run(
+        &mut self,
+        client: &mut ClientWebSocket,
+        initial: Message,
+        mut rewrite_request: impl FnMut(Message) -> Message,
+    ) {
         if self.upstream.send(initial).await.is_err() {
             let _ = close_client(client, 1011, "websocket fallback send failed").await;
             return;
@@ -143,7 +192,9 @@ impl<'a> StandardRelay<'a> {
                                 .is_ok_and(|event_type| event_type == "response.create")
                         })
                         .map(|payload| payload.len() as u64);
-                    if self.upstream.send(client_message).await.is_err() {
+                    let outgoing = rewrite_request(client_message);
+                    let sent = outgoing.len() as u64;
+                    if self.upstream.send(outgoing).await.is_err() {
                         self.record_error(1011, "standard websocket send failed before terminal");
                         return;
                     }
@@ -152,7 +203,7 @@ impl<'a> StandardRelay<'a> {
                         return;
                     }
                     if let Some(request_bytes) = request_bytes {
-                        self.active_request_bytes = Some(request_bytes);
+                        self.active_request_bytes = Some((request_bytes, sent));
                     }
                 }
                 upstream_message = self.upstream.next() => {
@@ -203,7 +254,7 @@ impl<'a> StandardRelay<'a> {
     }
 
     fn record_outcome(&mut self, status: u16, failure_reason: Option<&str>) {
-        let Some(bytes) = self.active_request_bytes.take() else {
+        let Some((raw_bytes, sent_bytes)) = self.active_request_bytes.take() else {
             return;
         };
         let (result, failure_phase) = match failure_reason {
@@ -215,8 +266,8 @@ impl<'a> StandardRelay<'a> {
                 timestamp_ms: traffic::now_ms(),
                 status,
                 path: self.path,
-                raw_bytes: bytes,
-                sent_bytes: bytes,
+                raw_bytes,
+                sent_bytes,
                 transport: TrafficTransport::Ws,
                 result,
                 route: Some(TrafficRoute::HybridWs),

@@ -18,10 +18,11 @@ use tokio_tungstenite::{
 };
 use url::Url;
 
-use crate::proxy::{Metrics, ProxyHandle, ProxyOptions, start_proxy};
+use crate::proxy::{Metrics, ProxyHandle, ProxyOptions, start_proxy_with_policy};
 
 pub(super) struct StandardFixture {
     upstream: Url,
+    directory: tempfile::TempDir,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
 }
@@ -41,6 +42,7 @@ impl StandardFixture {
         });
         Ok(Self {
             upstream,
+            directory: tempfile::tempdir()?,
             shutdown: Some(shutdown),
             task,
         })
@@ -58,15 +60,19 @@ pub(super) async fn start_standard_proxy(
     fixture: &StandardFixture,
 ) -> io::Result<(ProxyHandle, Arc<Metrics>)> {
     let metrics = Arc::new(Metrics::default());
-    let proxy = start_proxy(ProxyOptions {
-        upstream: fixture.upstream.clone(),
-        compression_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        websocket_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        ai_cove_private_websocket_zstd: true,
-        metrics: Arc::clone(&metrics),
-        preferred_ports: vec![0],
-        max_request_body_bytes: 1024 * 1024,
-    })
+    let proxy = start_proxy_with_policy(
+        ProxyOptions {
+            upstream: fixture.upstream.clone(),
+            compression_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            websocket_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ai_cove_private_websocket_zstd: true,
+            metrics: Arc::clone(&metrics),
+            preferred_ports: vec![0],
+            max_request_body_bytes: 1024 * 1024,
+        },
+        Some(fixture.directory.path().join("policy.json")),
+        None,
+    )
     .await
     .map_err(io::Error::other)?;
     Ok((proxy, metrics))
@@ -177,8 +183,12 @@ where
                 }
             }
             Some(_) | None => {
+                let completed = serde_json::json!({
+                    "type": "response.completed",
+                    "response": {"service_tier": request.get("service_tier")},
+                });
                 if websocket
-                    .send(Message::Text(r#"{"type":"response.completed"}"#.into()))
+                    .send(Message::Text(completed.to_string().into()))
                     .await
                     .is_err()
                 {

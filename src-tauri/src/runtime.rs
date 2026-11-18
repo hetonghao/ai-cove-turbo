@@ -1,7 +1,7 @@
 #![allow(clippy::assigning_clones)]
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -173,6 +173,7 @@ pub(crate) struct AppStatus {
     pub(crate) websocket_state: String,
     pub(crate) prewarm_state: String,
     pub(crate) model_policy: ModelPolicyStatus,
+    pub(crate) fast_models: BTreeSet<String>,
     pub(crate) transport_capabilities: std::collections::HashMap<String, CapabilityModelStatus>,
     pub(crate) transport_capability_reason: Option<String>,
     pub(crate) websocket_handshakes: u64,
@@ -244,6 +245,7 @@ impl AppStatus {
                 models: std::collections::HashMap::new(),
                 reason: None,
             },
+            fast_models: BTreeSet::new(),
             transport_capabilities: std::collections::HashMap::new(),
             transport_capability_reason: None,
             websocket_handshakes: 0,
@@ -656,6 +658,7 @@ impl AppRuntime {
                 (
                     proxy.prewarm_state(),
                     proxy.model_policy_status(),
+                    proxy.fast_models(),
                     proxy.capability_statuses(),
                     proxy.capability_reason(),
                 )
@@ -664,6 +667,7 @@ impl AppRuntime {
         let Some((
             prewarm_state,
             model_policy,
+            fast_models,
             transport_capabilities,
             transport_capability_reason,
         )) = values
@@ -673,6 +677,7 @@ impl AppRuntime {
         };
         status.prewarm_state = prewarm_state;
         status.model_policy = model_policy;
+        status.fast_models = fast_models;
         status.transport_capabilities = transport_capabilities;
         status.transport_capability_reason = transport_capability_reason;
     }
@@ -698,6 +703,27 @@ impl AppRuntime {
             .as_ref()
             .ok_or_else(|| "Turbo 代理尚未启动".to_owned())?
             .update_model_policy(update)
+    }
+
+    pub(crate) async fn set_model_fast(
+        &self,
+        slug: String,
+        enabled: bool,
+    ) -> Result<BTreeSet<String>, String> {
+        if enabled
+            && !lock_mutex(&self.catalog)
+                .models
+                .iter()
+                .any(|model| model.slug == slug)
+        {
+            return Err("找不到这个模型候选".to_owned());
+        }
+        self.proxy
+            .lock()
+            .await
+            .as_ref()
+            .ok_or_else(|| "Turbo 代理尚未启动".to_owned())?
+            .set_model_fast(slug, enabled)
     }
 
     pub(crate) fn set_compression(&self, enabled: bool) {

@@ -32,6 +32,9 @@ mod session_isolation_tests;
 #[path = "hybrid_transport_fallback_tests.rs"]
 mod transport_fallback_tests;
 
+#[path = "model_fast_integration_tests.rs"]
+mod model_fast_integration_tests;
+
 async fn start_test_proxy(server: &FixtureServer) -> io::Result<(ProxyHandle, Arc<Metrics>)> {
     start_test_proxy_with_policy(server, None).await
 }
