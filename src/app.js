@@ -262,11 +262,6 @@
   let updateCheckInFlight = false;
   let renderedUpdateState = null;
   let updatePreference = readUpdatePreference();
-  if (invoke && updatePreference.checkedDay === updateDayKey() && updatePreference.lastState) {
-    state.updateState = updatePreference.lastState;
-    state.updateMessage = updatePreference.lastMessage || state.updateMessage;
-    state.updateProgress = Number(updatePreference.lastProgress) || 0;
-  }
   let connectionSnapshot = invoke
     ? { currentConnections: 0, prewarm: 0, boundThreads: [], transitions: [], recentClosed: [] }
     : previewConnectionSnapshot;
@@ -346,7 +341,7 @@
     if (!invoke) return {};
     try {
       const value = JSON.parse(window.localStorage?.getItem(UPDATE_PREFERENCE_KEY) || "{}");
-      return value && typeof value === "object" ? value : {};
+      return value && typeof value === "object" ? { dismissedDay: value.dismissedDay } : {};
     } catch {
       return {};
     }
@@ -356,7 +351,8 @@
     updatePreference = next;
     if (!invoke) return;
     try {
-      window.localStorage?.setItem(UPDATE_PREFERENCE_KEY, JSON.stringify(next));
+      // Only dismissal survives a restart; update results belong to the running binary.
+      window.localStorage?.setItem(UPDATE_PREFERENCE_KEY, JSON.stringify({ dismissedDay: next.dismissedDay }));
     } catch {
       // Ignore unavailable webview storage; the current session still works.
     }
@@ -368,15 +364,15 @@
     if (!slot || !bubble) return;
     const updateState = String(state.updateState).toLowerCase();
     const available = ["available", "downloaded"].includes(updateState);
-    const visible = updateBubbleOpen && available;
+    const visible = updateBubbleOpen && available && pendingAction !== "install-update";
     slot.hidden = !visible;
+    [$("[data-action='install-update-bubble']"), $("[data-action='ignore-update-bubble']")].forEach((control) => {
+      if (control) control.disabled = Boolean(pendingAction) || !available;
+    });
     if (!visible) return;
     const message = $("[data-update-bubble-message]");
     const cleanMessage = String(state.updateMessage || "发现可安装的新版本").replace(/^Preview：/, "");
     if (message) message.textContent = cleanMessage;
-    [$("[data-action='install-update-bubble']"), $("[data-action='ignore-update-bubble']")].forEach((control) => {
-      if (control) control.disabled = false;
-    });
   }
 
   function setUpdateBubbleOpen(open) {
@@ -728,6 +724,7 @@
     const starting = configState === "STARTING";
     const needsHttps = configState === "NEEDS_HTTPS";
     const observed = runtimeObserved();
+    const preparingUpdate = pendingAction === "install-update" && ["idle", "available", "downloaded", "error", "checking"].includes(String(state.updateState).toLowerCase());
     const values = {
       "runtime-mode": invoke ? "DESKTOP" : "PREVIEW",
       "service-label": `${invoke ? "AI Cove" : "PREVIEW"} / ${starting ? "正在读取状态" : needsHttps ? "上游需要 HTTPS" : state.serviceHealthy ? "本地服务正常" : "本地服务异常"}`,
@@ -763,8 +760,8 @@
         (Number(state.rawBytes) || 0) + (Number(state.websocketRawBytes) || 0),
         (Number(state.sentBytes) || 0) + (Number(state.websocketSentBytes) || 0),
       ),
-      "update-state": formatUpdateState(),
-      "update-message": state.updateMessage || "—",
+      "update-state": preparingUpdate ? "准备中" : formatUpdateState(),
+      "update-message": preparingUpdate ? "正在准备更新，请稍候…" : state.updateMessage || "—",
       "update-progress": `${Math.max(0, Math.min(100, Number(state.updateProgress) || 0))}%`,
       "service-runtime": starting ? "正在读取" : needsHttps ? "需要调整" : state.serviceHealthy ? "正常" : "离线",
       "restart-runtime": formatCodexState(),
@@ -3168,9 +3165,6 @@
       const previousModels = JSON.stringify(state.catalog?.models || []);
       const previousPolicy = policySignature(state.modelPolicy);
       const preserveCatalogDraft = modelSettingsDirty() || editorDraftDirty();
-      const preserveStoredUpdate = String(status.updateState).toLowerCase() === "idle"
-        && updatePreference.checkedDay === updateDayKey()
-        && updatePreference.lastState;
       const nextCapabilities = status.transportCapabilities && typeof status.transportCapabilities === "object"
         ? { ...status.transportCapabilities }
         : state.transportCapabilities;
@@ -3178,11 +3172,6 @@
         ...state,
         ...status,
         ...(nextCapabilities ? { transportCapabilities: nextCapabilities } : {}),
-        ...(preserveStoredUpdate ? {
-          updateState: updatePreference.lastState,
-          updateMessage: updatePreference.lastMessage || state.updateMessage,
-          updateProgress: Number(updatePreference.lastProgress) || 0,
-        } : {}),
         technicalDetail: "",
       };
       if (status.catalog && JSON.stringify(status.catalog.models || []) !== previousModels && !preserveCatalogDraft) catalogDraft = null;
@@ -3190,9 +3179,6 @@
       applySessionNames(state.sessionNames);
       if (["available", "downloaded"].includes(String(state.updateState).toLowerCase()) && updatePreference.dismissedDay !== updateDayKey()) {
         updateBubbleOpen = true;
-      }
-      if (["available", "downloaded", "current", "error"].includes(String(state.updateState).toLowerCase())) {
-        writeUpdatePreference({ ...updatePreference, lastState: state.updateState, lastMessage: state.updateMessage, lastProgress: state.updateProgress });
       }
     }
     syncLiveRequests();
@@ -3266,11 +3252,11 @@
       return;
     }
     if (action === "install-update-bubble") {
+      if (pendingAction) return;
       setUpdateBubbleOpen(false);
       selectTab("config", { focus: true });
       const installControl = $("[data-action='install-update']");
-      if (typeof installControl?.click === "function") installControl.click();
-      else void handleAction("install-update", installControl);
+      await handleAction("install-update", installControl);
       return;
     }
     if (action === "toggle-ai-cove-bubble") {
@@ -3435,7 +3421,8 @@
     if (!command || pendingAction) return;
     const args = buildArgs?.();
     pendingAction = commandAction;
-    renderControls();
+    if (command === "install_update") renderState();
+    else renderControls();
     try {
       if (invoke) {
         if (command === "check_for_updates") markUpdateCheckedToday();
@@ -3450,6 +3437,10 @@
         } catch {
           state.configMessage = "Codex 重启未完成，请重试。";
         }
+      } else if (command === "install_update") {
+        state.updateState = "error";
+        state.updateMessage = "更新未完成，请重试。";
+        state.updateProgress = 0;
       } else if (command === "retry_takeover") {
         state.configMessage = error instanceof Error ? error.message : String(error);
       } else {
