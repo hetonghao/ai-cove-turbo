@@ -115,6 +115,7 @@ pub fn run() -> tauri::Result<()> {
             set_model_fast,
             get_codex_thread_info,
             get_model_catalog,
+            repair_model_catalog,
             update_model_catalog,
             save_model_catalog,
             save_model_settings,
@@ -387,6 +388,13 @@ async fn get_model_catalog(
     runtime: State<'_, Arc<AppRuntime>>,
 ) -> Result<catalog::CatalogStatus, String> {
     Ok(runtime.model_catalog().await)
+}
+
+#[tauri::command]
+async fn repair_model_catalog(
+    runtime: State<'_, Arc<AppRuntime>>,
+) -> Result<catalog::CatalogStatus, String> {
+    runtime.repair_model_catalog().await
 }
 
 #[tauri::command]

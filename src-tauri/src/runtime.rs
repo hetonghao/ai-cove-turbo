@@ -59,6 +59,25 @@ pub(crate) struct RuntimePaths {
 }
 
 impl RuntimePaths {
+    fn catalog_home(&self) -> &Path {
+        self.config_path
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or_else(|| Path::new("."))
+    }
+
+    fn repair_catalog(
+        &self,
+        fallback: &[CatalogModel],
+    ) -> Result<CatalogStatus, catalog::CatalogError> {
+        catalog::repair_catalog(
+            self.catalog_home(),
+            &self.config_path,
+            &self.catalog_recovery_path(),
+            fallback,
+        )
+    }
+
     fn recovery_path(&self) -> PathBuf {
         self.data_dir.join("recovery.json")
     }
@@ -286,6 +305,7 @@ impl AppStatus {
                 loaded: false,
                 request_verified: false,
                 revision: String::new(),
+                problem: None,
                 metadata: CatalogMetadata::default(),
             },
         }
@@ -331,12 +351,7 @@ impl AppRuntime {
         let preferences = load_preferences(&paths.preferences_path());
         let mut status = AppStatus::starting(&preferences);
         let session_names = SessionNameCache::new(codex_database_path(&paths.config_path));
-        let home = paths
-            .config_path
-            .parent()
-            .and_then(Path::parent)
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        let catalog_status = catalog::starting_status(&home);
+        let catalog_status = catalog::starting_status(paths.catalog_home());
         status.catalog = catalog_status.clone();
         let metrics = Arc::new(Metrics::load_traffic(&paths.traffic_path()));
         let runtime = Arc::new(Self {
@@ -373,10 +388,6 @@ impl AppRuntime {
     pub(crate) async fn initialize(&self) {
         let _guard = self.lifecycle_lock.lock().await;
         if self.shutting_down.load(Ordering::Relaxed) {
-            return;
-        }
-        if let Err(error) = self.recover_model_settings_journal() {
-            self.block(&error);
             return;
         }
         self.start_session_name_task().await;
@@ -429,36 +440,6 @@ impl AppRuntime {
             }
         };
 
-        let home = self
-            .paths
-            .config_path
-            .parent()
-            .and_then(Path::parent)
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        match catalog::ensure_catalog(
-            &home,
-            &self.paths.config_path,
-            &self.paths.catalog_recovery_path(),
-        ) {
-            Ok(catalog) => {
-                *lock_mutex(&self.catalog) = catalog.clone();
-                self.catalog_last_sync_ms
-                    .store(unix_time_ms(), Ordering::Relaxed);
-                self.update_status(|status| status.catalog = catalog);
-            }
-            Err(error) => {
-                self.update_status(|status| {
-                    status.catalog.state =
-                        if matches!(error, catalog::CatalogError::OwnershipConflict) {
-                            "conflict".to_owned()
-                        } else {
-                            "error".to_owned()
-                        };
-                    status.catalog.restart_required = false;
-                    status.catalog.loaded = false;
-                });
-            }
-        }
         let upstream_url = match self.proxy_upstream() {
             Ok(upstream) => upstream,
             Err(error) => {
@@ -516,6 +497,26 @@ impl AppRuntime {
         }
         if let Some(error) = clear_session_handoff(&handoff_path) {
             self.report_session_handoff_error(&error);
+        }
+
+        let _catalog_guard = self.catalog_write_lock.lock().await;
+        let catalog_result = self
+            .recover_model_settings_journal()
+            .map_err(catalog::CatalogError::Journal)
+            .and_then(|()| {
+                catalog::ensure_catalog(
+                    self.paths.catalog_home(),
+                    &self.paths.config_path,
+                    &self.paths.catalog_recovery_path(),
+                )
+            });
+        match catalog_result {
+            Ok(catalog) => {
+                self.catalog_last_sync_ms
+                    .store(unix_time_ms(), Ordering::Relaxed);
+                self.publish_catalog(catalog);
+            }
+            Err(error) => self.report_catalog_error(&error),
         }
     }
 
@@ -864,6 +865,83 @@ impl AppRuntime {
         lock_mutex(&self.catalog).clone()
     }
 
+    pub(crate) async fn repair_model_catalog(&self) -> Result<CatalogStatus, String> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        let _write_guard = self.catalog_write_lock.lock().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err("Turbo 正在退出，请重新打开后再修复。".to_owned());
+        }
+        let current = lock_mutex(&self.catalog).clone();
+        if current.problem.is_none() && current.state == "owned" {
+            return Ok(current);
+        }
+        if !current
+            .problem
+            .as_ref()
+            .is_some_and(|problem| problem.can_repair)
+        {
+            return Err("当前模型目录无法安全接管。请先检查 Codex 配置。".to_owned());
+        }
+        let journal = self.paths.model_settings_journal_path();
+        if let Some(bytes) = read_optional_file(&journal).map_err(|error| error.to_string())? {
+            match serde_json::from_slice::<ModelSettingsJournal>(&bytes) {
+                Ok(_) => self.recover_model_settings_journal()?,
+                Err(_) => catalog::quarantine_damaged_journal(&journal, &bytes)
+                    .map_err(|error| error.problem().detail)?,
+            }
+        }
+        let paths = self.paths.clone();
+        let mut result = tauri::async_runtime::spawn_blocking(move || paths.repair_catalog(&[]))
+            .await
+            .map_err(|error| error.to_string())?;
+        if matches!(result, Err(catalog::CatalogError::SourceUnavailable)) {
+            self.report_catalog_error(&catalog::CatalogError::SourceUnavailable);
+            let ai_cove = {
+                let status = read_lock(&self.status);
+                status.ai_cove_upstream
+                    && Url::parse(&status.original_upstream)
+                        .ok()
+                        .is_some_and(|url| {
+                            upstream_compatibility(&url) == UpstreamCompatibility::AiCove
+                        })
+            };
+            if !ai_cove {
+                return Err(
+                    "没有可用的本地模型目录。请更新或重新安装 Codex，再点击修复。".to_owned(),
+                );
+            }
+            let configured = catalog::configured_model(&self.paths.config_path)
+                .map_err(|error| error.problem().detail)?;
+            let models = self
+                .fetch_discovery_catalog()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_repair_models(configured.as_deref());
+            if models.is_empty() {
+                return Err("当前密钥没有可用于恢复的 Codex 模型。请确认密钥有 Responses 模型权限，或更新 Codex 后重试。".to_owned());
+            }
+            let paths = self.paths.clone();
+            result = tauri::async_runtime::spawn_blocking(move || paths.repair_catalog(&models))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        match result {
+            Ok(repaired) => {
+                self.set_pending_verification_models(
+                    repaired.models.iter().map(|model| model.slug.clone()),
+                );
+                self.catalog_last_sync_ms
+                    .store(unix_time_ms(), Ordering::Relaxed);
+                self.publish_catalog(repaired.clone());
+                Ok(repaired)
+            }
+            Err(error) => {
+                self.report_catalog_error(&error);
+                Err(error.problem().detail)
+            }
+        }
+    }
+
     #[allow(clippy::unused_async)]
     pub(crate) async fn update_model_catalog(
         &self,
@@ -883,10 +961,10 @@ impl AppRuntime {
             &self.paths.catalog_recovery_path(),
             &updates,
             &expected_revision,
-        )?;
+        )
+        .map_err(|error| self.note_catalog_save_error(error))?;
         self.set_pending_verification_models(updates.iter().map(|update| update.slug.clone()));
-        *lock_mutex(&self.catalog) = current.clone();
-        self.update_status(|status| status.catalog = current.clone());
+        self.publish_catalog(current.clone());
         Ok(current)
     }
 
@@ -909,10 +987,10 @@ impl AppRuntime {
             &self.paths.catalog_recovery_path(),
             &models,
             &expected_revision,
-        )?;
+        )
+        .map_err(|error| self.note_catalog_save_error(error))?;
         self.set_pending_verification_models(models.iter().map(|model| model.slug.clone()));
-        *lock_mutex(&self.catalog) = current.clone();
-        self.update_status(|status| status.catalog = current.clone());
+        self.publish_catalog(current.clone());
         Ok(current)
     }
 
@@ -920,9 +998,9 @@ impl AppRuntime {
         &self,
         home: &Path,
         expected_revision: &str,
-    ) -> Result<ModelSettingsJournalContext, String> {
+    ) -> Result<ModelSettingsJournalContext, catalog::CatalogError> {
         let fixed_path = catalog::fixed_catalog_path(home);
-        let before = fs::read(&fixed_path).map_err(|_| "catalog_snapshot_failed".to_owned())?;
+        let before = fs::read(&fixed_path).map_err(catalog::CatalogError::Read)?;
         let metadata_before = catalog::read_metadata(home);
         let policy_path = self.paths.model_policy_path();
         let journal_path = self.paths.model_settings_journal_path();
@@ -933,13 +1011,13 @@ impl AppRuntime {
             catalog_after_revision: None,
             metadata_before: metadata_before.clone(),
             metadata_after: None,
-            policy_before: read_optional_file(&policy_path).map_err(|error| error.to_string())?,
+            policy_before: read_optional_file(&policy_path).map_err(catalog::CatalogError::Read)?,
             policy_after_revision: None,
             policy_after: None,
             committed: false,
         };
         write_model_settings_journal(&journal_path, &journal)
-            .map_err(|error| format!("model_settings_journal_failed:{error}"))?;
+            .map_err(catalog::CatalogError::Write)?;
         Ok(ModelSettingsJournalContext {
             before,
             metadata_before,
@@ -977,8 +1055,7 @@ impl AppRuntime {
                 };
             }
             let _ = remove_file_if_present(&context.journal_path);
-            *lock_mutex(&self.catalog) = restored.clone();
-            self.update_status(|status| status.catalog = restored);
+            self.publish_catalog(restored);
             return ModelSettingsSaveStatus {
                 catalog: self.model_catalog().await,
                 model_policy: self.current_model_policy().await,
@@ -1024,7 +1101,9 @@ impl AppRuntime {
             .parent()
             .and_then(Path::parent)
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        let mut context = self.prepare_model_settings_journal(&home, &expected_revision)?;
+        let mut context = self
+            .prepare_model_settings_journal(&home, &expected_revision)
+            .map_err(|error| self.note_catalog_save_error(error).problem().detail)?;
         let (catalog_after_revision, metadata_after) = match catalog::preview_catalog_models(
             &home,
             &self.paths.config_path,
@@ -1036,7 +1115,7 @@ impl AppRuntime {
             Ok(preview) => preview,
             Err(error) => {
                 let _ = remove_file_if_present(&context.journal_path);
-                return Err(error.to_string());
+                return Err(self.note_catalog_save_error(error).problem().detail);
             }
         };
         context.journal.catalog_after_revision = Some(catalog_after_revision);
@@ -1044,6 +1123,7 @@ impl AppRuntime {
         context.journal.policy_after = Some(journal_policy(&policy));
         if let Err(error) = write_model_settings_journal(&context.journal_path, &context.journal) {
             let _ = remove_file_if_present(&context.journal_path);
+            self.report_catalog_error(&catalog::CatalogError::Journal(error.to_string()));
             return Err(format!("model_settings_journal_failed:{error}"));
         }
         let catalog = match catalog::save_catalog_models_with_removals(
@@ -1056,12 +1136,13 @@ impl AppRuntime {
         ) {
             Ok(catalog) => catalog,
             Err(error) => {
+                let error = self.note_catalog_save_error(error);
                 let catalog_restored = fs::read(catalog::fixed_catalog_path(&home))
                     .is_ok_and(|bytes| bytes == context.before);
                 let metadata_restored = catalog::read_metadata(&home) == context.metadata_before;
                 if catalog_restored && metadata_restored {
                     let _ = remove_file_if_present(&context.journal_path);
-                    return Err(error.to_string());
+                    return Err(error.problem().detail);
                 }
                 let catalog = match catalog::read_catalog(
                     &home,
@@ -1075,6 +1156,11 @@ impl AppRuntime {
                     Err(_) => self.model_catalog().await,
                 };
                 self.set_pending_verification_models(std::iter::empty());
+                let catalog = catalog::failed_status(
+                    catalog,
+                    &catalog::CatalogError::Journal(error.problem().detail),
+                );
+                self.publish_catalog(catalog.clone());
                 return Ok(ModelSettingsSaveStatus {
                     catalog,
                     model_policy: self.current_model_policy().await,
@@ -1093,6 +1179,9 @@ impl AppRuntime {
             }
         };
         if let Err(error) = Self::complete_model_settings_journal(&mut context) {
+            let catalog =
+                catalog::failed_status(catalog, &catalog::CatalogError::Journal(error.clone()));
+            self.publish_catalog(catalog.clone());
             return Ok(ModelSettingsSaveStatus {
                 catalog,
                 model_policy,
@@ -1102,8 +1191,7 @@ impl AppRuntime {
             });
         }
         self.set_pending_verification_models(models.iter().map(|model| model.slug.clone()));
-        *lock_mutex(&self.catalog) = catalog.clone();
-        self.update_status(|status| status.catalog = catalog.clone());
+        self.publish_catalog(catalog.clone());
         Ok(ModelSettingsSaveStatus {
             catalog,
             model_policy,
@@ -1217,19 +1305,24 @@ impl AppRuntime {
             .map_err(|_| catalog_discovery::DiscoveryError::InvalidUpstream)
     }
 
-    pub(crate) async fn discover_model_catalog(
+    async fn fetch_discovery_catalog(
         &self,
     ) -> Result<DiscoveryResult, catalog_discovery::DiscoveryError> {
         let upstream = self.discovery_target()?;
         let headers = effective_auth_headers(Some(&self.paths.config_path))
             .ok_or(catalog_discovery::DiscoveryError::MissingCredentials)?;
-        let mut result = catalog_discovery::fetch(
-            &reqwest::Client::new(),
-            &upstream,
-            &headers,
-            env!("CARGO_PKG_VERSION"),
-        )
-        .await?;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| catalog_discovery::DiscoveryError::Network)?;
+        catalog_discovery::fetch(&client, &upstream, &headers, env!("CARGO_PKG_VERSION")).await
+    }
+
+    pub(crate) async fn discover_model_catalog(
+        &self,
+    ) -> Result<DiscoveryResult, catalog_discovery::DiscoveryError> {
+        let mut result = self.fetch_discovery_catalog().await?;
+        let _write_guard = self.catalog_write_lock.lock().await;
         let existing = lock_mutex(&self.catalog)
             .models
             .iter()
@@ -1310,9 +1403,8 @@ impl AppRuntime {
             &metadata,
         )
         .map_err(|_| catalog_discovery::DiscoveryError::MetadataWrite)?;
-        let mut status = lock_mutex(&self.catalog).clone();
-        status.metadata = metadata;
-        self.update_status(|app_status| app_status.catalog.metadata = status.metadata.clone());
+        lock_mutex(&self.catalog).metadata = metadata.clone();
+        self.update_status(|app_status| app_status.catalog.metadata = metadata);
         Ok(result)
     }
 
@@ -1320,6 +1412,7 @@ impl AppRuntime {
     pub(crate) async fn restore_model_catalog(
         &self,
     ) -> Result<CatalogStatus, catalog::CatalogError> {
+        let _write_guard = self.catalog_write_lock.lock().await;
         let home = self
             .paths
             .config_path
@@ -1340,6 +1433,7 @@ impl AppRuntime {
     pub(crate) async fn reclaim_model_catalog(
         &self,
     ) -> Result<CatalogStatus, catalog::CatalogError> {
+        let _write_guard = self.catalog_write_lock.lock().await;
         let home = self
             .paths
             .config_path
@@ -1351,8 +1445,7 @@ impl AppRuntime {
             &self.paths.config_path,
             &self.paths.catalog_recovery_path(),
         )?;
-        *lock_mutex(&self.catalog) = current.clone();
-        self.update_status(|status| status.catalog = current.clone());
+        self.publish_catalog(current.clone());
         Ok(current)
     }
 
@@ -1600,6 +1693,7 @@ impl AppRuntime {
 
     pub(crate) async fn shutdown(&self) -> Result<(), ConfigError> {
         let _guard = self.lifecycle_lock.lock().await;
+        let _catalog_guard = self.catalog_write_lock.lock().await;
         self.shutting_down.store(true, Ordering::Relaxed);
         self.stop_session_name_task().await;
         let managed = lock_mutex(&self.managed).clone();
@@ -1670,10 +1764,22 @@ impl AppRuntime {
                 &home,
                 &self.paths.config_path,
                 &self.paths.catalog_recovery_path(),
-            )
-            .map_err(|error| ConfigError::Write(std::io::Error::other(error.to_string())))?;
-            *lock_mutex(&self.catalog) = restored.clone();
-            self.update_status(|status| status.catalog = restored);
+            );
+            match restored {
+                Ok(catalog) => self.publish_catalog(catalog),
+                Err(
+                    error @ (catalog::CatalogError::RecoveryJson(_)
+                    | catalog::CatalogError::OwnershipConflict
+                    | catalog::CatalogError::InvalidPointer),
+                ) => {
+                    // 无法安全还原目录指针时保留现场，仍让用户退出 Turbo。
+                    self.report_catalog_error(&error);
+                }
+                Err(error) => {
+                    self.shutting_down.store(false, Ordering::Relaxed);
+                    return Err(ConfigError::Write(io::Error::other(error.to_string())));
+                }
+            }
         }
         self.stop_transport_watch();
         let proxy = self.proxy.lock().await.take();
@@ -1898,7 +2004,54 @@ impl AppRuntime {
         update(&mut write_lock(&self.status));
     }
 
+    fn publish_catalog(&self, next: CatalogStatus) {
+        let mut current = lock_mutex(&self.catalog);
+        if next.state == "owned"
+            && !next.models.is_empty()
+            && (next.revision != current.revision || current.state != "owned")
+            && let Err(error) = catalog::remember_good(&next)
+        {
+            eprintln!("Turbo 模型目录备份失败：{error}");
+        }
+        *current = next.clone();
+        self.update_status(|status| status.catalog = next);
+    }
+
+    fn report_catalog_error(&self, error: &catalog::CatalogError) {
+        let current = lock_mutex(&self.catalog).clone();
+        self.publish_catalog(catalog::failed_status(current, error));
+    }
+
+    fn note_catalog_save_error(&self, error: catalog::CatalogError) -> catalog::CatalogError {
+        use catalog::CatalogError::{
+            ContentChanged, InvalidPointer, InvalidSchema, Json, OwnershipConflict, Read,
+            RecoveryJson, SourceUnavailable, Toml, Write,
+        };
+        if matches!(
+            error,
+            Read(_)
+                | Write(_)
+                | Json(_)
+                | RecoveryJson(_)
+                | SourceUnavailable
+                | OwnershipConflict
+                | ContentChanged
+                | Toml(_)
+                | InvalidPointer
+        ) {
+            self.report_catalog_error(&error);
+        } else if matches!(error, InvalidSchema(_))
+            && let Err(on_disk) = catalog::check_catalog_contract(self.paths.catalog_home())
+        {
+            self.report_catalog_error(&on_disk);
+        }
+        error
+    }
+
     pub(crate) fn refresh_catalog(&self) {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let now = unix_time_ms();
         let previous = self.catalog_last_sync_ms.load(Ordering::Relaxed);
         if !catalog_sync_due(previous, now) {
@@ -1947,21 +2100,9 @@ impl AppRuntime {
                         updated.models.iter().map(|model| model.slug.clone()),
                     );
                 }
-                *lock_mutex(&self.catalog) = updated.clone();
-                self.update_status(|status| status.catalog = updated);
+                self.publish_catalog(updated);
             }
-            Err(error) => {
-                let mut blocked = current;
-                blocked.state = if matches!(error, catalog::CatalogError::OwnershipConflict) {
-                    "conflict".to_owned()
-                } else {
-                    "error".to_owned()
-                };
-                blocked.restart_required = false;
-                blocked.loaded = false;
-                *lock_mutex(&self.catalog) = blocked.clone();
-                self.update_status(|status| status.catalog = blocked);
-            }
+            Err(error) => self.report_catalog_error(&error),
         }
     }
 
@@ -3000,6 +3141,223 @@ supports_websockets = false
         let restored = fs::read_to_string(&config_path)?;
         assert!(restored.contains("https://api.ai-cove.com/v1"));
         assert!(restored.contains("supports_websockets = false"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_retains_candidates_when_catalog_recovery_cannot_be_read()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let config_dir = root.path().join(".codex");
+        let fixed = catalog::fixed_catalog_path(root.path());
+        fs::create_dir_all(fixed.parent().ok_or("catalog directory")?)?;
+        let config_path = config_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "model_provider = \"custom\"\nmodel_catalog_json = {}\n\n[model_providers.custom]\nbase_url = \"https://api.ai-cove.com/v1\"\n",
+                toml_edit::value(fixed.display().to_string())
+            ),
+        )?;
+        fs::write(
+            &fixed,
+            br#"{"models":[{"slug":"customer-model","visibility":"list"}]}"#,
+        )?;
+        let data_dir = root.path().join("data");
+        fs::create_dir(&data_dir)?;
+        fs::write(data_dir.join("catalog-recovery.json"), b"{")?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path,
+            data_dir,
+        });
+
+        runtime.initialize().await;
+        let status = runtime.status().await;
+
+        assert_eq!(
+            status
+                .catalog
+                .models
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            ["customer-model"]
+        );
+        assert_eq!(status.catalog.state, "error");
+        assert!(
+            status
+                .catalog
+                .problem
+                .is_some_and(|problem| problem.can_repair)
+        );
+
+        let repaired = runtime.repair_model_catalog().await?;
+        assert_eq!(repaired.state, "owned");
+        assert_eq!(repaired.models[0].slug, "customer-model");
+        assert_eq!(repaired.models[0].display_name, "customer-model");
+        assert!(repaired.models[0].base_instructions.is_some());
+        assert!(
+            fs::read(fixed.with_extension(format!(
+                "json.damaged-{}",
+                catalog::revision(br#"{"models":[{"slug":"customer-model","visibility":"list"}]}"#)
+            )))?
+            .starts_with(b"{")
+        );
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn one_click_backs_up_an_unreadable_save_journal_and_starts_the_catalog()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let fixed = catalog::fixed_catalog_path(root.path());
+        fs::create_dir_all(fixed.parent().ok_or("catalog directory")?)?;
+        let config_path = root.path().join(".codex/config.toml");
+        fs::write(
+            &config_path,
+            "model_provider = 'custom'\n[model_providers.custom]\nbase_url = 'https://api.ai-cove.com/v1'\n",
+        )?;
+        fs::write(
+            &fixed,
+            br#"{"models":[{"slug":"customer-model","visibility":"list"}]}"#,
+        )?;
+        let data_dir = root.path().join("data");
+        fs::create_dir(&data_dir)?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path,
+            data_dir,
+        });
+        let journal = runtime.paths.model_settings_journal_path();
+        fs::write(&journal, b"{")?;
+        runtime.initialize().await;
+        assert!(runtime.status().await.service_healthy);
+
+        let repaired = runtime.repair_model_catalog().await?;
+
+        assert_eq!(
+            repaired.models.first().map(|model| model.slug.as_str()),
+            Some("customer-model")
+        );
+        assert!(runtime.status().await.service_healthy);
+        assert!(!journal.exists());
+        assert!(
+            fs::read(journal.with_extension(format!("json.damaged-{}", catalog::revision(b"{"))))?
+                == b"{"
+        );
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repair_empty_owned_catalog_preserves_the_users_last_saved_models()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let fixed = catalog::fixed_catalog_path(root.path());
+        fs::create_dir_all(fixed.parent().ok_or("catalog directory")?)?;
+        let config_path = root.path().join(".codex/config.toml");
+        fs::write(
+            &config_path,
+            "model_provider = 'custom'\n[model_providers.custom]\nbase_url = 'https://api.ai-cove.com/v1'\n",
+        )?;
+        let good = br#"{"models":[{"slug":"customer-model","display_name":"Customer Model","visibility":"list","priority":17,"truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true}]}"#;
+        fs::write(&fixed, good)?;
+        let paths = RuntimePaths {
+            config_path: config_path.clone(),
+            data_dir: root.path().join("data"),
+        };
+        let original = AppRuntime::new(paths.clone());
+        original.initialize().await;
+        original.shutdown().await?;
+        let broken = br#"{"models":[]}"#;
+        fs::write(&fixed, broken)?;
+
+        let runtime = AppRuntime::new(paths);
+        runtime.initialize().await;
+        let repaired = runtime.repair_model_catalog().await?;
+
+        let model = repaired
+            .models
+            .iter()
+            .find(|model| model.slug == "customer-model")
+            .ok_or("user candidate missing")?;
+        assert_eq!(model.priority, 17);
+        assert_eq!(model.display_name, "Customer Model");
+        assert_eq!(runtime.status().await.catalog.revision, repaired.revision);
+        assert!(repaired.restart_required);
+        let broken_backup =
+            fixed.with_extension(format!("json.damaged-{}", catalog::revision(broken)));
+        assert!(fs::read(broken_backup)? == broken);
+        runtime.shutdown().await?;
+        assert!(!fs::read_to_string(config_path)?.contains("model_catalog_json"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn catalog_save_path_error_enables_repair_and_save_after_permissions_recover()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let fixed = catalog::fixed_catalog_path(root.path());
+        fs::create_dir_all(fixed.parent().ok_or("catalog directory")?)?;
+        let config_path = root.path().join(".codex/config.toml");
+        fs::write(
+            &config_path,
+            "model_provider = 'custom'\n[model_providers.custom]\nbase_url = 'https://api.ai-cove.com/v1'\n",
+        )?;
+        let original = br#"{"models":[{"slug":"customer-model","display_name":"Customer Model","visibility":"list","priority":17,"truncation_policy":{"mode":"tokens","limit":10000},"shell_type":"shell_command","support_verbosity":true}]}"#;
+        fs::write(&fixed, original)?;
+        let runtime = AppRuntime::new(RuntimePaths {
+            config_path,
+            data_dir: root.path().join("data"),
+        });
+        runtime.initialize().await;
+        let initial = runtime.status().await.catalog;
+        let catalog_directory = fixed.parent().ok_or("catalog directory")?;
+        let saved_directory = catalog_directory.with_file_name("saved-model-catalogs");
+        fs::rename(catalog_directory, &saved_directory)?;
+        fs::write(catalog_directory, b"directory unavailable")?;
+        let updates = vec![CatalogModelUpdate {
+            slug: "customer-model".to_owned(),
+            display_name: Some("New name".to_owned()),
+            description: None,
+            visibility: None,
+            priority: None,
+        }];
+        assert!(
+            runtime
+                .update_model_catalog(updates.clone(), initial.revision)
+                .await
+                .is_err()
+        );
+        let failed = runtime.status().await.catalog;
+        assert!(failed.problem.is_some_and(|problem| problem.can_repair));
+        assert_eq!(failed.models[0].display_name, "Customer Model");
+
+        fs::remove_file(catalog_directory)?;
+        fs::rename(saved_directory, catalog_directory)?;
+        let metadata = fixed.with_file_name("ai_cove_turbo.metadata.json");
+        if metadata.is_file() {
+            fs::remove_file(&metadata)?;
+        }
+        fs::create_dir(&metadata)?;
+        assert!(runtime.repair_model_catalog().await.is_err());
+        assert!(
+            runtime
+                .status()
+                .await
+                .catalog
+                .problem
+                .is_some_and(|problem| problem.can_repair)
+        );
+        fs::remove_dir(metadata)?;
+        let repaired = runtime.repair_model_catalog().await?;
+
+        assert!(repaired.problem.is_none());
+        let saved = runtime
+            .update_model_catalog(updates, repaired.revision)
+            .await?;
+        assert_eq!(saved.models[0].display_name, "New name");
+        runtime.shutdown().await?;
         Ok(())
     }
 

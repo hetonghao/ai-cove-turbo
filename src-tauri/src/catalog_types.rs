@@ -375,8 +375,17 @@ pub(crate) struct CatalogStatus {
     pub(crate) loaded: bool,
     pub(crate) request_verified: bool,
     pub(crate) revision: String,
+    pub(crate) problem: Option<CatalogProblem>,
     #[serde(default)]
     pub(crate) metadata: CatalogMetadata,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogProblem {
+    pub(crate) message: &'static str,
+    pub(crate) detail: String,
+    pub(crate) can_repair: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -459,8 +468,11 @@ pub(crate) enum CatalogError {
     Read(std::io::Error),
     Write(std::io::Error),
     Json(serde_json::Error),
+    RecoveryJson(serde_json::Error),
+    Journal(String),
     Toml(toml_edit::TomlError),
     InvalidSchema(String),
+    InvalidPointer,
     SourceUnavailable,
     OwnershipConflict,
     InvalidModel(String),
@@ -474,8 +486,11 @@ impl fmt::Display for CatalogError {
             Self::Read(error) => write!(formatter, "无法读取模型目录：{error}"),
             Self::Write(error) => write!(formatter, "无法写入模型目录：{error}"),
             Self::Json(error) => write!(formatter, "模型目录 JSON 无效：{error}"),
+            Self::RecoveryJson(error) => write!(formatter, "catalog-recovery.json 无效：{error}"),
+            Self::Journal(error) => write!(formatter, "{error}"),
             Self::Toml(error) => write!(formatter, "Codex 配置 TOML 无法解析：{error}"),
             Self::InvalidSchema(message) => write!(formatter, "模型目录结构无效：{message}"),
+            Self::InvalidPointer => write!(formatter, "Codex 的 model_catalog_json 不是有效路径"),
             Self::SourceUnavailable => write!(formatter, "没有可验证的 Codex 模型目录来源"),
             Self::OwnershipConflict => {
                 write!(formatter, "Codex 的 model_catalog_json 已被外部修改")
@@ -483,6 +498,38 @@ impl fmt::Display for CatalogError {
             Self::InvalidModel(slug) => write!(formatter, "模型目录更新包含未知模型：{slug}"),
             Self::ProtectedModel(slug) => write!(formatter, "模型 {} 受保护，不能删除", slug),
             Self::ContentChanged => write!(formatter, "模型目录已被外部修改，请重新加载后保存"),
+        }
+    }
+}
+
+impl CatalogError {
+    pub(crate) fn problem(&self) -> CatalogProblem {
+        let message = match self {
+            Self::Json(_)
+            | Self::InvalidSchema(_)
+            | Self::InvalidModel(_)
+            | Self::ProtectedModel(_) => "本地模型目录无法使用，可以尝试修复。",
+            Self::RecoveryJson(_) => "模型目录的恢复记录损坏，可以尝试修复。",
+            Self::Journal(_) => "上次模型设置未能恢复，可以尝试修复。",
+            Self::SourceUnavailable => "没有找到可用的模型目录，点击修复重新查找。",
+            Self::Read(_) | Self::Write(_) => {
+                "无法读写本地模型目录，请检查相关文件夹权限和可用空间后重试。"
+            }
+            Self::OwnershipConflict => "Codex 配置中的目录指针已被外部修改，Turbo 未覆盖该配置。",
+            Self::Toml(_) => "Codex 配置无法读取，请检查 config.toml 后重试。",
+            Self::InvalidPointer => "Codex 配置中的模型目录路径无效，请检查 config.toml。",
+            Self::ContentChanged => "模型目录已在外部更新，点击修复可重新读取。",
+        };
+        CatalogProblem {
+            message,
+            detail: match self {
+                Self::Toml(_) => "Codex config.toml 格式无效".to_owned(),
+                _ => self.to_string(),
+            },
+            can_repair: !matches!(
+                self,
+                Self::OwnershipConflict | Self::Toml(_) | Self::InvalidPointer
+            ),
         }
     }
 }

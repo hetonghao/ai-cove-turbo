@@ -816,6 +816,17 @@ h2 {
   gap: 8px;
 }
 
+.b-model-catalog__actions [data-model-catalog-error] {
+  min-inline-size: 0;
+  color: var(--b-muted);
+  font-size: 0.75rem;
+}
+
+.b-model-catalog__actions [data-model-catalog-error][open] {
+  flex: 1 0 100%;
+  overflow-wrap: anywhere;
+}
+
 .b-model-catalog__restart {
   display: inline-flex;
   align-items: center;
@@ -856,6 +867,11 @@ h2 {
 .b-model-catalog__actions button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.b-model-catalog__actions [data-action="repair-model-catalog"]:not(:disabled) {
+  color: var(--turbo-on-accent);
+  background: var(--turbo-accent);
 }
 
 .b-action-feedback[data-tone="success"] {

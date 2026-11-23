@@ -66,6 +66,7 @@ pub(super) fn status_from_file(
         loaded,
         request_verified,
         revision: digest(&bytes),
+        problem: None,
         metadata,
     })
 }
@@ -98,6 +99,18 @@ pub(super) fn parse_models(bytes: &[u8]) -> Result<Vec<CatalogModel>, CatalogErr
         result.push(model_from_value(model, slug));
     }
     Ok(result)
+}
+
+pub(super) fn valid_truncation_policy(entry: &Value) -> bool {
+    entry.get("truncation_policy").is_some_and(|policy| {
+        matches!(
+            policy.get("mode").and_then(Value::as_str),
+            Some("tokens" | "bytes")
+        ) && policy
+            .get("limit")
+            .and_then(Value::as_u64)
+            .is_some_and(|limit| limit > 0)
+    })
 }
 
 pub(super) fn model_from_value(model: &Value, slug: String) -> CatalogModel {
@@ -240,7 +253,7 @@ fn service_tiers(model: &Value) -> Vec<ServiceTier> {
         .unwrap_or_default()
 }
 
-fn metadata_path(fixed_path: &Path) -> PathBuf {
+pub(super) fn metadata_path(fixed_path: &Path) -> PathBuf {
     fixed_path.with_file_name("ai_cove_turbo.metadata.json")
 }
 
@@ -417,28 +430,50 @@ fn insert_optional_string(
 }
 
 pub(super) fn read_catalog_pointer(config_path: &Path) -> Result<Option<PathBuf>, CatalogError> {
-    let source = fs::read_to_string(config_path).map_err(CatalogError::Read)?;
-    let document = source.parse::<DocumentMut>().map_err(CatalogError::Toml)?;
+    let document = read_config(config_path)?;
+    catalog_pointer(&document, config_path)
+}
+
+fn catalog_pointer(
+    document: &DocumentMut,
+    config_path: &Path,
+) -> Result<Option<PathBuf>, CatalogError> {
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
-    Ok(document
-        .get("model_catalog_json")
-        .and_then(Item::as_str)
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                config_dir.join(path)
-            }
-        }))
+    let Some(item) = document.get("model_catalog_json") else {
+        return Ok(None);
+    };
+    let path = item
+        .as_str()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or(CatalogError::InvalidPointer)?;
+    Ok(Some(config_dir.join(path)))
+}
+
+pub(super) fn read_config(path: &Path) -> Result<DocumentMut, CatalogError> {
+    fs::read_to_string(path)
+        .map_err(CatalogError::Read)?
+        .parse::<DocumentMut>()
+        .map_err(CatalogError::Toml)
 }
 
 pub(super) fn write_catalog_pointer(
     config_path: &Path,
     pointer: Option<&Path>,
 ) -> Result<(), CatalogError> {
+    let current = read_catalog_pointer(config_path)?;
+    replace_catalog_pointer(config_path, current.as_deref(), pointer)
+}
+
+pub(super) fn replace_catalog_pointer(
+    config_path: &Path,
+    expected: Option<&Path>,
+    pointer: Option<&Path>,
+) -> Result<(), CatalogError> {
     let source = fs::read_to_string(config_path).map_err(CatalogError::Read)?;
     let mut document = source.parse::<DocumentMut>().map_err(CatalogError::Toml)?;
+    if catalog_pointer(&document, config_path)?.as_deref() != expected {
+        return Err(CatalogError::OwnershipConflict);
+    }
     match pointer {
         Some(path) => {
             document.insert("model_catalog_json", value(path.display().to_string()));
@@ -447,18 +482,27 @@ pub(super) fn write_catalog_pointer(
             document.remove("model_catalog_json");
         }
     }
+    if fs::read(config_path).map_err(CatalogError::Read)? != source.as_bytes() {
+        return Err(CatalogError::ContentChanged);
+    }
     write_atomic(config_path, document.to_string().as_bytes())
 }
 
 pub(super) fn read_record(path: &Path) -> Result<Option<OwnershipRecord>, CatalogError> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(CatalogError::Read(error)),
+    let Some(bytes) = read_optional(path)? else {
+        return Ok(None);
     };
     serde_json::from_slice(&bytes)
         .map(Some)
-        .map_err(CatalogError::Json)
+        .map_err(CatalogError::RecoveryJson)
+}
+
+pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, CatalogError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CatalogError::Read(error)),
+    }
 }
 
 pub(super) fn write_record(path: &Path, record: &OwnershipRecord) -> Result<(), CatalogError> {

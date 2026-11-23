@@ -292,6 +292,8 @@
   let modelPolicyDraft = null;
   let renderedModelCatalogMarkup = "";
   let modelCatalogActionMessage = "";
+  let catalogRepairError = "";
+  let catalogRepairVersion = 0;
   let fastModelUpdateVersion = 0;
   let pendingDeleteSlug = "";
   let modelDeleteTrigger = null;
@@ -979,6 +981,7 @@
     const updateBusy = ["downloading", "installing"].includes(updateState);
     const dirtyModelSettings = modelSettingsDirty();
     const modelSettingsBusy = Boolean(pendingAction);
+    const catalogProblem = state.catalog?.problem;
     const pressed = {
       "toggle-compression": state.compressionEnabled,
       "toggle-websocket": state.websocketEnabled,
@@ -988,18 +991,27 @@
     all("[data-action]").forEach((control) => {
       const action = control.dataset.action;
       const managed = Object.hasOwn(actions, action);
+      if (action === "repair-model-catalog") {
+        const repairing = pendingAction === action;
+        control.hidden = !catalogProblem?.canRepair;
+        control.disabled = modelSettingsBusy;
+        control.setAttribute("aria-busy", String(repairing));
+      }
+      if (action === "create-model" || action === "discover-models") {
+        control.disabled = modelSettingsBusy || Boolean(catalogProblem);
+      }
       if (action === "save-model-settings" || action === "undo-model-settings") {
         const dirty = dirtyModelSettings;
         const actionPending = pendingAction === action;
-        control.disabled = modelSettingsBusy || !dirty;
+        control.disabled = modelSettingsBusy || !dirty || (action === "save-model-settings" && Boolean(catalogProblem));
         control.hidden = modelSettingsBusy || !dirty;
         control.dataset.status = actionPending ? "pending" : dirty ? "ready" : "idle";
         control.setAttribute("aria-busy", String(actionPending));
       }
       if (action === "delete-model") {
         const protectedModel = modelDeleteProtected(control);
-        control.disabled = modelSettingsBusy || protectedModel;
-        control.setAttribute("aria-disabled", String(protectedModel));
+        control.disabled = modelSettingsBusy || Boolean(catalogProblem) || protectedModel;
+        control.setAttribute("aria-disabled", String(Boolean(catalogProblem) || protectedModel));
         control.setAttribute("aria-busy", String(pendingAction === action));
       }
       if (managed) {
@@ -1039,7 +1051,7 @@
     const draftActions = $("[data-model-catalog-draft-actions]");
     if (draftActions) draftActions.hidden = !showDraftActions;
     const catalogActions = $("[data-model-catalog-actions]");
-    if (catalogActions) catalogActions.hidden = !showDraftActions && !Boolean(state.catalog?.restartRequired);
+    if (catalogActions) catalogActions.hidden = !showDraftActions && !state.catalog?.restartRequired && !catalogProblem;
   }
 
   function catalogListSignature(models) {
@@ -1302,18 +1314,31 @@
       info.dataset.tooltip = tooltip;
       info.setAttribute("aria-label", tooltip.replaceAll("\n", "；"));
     }
-    if (message) {
-      message.textContent = catalog.state === "conflict"
-        ? "Codex 配置中的目录指针已被外部修改，模型候选仍保持当前接管状态。"
-        : catalog.state === "error" ? "模型候选目录未能保存，请重试并查看技术详情。"
-          : modelCatalogActionMessage
+    const ordinaryMessage = modelCatalogActionMessage
             || (state.modelPolicy?.reason ? `传输策略读取失败，已保留上次有效策略：${state.modelPolicy.reason}。` : "")
             || (state.transportCapabilityReason ? `模型能力刷新失败，已保留上次有效能力：${state.transportCapabilityReason}。` : "");
-    }
+    const nextMessage = pendingAction === "repair-model-catalog" ? "正在修复模型目录…"
+      : catalogRepairError ? "模型目录未能修复，请查看技术详情。"
+      : catalog.problem?.message || (catalog.state === "conflict"
+        ? "Codex 配置中的目录指针已被外部修改，模型候选仍保持当前接管状态。"
+        : catalog.state === "error" ? "模型候选目录未能保存，请重试并查看技术详情。"
+        : ordinaryMessage);
+    const detail = catalogRepairError || catalog.problem?.detail || (catalog.state === "error" ? state.technicalDetail : "") || "";
+    const detailPanel = $("[data-model-catalog-error]");
+    const detailText = $("[data-model-catalog-error-detail]");
+    if (message && message.textContent !== nextMessage) message.textContent = nextMessage;
+    if (detailPanel) detailPanel.hidden = !detail;
+    if (detailText && detailText.textContent !== detail) detailText.textContent = detail;
     if (restart) {
       restart.hidden = !catalog.restartRequired;
     }
     if (!list) return;
+    const catalogReadOnly = Boolean(catalog.problem);
+    if (catalogReadOnly && (catalogPointerDrag || draggedCatalogSlug)) {
+      const drag = catalogPointerDrag;
+      if (drag?.handle.hasPointerCapture?.(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+      clearCatalogDragState();
+    }
     const markup = modelCatalogMarkup();
     const canReplaceRows = force || !(draggedCatalogSlug || draggedCatalogTargetSlug || list.contains?.(document.activeElement));
     if (canReplaceRows && markup !== renderedModelCatalogMarkup) {
@@ -1322,12 +1347,16 @@
       list.scrollTop = scrollTop;
       renderedModelCatalogMarkup = markup;
     }
+    all("[data-model-drag-handle], [data-model-transport], [data-model-visibility-toggle], [data-model-edit], [data-model-copy]").forEach((control) => {
+      control.disabled = catalogReadOnly;
+      if (Object.hasOwn(control.dataset, "modelDragHandle")) control.draggable = !catalogReadOnly;
+    });
     const fastUnavailable = $("[data-model-fast-unavailable]");
     if (fastUnavailable) fastUnavailable.hidden = state.aiCoveUpstream;
     all("[data-model-fast]").forEach((control) => {
       const slug = control.closest("[data-model-slug]").dataset.modelSlug;
       control.checked = state.fastModels.includes(slug);
-      control.disabled = !state.serviceHealthy || !state.aiCoveUpstream
+      control.disabled = catalogReadOnly || !state.serviceHealthy || !state.aiCoveUpstream
         || !catalog.models.some((model) => model.slug === slug);
     });
   }
@@ -3383,6 +3412,40 @@
       openModelEditor(null, "create");
       return;
     }
+    if (action === "repair-model-catalog") {
+      if (!invoke || pendingAction || !state.catalog?.problem?.canRepair) return;
+      const hadFocus = document.activeElement === control;
+      const previousModels = state.catalog.models;
+      pendingAction = action;
+      catalogRepairVersion += 1;
+      catalogRepairError = "";
+      renderState();
+      try {
+        state.catalog = await invoke("repair_model_catalog");
+        if (catalogDraft) {
+          const unsavedModels = catalogDraft.filter(({ slug }) => !previousModels.some((model) => model.slug === slug)
+            && !state.catalog.models.some((model) => model.slug === slug));
+          const restoredDraft = mergeSavedModelIntoListDraft(state.catalog.models, catalogDraft, previousModels);
+          catalogDraft = restoredDraft ? restoredDraft.concat(unsavedModels) : null;
+        }
+        modelCatalogActionMessage = "模型目录已修复。";
+      } catch (error) {
+        catalogRepairError = error instanceof Error ? error.message : String(error);
+        const detail = $("[data-model-catalog-error]");
+        if (detail) detail.open = true;
+      } finally {
+        pendingAction = "";
+        catalogRepairVersion += 1;
+        renderState();
+        if (hadFocus && (document.activeElement === control || document.activeElement === document.body)) {
+          const next = state.catalog?.problem ? control
+            : state.catalog?.restartRequired ? $("[data-model-catalog-restart] button")
+            : $("[data-action='discover-models']");
+          next?.focus?.();
+        }
+      }
+      return;
+    }
     if (action === "discover-models") {
       if (pendingAction) return;
       pendingAction = action;
@@ -3501,9 +3564,10 @@
     capabilityRefreshPending = false;
     refreshing = true;
     const fastVersion = fastModelUpdateVersion;
+    const repairVersion = catalogRepairVersion;
     try {
       const status = await invoke("get_app_status");
-      if (canRefreshStatus()) {
+      if (canRefreshStatus() && repairVersion === catalogRepairVersion) {
         const animateNew = statusHydrated;
         statusHydrated = true;
         applyStatus(status, { animateNew, fastVersion });
@@ -3979,6 +4043,7 @@
     document.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       const handle = event.target.closest?.("[data-model-drag-handle]");
+      if (!handle || handle.disabled || state.catalog?.problem) return;
       const row = handle?.closest?.("[data-model-slug]");
       if (!row) return;
       catalogPointerDrag = {
@@ -4032,6 +4097,7 @@
     });
     document.addEventListener("dragstart", (event) => {
       const handle = event.target.closest?.("[data-model-drag-handle]");
+      if (!handle || handle.disabled || state.catalog?.problem) return;
       const row = handle?.closest?.("[data-model-slug]");
       if (!row) return;
       draggedCatalogSlug = row.dataset.modelSlug;

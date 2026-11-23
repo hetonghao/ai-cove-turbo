@@ -20,6 +20,43 @@ pub(crate) struct DiscoveryResult {
     pub(crate) fetched_at: String,
     pub(crate) etag: Option<String>,
     pub(crate) models: Vec<CatalogModel>,
+    #[serde(skip)]
+    response_support: std::collections::HashMap<String, bool>,
+}
+
+impl DiscoveryResult {
+    pub(crate) fn into_repair_models(self, configured: Option<&str>) -> Vec<CatalogModel> {
+        self.models
+            .into_iter()
+            .filter(|model| {
+                model.supported_in_api
+                    && model.visibility == "list"
+                    && self
+                        .response_support
+                        .get(&model.slug)
+                        .copied()
+                        .unwrap_or_else(|| Some(model.slug.as_str()) == configured)
+            })
+            .map(|mut model| {
+                if model
+                    .field_sources
+                    .get("inputModalities")
+                    .is_none_or(|source| source != "上游")
+                {
+                    model.input_modalities = vec!["text".to_owned()];
+                }
+                if model
+                    .field_sources
+                    .get("contextWindow")
+                    .is_none_or(|source| source != "上游")
+                {
+                    model.context_window = None;
+                    model.auto_compact_token_limit = None;
+                }
+                model
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -128,8 +165,37 @@ pub(crate) async fn fetch(
         source_version,
         fetched_at: unix_time_ms().to_string(),
         etag,
+        response_support: response_support(&document),
         models,
     })
+}
+
+fn response_support(document: &Value) -> std::collections::HashMap<String, bool> {
+    if let Some(models) = document.get("models").and_then(Value::as_array) {
+        return models
+            .iter()
+            .filter_map(|model| {
+                let slug = model.get("slug")?.as_str()?.trim();
+                Some((slug.to_owned(), true))
+            })
+            .collect();
+    }
+    document
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            let slug = model.get("id")?.as_str()?.trim();
+            let endpoints = model.get("supported_endpoint_types")?.as_array()?;
+            Some((
+                slug.to_owned(),
+                endpoints
+                    .iter()
+                    .any(|value| value.as_str() == Some("openai-response")),
+            ))
+        })
+        .collect()
 }
 
 fn safe_headers(headers: &HeaderMap) -> HeaderMap {
@@ -236,7 +302,42 @@ fn unix_time_ms() -> u64 {
 mod tests {
     use axum::http::{HeaderMap, HeaderValue, header};
 
-    use super::{parse_models, safe_headers};
+    use super::{DiscoveryResult, parse_models, response_support, safe_headers};
+
+    #[test]
+    fn repair_discovery_keeps_responses_and_the_configured_model_if_capabilities_are_unknown() {
+        let document = serde_json::json!({"data":[
+            {"id":"known-responses","supported_endpoint_types":["openai-response"]},
+            {"id":"chat-only","supported_endpoint_types":["openai"]},
+            {"id":"existing-model"},
+            {"id":"unknown"}
+        ]});
+        let (models, source_version) = parse_models(&document).expect("upstream model list");
+        let discovered = DiscoveryResult {
+            scope: "current_key",
+            source_url: String::new(),
+            source_version,
+            fetched_at: String::new(),
+            etag: None,
+            models,
+            response_support: response_support(&document),
+        };
+
+        let repaired = discovered.into_repair_models(Some("existing-model"));
+
+        assert_eq!(
+            repaired
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            ["known-responses", "existing-model"]
+        );
+        assert!(
+            repaired
+                .iter()
+                .all(|model| model.input_modalities == ["text"])
+        );
+    }
 
     #[test]
     fn basic_data_models_do_not_claim_unknown_capabilities() {

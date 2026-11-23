@@ -54,11 +54,11 @@ async function runApp(source, context) {
   vm.runInNewContext(source, context);
 }
 
-async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models, discoveredModels = [], initialTab = "config", initialConfigView = "settings", rootAvailable = false, deferCapabilityListen = false, failCapabilityListen = false } = {}) {
+async function catalogHarness({ failSave = false, failDiscovery = false, policyReason = null, freshStatus = false, capabilityOverrides = {}, models, discoveredModels = [], initialTab = "config", initialConfigView = "settings", rootAvailable = false, deferCapabilityListen = false, failCapabilityListen = false, catalogProblem } = {}) {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const catalog = {
     path: "/home/test/.codex/model-catalogs/ai_cove_turbo.json",
-    state: "owned",
+    state: catalogProblem ? "error" : "owned",
     sourcePath: "/home/test/models.json",
     models: [
       ...(models || [
@@ -71,6 +71,7 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     loaded: true,
     requestVerified: false,
     revision: "revision-1",
+    problem: catalogProblem,
     metadata: {
       rootSourceType: "bundled_cli",
       rootCodexVersion: "0.42.0",
@@ -195,6 +196,9 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   const importAllAction = element({ action: "import-all-models" });
   importAllAction.closest = (selector) => selector === "[data-action]" ? importAllAction : null;
   const restartControl = element({ action: "restart-codex", catalogRestart: "", restartHint: "" });
+  const repairControl = element({ action: "repair-model-catalog" });
+  repairControl.hidden = true;
+  repairControl.closest = (selector) => selector === "[data-action]" ? repairControl : null;
   const configViewButtons = ["settings", "catalog", "skills"].map((configView) => {
     const target = element({ configView });
     target.closest = (selector) => selector === '[data-config-view][role="tab"]' || selector === "[data-config-view]" ? target : null;
@@ -213,11 +217,14 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   });
   restartControl.closest = (selector) => selector === "[data-config-view]" ? documentBody : selector === "[data-action]" ? restartControl : null;
   actions.push(restartControl);
+  actions.push(repairControl);
   actions.push(importAllAction);
   const selectors = new Map([
     ["[data-model-catalog-info]", info],
     ["[data-model-catalog-list]", list],
     ["[data-model-catalog-message]", message],
+    ["[data-action='repair-model-catalog']", repairControl],
+    ["[data-action='discover-models']", menuActions[1]],
     ["[data-model-catalog-restart]", restart],
     ["[data-model-catalog-actions]", catalogActions],
     ["[data-model-catalog-draft-actions]", draftActions],
@@ -251,6 +258,18 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
         return snapshot;
       }
       return freshStatus ? structuredClone(status) : status;
+    }
+    if (command === "repair_model_catalog") {
+      status.catalog = {
+        ...status.catalog,
+        state: "owned",
+        problem: null,
+        models: discoveredModels,
+        revision: "repaired",
+        restartRequired: true,
+        loaded: false,
+      };
+      return status.catalog;
     }
     if (command === "update_model_catalog") {
       if (failSave) throw new Error("save failed");
@@ -907,6 +926,25 @@ test("上游发现失败不应把模型目录标记为保存错误", async () =>
   assert.equal(harness.catalogState(), "owned");
   assert.doesNotMatch(harness.message.textContent, /模型候选目录未能保存/);
   assert.match(harness.message.textContent, /模型发现未完成：discovery failed/);
+});
+
+test("空目录的修复按钮恢复候选，并提示重启 Codex", async () => {
+  const harness = await catalogHarness({
+    initialConfigView: "catalog",
+    catalogProblem: { canRepair: true, message: "本地目录无法使用", detail: "invalid catalog" },
+    models: [],
+    discoveredModels: [{ slug: "restored-model", displayName: "Restored model", visibility: "list", priority: 1 }],
+  });
+  assert.equal(harness.visible("repair-model-catalog"), true);
+  assert.equal(harness.disabled("repair-model-catalog"), false);
+
+  const releaseOldStatus = await harness.holdStatusRefresh();
+  await harness.click("repair-model-catalog");
+  await releaseOldStatus();
+
+  assert.deepEqual(harness.order(), ["restored-model"]);
+  assert.equal(harness.visible("repair-model-catalog"), false);
+  assert.equal(harness.restartVisible(), true);
 });
 
 test("模型上下文待确认时不再显示额外提示", async () => {
