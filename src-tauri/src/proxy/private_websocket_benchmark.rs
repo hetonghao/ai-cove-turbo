@@ -176,7 +176,8 @@ async fn relay_after_upgrade(
         Arc::clone(&metrics),
         Arc::new(std::sync::atomic::AtomicBool::new(true)),
         path,
-        std::convert::identity,
+        // Fast 暂停：恢复请求改写回调时，基准测试使用 identity 原样转发。
+        // std::convert::identity,
     )
     .await;
     metrics.record_websocket_closed();

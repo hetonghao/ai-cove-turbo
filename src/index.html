@@ -236,7 +236,15 @@
                     </ol>
                     <dl class="b-capabilities">
                       <div class="b-capability"><dt>HTTP</dt><dd class="b-capability__states"><span class="state-indicator" data-state="http-status" data-status="waiting">检查中</span><span class="state-indicator" data-state="http-zstd-status" data-status="waiting">待验证</span></dd></div>
-                      <div class="b-capability"><dt>WebSocket</dt><dd class="b-capability__states"><span class="state-indicator" data-state="websocket-handshake-status" data-status="waiting">待验证</span><span class="state-indicator" data-state="websocket-zstd-status" data-status="waiting">待验证</span></dd></div>
+                      <div class="b-capability">
+                        <dt>WebSocket</dt>
+                        <dd class="b-capability__states">
+                          <span class="state-indicator" data-state="websocket-handshake-status" data-status="waiting" data-visible="websocket-verification">待验证</span>
+                          <span class="state-indicator" data-state="websocket-zstd-status" data-status="waiting" data-visible="websocket-verification">待验证</span>
+                          <span class="state-indicator c-transport__detail" data-status="verified" data-visible="websocket-no-models" tabindex="0" aria-describedby="websocket-no-models-tooltip" hidden>平台暂无支持 WS 的模型</span>
+                          <span class="c-transport__tooltip b-websocket-capability__tooltip" id="websocket-no-models-tooltip" role="tooltip">请求会自动走压缩 HTTP 模式</span>
+                        </dd>
+                      </div>
                     </dl>
                   </section>
 
@@ -278,7 +286,9 @@
               </div>
               <div id="config-view-panel-catalog" class="b-config-view" data-config-view-panel="catalog" role="tabpanel" aria-labelledby="config-view-catalog" hidden>
                 <section class="b-model-catalog b-model-catalog--wide turbo-tilt-bubble" data-tilt-only aria-labelledby="b-model-catalog-title">
-                  <header class="b-config-heading b-config-heading--catalog"><div><p class="eyebrow">MODEL CATALOG</p><h2 id="b-model-catalog-title">模型候选</h2><p>选择显示给 Codex 的模型，并设置每个模型的传输方式。</p><p id="model-fast-description" class="b-model-catalog__fast-note">启用 Fast 模式，速度提升约1.5倍至2.5倍（因模型而异），价格也会成倍提升，具体数据请参考官方口径或 AI Cove 平台实际请求倍率。<span data-model-fast-unavailable hidden>当前上游不是 AI Cove，Fast 模式不可用。</span></p></div><button class="b-model-catalog__info" type="button" data-model-catalog-info aria-label="查看模型候选源文件及根目录同步状态" data-tooltip="模型候选源文件：正在读取">!</button></header>
+                  <header class="b-config-heading b-config-heading--catalog"><div><p class="eyebrow">MODEL CATALOG</p><h2 id="b-model-catalog-title">模型候选</h2><p>选择显示给 Codex 的模型，并设置每个模型的传输方式。</p><!-- Fast 暂停：平台再次需要时恢复说明。
+                    <p id="model-fast-description" class="b-model-catalog__fast-note">启用 Fast 模式，速度提升约1.5倍至2.5倍（因模型而异），价格也会成倍提升，具体数据请参考官方口径或 AI Cove 平台实际请求倍率。<span data-model-fast-unavailable hidden>当前上游不是 AI Cove，Fast 模式不可用。</span></p>
+                  --></div><button class="b-model-catalog__info" type="button" data-model-catalog-info aria-label="查看模型候选源文件及根目录同步状态" data-tooltip="模型候选源文件：正在读取">!</button></header>
                   <div class="b-model-catalog__toolbar"><span><strong data-model-catalog-visible-count>0</strong> / <span data-model-catalog-total-count>0</span> 个候选显示给 Codex</span><span class="b-model-catalog__meta" data-model-catalog-meta></span><div class="b-model-catalog__toolbar-actions"><button type="button" data-action="discover-models">从上游发现</button><button type="button" data-action="create-model">添加模型</button></div></div>
                   <div class="b-model-catalog__list" data-model-catalog-list aria-live="polite"></div>
                   <p id="model-catalog-status" class="b-model-catalog__message" data-model-catalog-message role="status" aria-live="polite"></p>

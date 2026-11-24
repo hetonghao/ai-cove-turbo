@@ -86,6 +86,8 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
   const status = {
     serviceHealthy: true,
     configState: "managed",
+    codexState: "active",
+    compressionVerified: true,
     catalog,
     modelPolicy: { defaultTransport: "auto", models: { beta: "http" }, reason: policyReason },
     transportCapabilities: {
@@ -94,6 +96,9 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
       ...capabilityOverrides,
     },
   };
+  const activationSummary = element({ state: "activation-summary" });
+  const httpOnlyBadge = element({ visible: "websocket-no-models" });
+  const websocketVerification = element({ visible: "websocket-verification" });
   const info = element({ modelCatalogInfo: "" });
   const list = element({ modelCatalogList: "" });
   list.scrollTop = 0;
@@ -299,6 +304,8 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
     addEventListener(type, handler) { listeners.set(type, handler); },
     querySelector(selector) { return selectors.get(selector) ?? null; },
     querySelectorAll(selector) {
+      if (selector === "[data-state]") return [activationSummary];
+      if (selector === "[data-visible]") return [httpOnlyBadge, websocketVerification];
       if (selector === "[data-action]") return actions;
       if (selector === "[data-config-view]") return configViewButtons;
       if (selector === "[data-config-view-panel]") return configViewPanels;
@@ -354,6 +361,9 @@ async function catalogHarness({ failSave = false, failDiscovery = false, policyR
       document.hidden = hidden;
       listeners.get("visibilitychange")?.();
     },
+    activationSummary,
+    httpOnlyBadge,
+    websocketVerification,
     info,
     list,
     message,
@@ -862,6 +872,25 @@ test("过期能力显示实际 HTTP 路由与待刷新状态", async () => {
   });
   assert.match(harness.list.innerHTML, /能力已过期，暂用 HTTP；无需 WS 预热/);
   assert.doesNotMatch(harness.list.innerHTML, /WS 可用/);
+});
+
+test("只有全部候选确认可用 HTTP 时才显示 HTTP 已生效", async () => {
+  const confirmed = { allowed: true, transport: "http", reasonCode: "no_responses_websocket_channel" };
+  const cases = [
+    ["仅 HTTP", confirmed, true],
+    ["WS 暂不可用", { allowed: true, transport: "http", reasonCode: "responses_websocket_unavailable" }, true],
+    ["模型被拒绝", { allowed: false, transport: "http", reasonCode: "model_not_allowed" }, false],
+    ["没有 HTTP 渠道", { allowed: true, transport: "http", reasonCode: "no_http_channel" }, false],
+    ["能力过期", { allowed: true, transport: "http", reasonCode: "capability_expired" }, false],
+    ["缺少能力", null, false],
+    ["支持 WS", { allowed: true, transport: "websocket", reasonCode: "ok" }, false],
+  ];
+  for (const [name, capability, httpOnly] of cases) {
+    const harness = await catalogHarness({ capabilityOverrides: { alpha: confirmed, beta: capability } });
+    assert.equal(harness.httpOnlyBadge.hidden, !httpOnly, name);
+    assert.equal(harness.websocketVerification.hidden, httpOnly, name);
+    assert.equal(harness.activationSummary.textContent === "HTTP 已生效", httpOnly, name);
+  }
 });
 
 test("能力变化事件不等待轮询tick即更新现有候选徽标", async () => {

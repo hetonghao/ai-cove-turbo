@@ -113,7 +113,8 @@ pub fn run() -> tauri::Result<()> {
             reset_route_metrics,
             get_connection_snapshot,
             update_model_policy,
-            set_model_fast,
+            // Fast 暂停：随平台需求恢复设置指令。
+            // set_model_fast,
             get_codex_thread_info,
             get_model_catalog,
             repair_model_catalog,
@@ -366,6 +367,7 @@ async fn update_model_policy(
     runtime.update_model_policy(update).await
 }
 
+/*
 #[tauri::command]
 async fn set_model_fast(
     runtime: State<'_, Arc<AppRuntime>>,
@@ -374,6 +376,7 @@ async fn set_model_fast(
 ) -> Result<std::collections::BTreeSet<String>, String> {
     runtime.set_model_fast(slug, enabled).await
 }
+*/
 
 #[tauri::command]
 async fn get_codex_thread_info(

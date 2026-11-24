@@ -28,7 +28,8 @@ pub(in crate::proxy) async fn relay_private_from_message(
     metrics: Arc<Metrics>,
     compression: Arc<std::sync::atomic::AtomicBool>,
     path: String,
-    rewrite_request: impl FnMut(Message) -> Message,
+    // Fast 暂停：平台再次需要时恢复请求改写回调。
+    // rewrite_request: impl FnMut(Message) -> Message,
 ) {
     if forward_client_message(
         client,
@@ -45,7 +46,7 @@ pub(in crate::proxy) async fn relay_private_from_message(
             upstream,
             metrics,
             compression,
-            path, rewrite_request,
+            path, /* , rewrite_request */
         )
         .await;
     }
@@ -57,7 +58,7 @@ async fn relay_private_refs(
     metrics: Arc<Metrics>,
     compression: Arc<std::sync::atomic::AtomicBool>,
     path: String,
-    mut rewrite_request: impl FnMut(Message) -> Message,
+    // mut rewrite_request: impl FnMut(Message) -> Message,
 ) {
     loop {
         tokio::select! {
@@ -75,7 +76,8 @@ async fn relay_private_refs(
                         break;
                     }
                 };
-                if !forward_client_message(client, upstream, rewrite_request(message), &metrics, &path, compression.load(std::sync::atomic::Ordering::Relaxed)).await {
+                // let message = rewrite_request(message);
+                if !forward_client_message(client, upstream, message, &metrics, &path, compression.load(std::sync::atomic::Ordering::Relaxed)).await {
                     break;
                 }
             }

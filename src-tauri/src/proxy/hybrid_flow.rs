@@ -136,6 +136,8 @@ async fn start_response(
         return legacy::start_legacy_response(client, session, payload, original_binary).await;
     }
     let payload = crate::image_processing::ws_metadata(payload, None);
+    // Fast 暂停：平台再次需要且上游支持时恢复 WebSocket 请求改写。
+    /*
     let payload = super::super::is_responses_path(&session.path)
         .then(|| {
             session
@@ -145,6 +147,7 @@ async fn start_response(
         })
         .flatten()
         .unwrap_or(payload);
+    */
     let payload = super::super::gemini_history::normalize_gemini_function_history(&payload)
         .unwrap_or(payload);
     let payload = super::super::deepseek_history::repair_deepseek_tool_history(

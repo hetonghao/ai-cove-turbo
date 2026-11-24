@@ -32,11 +32,71 @@ mod session_isolation_tests;
 #[path = "hybrid_transport_fallback_tests.rs"]
 mod transport_fallback_tests;
 
-#[path = "model_fast_integration_tests.rs"]
-mod model_fast_integration_tests;
+// Fast 暂停：恢复 Fast 时启用原有测试，并移除下方停用期间的断言。
+// #[path = "model_fast_integration_tests.rs"]
+// mod model_fast_integration_tests;
 
 async fn start_test_proxy(server: &FixtureServer) -> io::Result<(ProxyHandle, Arc<Metrics>)> {
     start_test_proxy_with_policy(server, None).await
+}
+
+#[tokio::test]
+async fn saved_fast_preferences_do_not_override_http_or_websocket_requests() -> io::Result<()> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Stateful,
+        delay_http: false,
+    })
+    .await?;
+    let preferences = server
+        .directory
+        .path()
+        .join("ai_cove_turbo_fast_models.json");
+    let saved = r#"["gpt-6.2-sol"]"#;
+    std::fs::write(&preferences, saved)?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/responses", proxy.endpoint()))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"model":"gpt-6.2-sol","input":"hello","service_tier":"flex"}"#)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(io::Error::other)?;
+    response.bytes().await.map_err(io::Error::other)?;
+
+    proxy.set_capability_for_test("gpt-6.2-sol", CapabilityTransport::WebSocket);
+    let (mut client, _) = connect_local(&proxy).await?;
+    client
+        .send(Message::Text(
+            r#"{"type":"response.create","model":"gpt-6.2-sol","input":"hello"}"#.into(),
+        ))
+        .await
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(4), next_event_type(&mut client)).await??,
+        "response.completed"
+    );
+
+    let http = server.fixture.http_payloads().await;
+    let websocket = server.fixture.private_payloads().await;
+    drop(client);
+    proxy.stop().await;
+    let saved_after = std::fs::read_to_string(preferences);
+    server.stop().await;
+
+    assert_eq!((http.len(), websocket.len()), (1, 1));
+    let http: Value = serde_json::from_slice(&http[0]).map_err(io::Error::other)?;
+    let websocket: Value = serde_json::from_slice(&websocket[0]).map_err(io::Error::other)?;
+    assert_eq!(
+        (
+            http.get("service_tier").and_then(Value::as_str),
+            websocket.get("service_tier")
+        ),
+        (Some("flex"), None)
+    );
+    assert_eq!(saved_after?, saved);
+    Ok(())
 }
 
 async fn start_test_proxy_with_policy(

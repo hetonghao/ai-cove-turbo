@@ -1,7 +1,7 @@
 #![allow(clippy::assigning_clones)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, HashSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -11,6 +11,9 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+// Fast 暂停：恢复状态字段和设置指令时重新启用。
+// use std::collections::BTreeSet;
 
 #[cfg(all(not(test), target_os = "macos"))]
 use std::process::Command;
@@ -197,7 +200,7 @@ pub(crate) struct AppStatus {
     pub(crate) websocket_state: String,
     pub(crate) prewarm_state: String,
     pub(crate) model_policy: ModelPolicyStatus,
-    pub(crate) fast_models: BTreeSet<String>,
+    // pub(crate) fast_models: BTreeSet<String>,
     pub(crate) transport_capabilities: std::collections::HashMap<String, CapabilityModelStatus>,
     pub(crate) transport_capability_reason: Option<String>,
     pub(crate) websocket_handshakes: u64,
@@ -272,7 +275,7 @@ impl AppStatus {
                 models: std::collections::HashMap::new(),
                 reason: None,
             },
-            fast_models: BTreeSet::new(),
+            // fast_models: BTreeSet::new(),
             transport_capabilities: std::collections::HashMap::new(),
             transport_capability_reason: None,
             websocket_handshakes: 0,
@@ -673,7 +676,7 @@ impl AppRuntime {
                 (
                     proxy.prewarm_state(),
                     proxy.model_policy_status(),
-                    proxy.fast_models(),
+                    // proxy.fast_models(),
                     proxy.capability_statuses(),
                     proxy.capability_reason(),
                 )
@@ -682,7 +685,7 @@ impl AppRuntime {
         let Some((
             prewarm_state,
             model_policy,
-            fast_models,
+            // fast_models,
             transport_capabilities,
             transport_capability_reason,
         )) = values
@@ -692,7 +695,7 @@ impl AppRuntime {
         };
         status.prewarm_state = prewarm_state;
         status.model_policy = model_policy;
-        status.fast_models = fast_models;
+        // status.fast_models = fast_models;
         status.transport_capabilities = transport_capabilities;
         status.transport_capability_reason = transport_capability_reason;
     }
@@ -720,6 +723,7 @@ impl AppRuntime {
             .update_model_policy(update)
     }
 
+    /*
     pub(crate) async fn set_model_fast(
         &self,
         slug: String,
@@ -740,6 +744,7 @@ impl AppRuntime {
             .ok_or_else(|| "Turbo 代理尚未启动".to_owned())?
             .set_model_fast(slug, enabled)
     }
+    */
 
     pub(crate) async fn clear_image_cache(&self) {
         if let Some(proxy) = self.proxy.lock().await.as_ref() {

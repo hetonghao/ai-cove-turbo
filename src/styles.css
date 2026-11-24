@@ -3745,6 +3745,11 @@ body[data-active-tab="statistics"] {
   transition: color var(--speed-fast) ease, border-color var(--speed-fast) ease;
 }
 
+.c-transport__detail[data-visible="websocket-no-models"] {
+  --c-accent: var(--b-success);
+  border-bottom-style: solid;
+}
+
 .c-transport__detail:hover,
 .c-transport__detail[data-tooltip-open] {
   border-bottom-color: var(--c-accent);
@@ -4643,6 +4648,7 @@ button:disabled {
   margin-top: 7px;
 }
 
+/* Fast 暂停：随 Fast 开关和说明恢复。
 .b-config-heading--catalog > div > .b-model-catalog__fast-note {
   max-inline-size: 72ch;
   color: var(--b-muted);
@@ -4699,6 +4705,7 @@ button:disabled {
 .b-model-fast input:disabled + .b-switch {
   opacity: 0.48;
 }
+*/
 
 .b-model-catalog__toolbar {
   display: flex;
@@ -6512,7 +6519,16 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
   cursor: help;
 }
 
-.b-model-capability__tooltip.c-transport__tooltip {
+.b-websocket-capability__tooltip.c-transport__tooltip {
+  transition: none;
+}
+
+.b-websocket-capability__tooltip.is-visible {
+  pointer-events: auto;
+}
+
+.b-model-capability__tooltip.c-transport__tooltip,
+.b-websocket-capability__tooltip.c-transport__tooltip {
   width: max-content;
   min-width: 0;
   max-width: min(320px, calc(100vw - 32px));
@@ -6679,6 +6695,7 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
   }
 }
 
+/* Fast 暂停：随 Fast 开关恢复窄窗口布局。
 @media (max-width: 760px) {
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row:has(.b-model-fast) {
     grid-template-columns: 38px minmax(0, 1fr);
@@ -6690,6 +6707,7 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
     justify-self: end;
   }
 }
+*/
 
 @media (max-width: 500px) {
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy {
@@ -6700,9 +6718,11 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
     row-gap: 2px;
   }
 
+  /*
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row:has(.b-model-fast) .b-model-row__copy {
     grid-template-columns: minmax(0, 1.6fr) minmax(64px, 1fr);
   }
+  */
 
   body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-model-row__copy .state-indicator {
     justify-self: start;

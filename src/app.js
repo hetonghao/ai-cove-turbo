@@ -90,7 +90,8 @@
     websocketState: "waiting",
     prewarmState: "disabled",
     modelPolicy: { defaultTransport: "auto", models: {}, reason: null },
-    fastModels: [],
+    // Fast 暂停：平台再次需要时恢复模型候选的开关与状态同步。
+    // fastModels: [],
     transportCapabilityReason: null,
     websocketHandshakes: 0,
     websocketMessages: 0,
@@ -294,7 +295,7 @@
   let modelCatalogActionMessage = "";
   let catalogRepairError = "";
   let catalogRepairVersion = 0;
-  let fastModelUpdateVersion = 0;
+  // let fastModelUpdateVersion = 0;
   let pendingDeleteSlug = "";
   let modelDeleteTrigger = null;
   let draggedCatalogSlug = "";
@@ -462,9 +463,9 @@
     if (updatePreference.checkedDay === today) return;
     markUpdateCheckedToday();
     updateCheckInFlight = true;
-    const fastVersion = fastModelUpdateVersion;
+    // const fastVersion = fastModelUpdateVersion;
     try {
-      applyStatus(await invoke("check_for_updates"), { fastVersion });
+      applyStatus(await invoke("check_for_updates") /*, { fastVersion } */);
     } catch (error) {
       state.updateState = "error";
       state.updateMessage = "检查更新失败，可稍后重试";
@@ -555,7 +556,19 @@
     renderedUpdateState = updateState;
   }
 
-  function activationSummary() {
+  function noUpstreamWebsocketModels() {
+    const { catalog, transportCapabilities } = state;
+    return state.websocketEnabled && state.serviceHealthy && configReady()
+      && catalog?.state === "owned" && catalog.models.length > 0
+      && catalog.models.every(({ slug }) => {
+        const capability = transportCapabilities?.[slug];
+        return capability?.allowed === true && capability.transport === "http"
+          && (capability.reasonCode === "no_responses_websocket_channel"
+            || capability.reasonCode === "responses_websocket_unavailable");
+      });
+  }
+
+  function activationSummary(noWebsocketModels) {
     if (String(state.configState).toLowerCase() === "needs_https") return "请先将上游改为 HTTPS";
     if (!state.serviceHealthy) return "本地通道尚未就绪";
     if (!configReady()) return "等待 Turbo 完成配置";
@@ -570,6 +583,7 @@
     };
     if (pending[codex]) return pending[codex];
     const httpReady = !state.compressionEnabled || state.compressionVerified;
+    if (httpReady && noWebsocketModels) return "HTTP 已生效";
     const websocketReady = !state.websocketEnabled || (state.websocketVerified && state.websocketZstdVerified);
     if (httpReady && websocketReady) return "HTTP / WebSocket 均已生效";
     return "通道可用，等待真实请求验证";
@@ -733,7 +747,8 @@
     return "waiting";
   }
 
-  function formatState(key) {
+  function formatState(key, noWebsocketModels) {
+    if (key === "activation-summary") return activationSummary(noWebsocketModels);
     const configState = String(state.configState ?? "unknown").toUpperCase();
     const starting = configState === "STARTING";
     const needsHttps = configState === "NEEDS_HTTPS";
@@ -789,7 +804,6 @@
       "http-zstd-status": !state.compressionEnabled ? "已关闭" : state.compressionVerified ? "压缩已验证" : "等待验证",
       "websocket-handshake-status": !state.websocketEnabled ? "已关闭" : needsHttps ? "等待配置" : state.websocketVerified ? "连接已验证" : "等待连接",
       "websocket-zstd-status": !state.websocketEnabled ? "已关闭" : needsHttps ? "等待配置" : state.websocketZstdVerified ? "压缩已验证" : "等待验证",
-      "activation-summary": activationSummary(),
       "observed-state": observed ? "OBSERVED / LIVE" : "OBSERVED / WAITING",
       "stream-state": starting ? "WAITING" : needsHttps ? "CONFIG_REQUIRED" : state.serviceHealthy ? (observed ? "ACTIVE" : "IDLE") : "OFFLINE",
     };
@@ -968,11 +982,13 @@
     if (detail) detail.textContent = recovery.detail || "";
   }
 
-  function renderVisibility() {
+  function renderVisibility(noWebsocketModels) {
     const configState = String(state.configState).toLowerCase();
     const updateState = String(state.updateState).toLowerCase();
     const visible = {
       dock: Boolean(state.dockControlAvailable),
+      "websocket-no-models": noWebsocketModels,
+      "websocket-verification": !noWebsocketModels,
       "non-ai-cove": !state.aiCoveUpstream && !state.aiCoveUpstreamFixAvailable,
       "ai-cove-upstream": Boolean(state.aiCoveUpstreamFixAvailable),
       "confirm-non-ai-cove": configState === "warning" && !state.nonAiCoveConfirmed,
@@ -981,7 +997,9 @@
       "update-progress": ["downloading", "installing"].includes(updateState),
     };
     all("[data-visible]").forEach((target) => {
-      setConditionalVisibility(target, Boolean(visible[target.dataset.visible]));
+      const key = target.dataset.visible;
+      setConditionalVisibility(target, Boolean(visible[key]));
+      if (key === "websocket-no-models" && !noWebsocketModels) closeNetworkTooltip(target);
     });
   }
 
@@ -1265,11 +1283,14 @@
       const deleteMarkup = deleteProtected
         ? '<span class="b-model-row__delete-hint" tabindex="0" role="img" aria-label="' + escapeHtml(deleteLabel) + '" data-tooltip="' + escapeHtml(deleteLabel) + '">' + deleteControl + "</span>"
         : deleteControl;
+      // Fast 暂停：恢复时启用开关和下方动作区的 fastMarkup。
+      /*
       const fastMarkup = /^gpt-.+/i.test(model.slug)
         ? '<label class="b-model-fast"><span>Fast</span><input type="checkbox" switch role="switch" data-model-fast aria-label="' + escapeHtml(modelLabel) + ' Fast 模式" aria-describedby="model-fast-description"><span class="b-switch" aria-hidden="true"><i></i></span></label>'
         : "";
+      */
       const sourceMarkup = source ? (source === "上游" ? conflict ? '<span class="b-model-row__confirm" data-model-source="' + escapeHtml(source) + '">' + escapeHtml(conflict.slice(3)) + '</span>' : "" : '<span data-model-source="' + escapeHtml(source) + '">' + escapeHtml(source + conflict) + '</span>') : conflict ? '<span class="b-model-row__confirm">' + escapeHtml(conflict.slice(3)) + '</span>' : '';
-      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><span class="b-model-row__identity">' + rootModelStatusMarkup(model) + '<strong>' + escapeHtml(modelLabel) + '</strong>' + modelSlugMarkup(model, modelLabel) + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '<div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div></span><span class="b-model-row__actions">' + fastMarkup + '<button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button>' + deleteMarkup + '</span></article>';
+      return '<article class="b-model-row" draggable="false" data-model-slug="' + escapeHtml(model.slug) + '"><button class="b-model-row__drag" type="button" draggable="true" data-model-drag-handle aria-label="拖动 ' + escapeHtml(modelLabel) + ' 调整优先级" title="拖动调整优先级"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg></button><span class="b-model-row__copy"><span class="b-model-row__identity">' + rootModelStatusMarkup(model) + '<strong>' + escapeHtml(modelLabel) + '</strong>' + modelSlugMarkup(model, modelLabel) + '</span><span class="b-model-row__details' + confirmationClass + '"><span>' + escapeHtml(context) + '</span>' + sourceMarkup + '</span>' + capabilityBadge(model.slug) + '<div class="b-transport-toggle" role="group" aria-label="传输方式：' + escapeHtml(modelLabel) + '"><button class="b-transport-toggle__option" type="button" data-model-transport="auto" aria-pressed="' + String(transport === "auto") + '">自动</button><button class="b-transport-toggle__option" type="button" data-model-transport="http" aria-pressed="' + String(transport === "http") + '">HTTP</button></div></span><span class="b-model-row__actions">' + /* fastMarkup + */ '<button class="b-model-row__edit" type="button" data-model-edit aria-label="编辑 ' + escapeHtml(modelLabel) + '">编辑</button><button class="b-model-row__copy-action" type="button" data-model-copy aria-label="复制 ' + escapeHtml(modelLabel) + '">复制</button><button class="b-model-row__visibility" type="button" data-model-visibility-toggle aria-pressed="' + String(visible) + '" aria-label="' + escapeHtml(visibilityLabel) + '" title="' + escapeHtml(visibilityLabel) + '">' + visibilityIcon(visible) + '</button>' + deleteMarkup + '</span></article>';
     }).join("");
   }
   function catalogRows() {
@@ -1360,6 +1381,7 @@
       control.disabled = catalogReadOnly;
       if (Object.hasOwn(control.dataset, "modelDragHandle")) control.draggable = !catalogReadOnly;
     });
+    /*
     const fastUnavailable = $("[data-model-fast-unavailable]");
     if (fastUnavailable) fastUnavailable.hidden = state.aiCoveUpstream;
     all("[data-model-fast]").forEach((control) => {
@@ -1368,8 +1390,10 @@
       control.disabled = catalogReadOnly || !state.serviceHealthy || !state.aiCoveUpstream
         || !catalog.models.some((model) => model.slug === slug);
     });
+    */
   }
 
+  /*
   async function setModelFast(control) {
     const slug = control.closest("[data-model-slug]").dataset.modelSlug;
     const enabled = control.checked;
@@ -1392,6 +1416,7 @@
       renderState();
     }
   }
+  */
 
   function cloneModel(model) {
     return JSON.parse(JSON.stringify(model || {}));
@@ -2110,9 +2135,10 @@
 
   function renderState(options = {}) {
     document.body.dataset.serviceHealthy = String(Boolean(state.serviceHealthy));
+    const noWebsocketModels = noUpstreamWebsocketModels();
     all("[data-state]").forEach((target) => {
       const key = target.dataset.state;
-      target.textContent = formatState(key);
+      target.textContent = formatState(key, noWebsocketModels);
       const status = statusFor(key);
       if (status) target.dataset.status = status;
     });
@@ -2132,7 +2158,10 @@
       strands.setAttribute("aria-label", `${count}/5 项已验证`);
     });
     window.TurboStrands?.setCount(count);
-    renderVisibility();
+    renderVisibility(noWebsocketModels);
+    const websocketHint = $("#websocket-no-models-tooltip");
+    const websocketHintText = state.compressionEnabled ? "请求会自动走压缩 HTTP 模式" : "请求会自动走 HTTP 模式";
+    if (websocketHint && websocketHint.textContent !== websocketHintText) websocketHint.textContent = websocketHintText;
     renderLiveRecovery();
     renderControls();
     renderUpdateBubble();
@@ -2285,7 +2314,7 @@
     const tooltipBounds = tooltip.getBoundingClientRect();
     const viewportMargin = 16;
     const topBoundary = 70;
-    const gap = 9;
+    const gap = tooltip.id === "websocket-no-models-tooltip" ? 0 : 9;
     const width = Math.min(tooltipBounds.width, window.innerWidth - viewportMargin * 2);
     const left = Math.max(viewportMargin, Math.min(triggerBounds.right - width, window.innerWidth - width - viewportMargin));
     const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || 720;
@@ -3247,7 +3276,7 @@
       state = {
         ...state,
         ...status,
-        ...(options.fastVersion != null && options.fastVersion !== fastModelUpdateVersion ? { fastModels: state.fastModels } : {}),
+        // ...(options.fastVersion != null && options.fastVersion !== fastModelUpdateVersion ? { fastModels: state.fastModels } : {}),
         ...(nextCapabilities ? { transportCapabilities: nextCapabilities } : {}),
         technicalDetail: "",
       };
@@ -3572,14 +3601,14 @@
     if (!invoke || !canRefreshStatus() || refreshing || document.hidden || capabilityListenerClosed) return;
     capabilityRefreshPending = false;
     refreshing = true;
-    const fastVersion = fastModelUpdateVersion;
+    // const fastVersion = fastModelUpdateVersion;
     const repairVersion = catalogRepairVersion;
     try {
       const status = await invoke("get_app_status");
       if (canRefreshStatus() && repairVersion === catalogRepairVersion) {
         const animateNew = statusHydrated;
         statusHydrated = true;
-        applyStatus(status, { animateNew, fastVersion });
+        applyStatus(status, { animateNew /*, fastVersion */ });
       }
     } catch (error) {
       statusHydrated = true;
@@ -4036,8 +4065,12 @@
       if (connectionTrigger) openConnectionHoverCard(connectionTrigger);
     });
     document.addEventListener("pointerout", (event) => {
-      const trigger = event.target.closest?.(".c-transport__detail");
-      if (trigger && !trigger.contains?.(event.relatedTarget)) closeNetworkTooltip(trigger);
+      if (activeNetworkTooltip) {
+        const { trigger, tooltip } = activeNetworkTooltip;
+        const leaving = trigger.contains(event.target) || tooltip.contains(event.target);
+        const staying = trigger.contains(event.relatedTarget) || tooltip.contains(event.relatedTarget);
+        if (leaving && !staying) closeNetworkTooltip(trigger);
+      }
       const connectionTrigger = event.target.closest?.(".c-connection-chip, .c-connection-session__summary");
       if (connectionTrigger && !connectionTrigger.contains?.(event.relatedTarget)) closeConnectionHoverCardFor(connectionTrigger);
     });
@@ -4054,6 +4087,10 @@
       if (upstreamTrigger && ["Enter", " "].includes(event.key)) {
         event.preventDefault();
         registerUpstreamClick(upstreamTrigger, event.timeStamp);
+        return;
+      }
+      if (event.key === "Escape" && activeNetworkTooltip) {
+        closeNetworkTooltip();
         return;
       }
       if (event.key === "Escape" && aiCoveBubbleOpen) {
@@ -4097,10 +4134,12 @@
       if (connectionTrigger && !connectionTrigger.contains?.(event.relatedTarget)) closeConnectionHoverCardFor(connectionTrigger);
     });
     document.addEventListener("change", (event) => {
+      /*
       if (event.target.matches?.("[data-model-fast]")) {
         void setModelFast(event.target);
         return;
       }
+      */
       markEditorFieldTouched(event.target);
       if (event.target.matches?.("[data-filter]")) renderStatistics();
       if (event.target.matches?.("[data-model-effort]")) syncEditorReasoningOptions();

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -7,11 +7,16 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use tempfile::NamedTempFile;
 
 const POLICY_VERSION: u64 = 1;
+
+// Fast 暂停：保留旧偏好文件，平台再次需要且上游支持时再恢复读写与请求改写。
+/*
+use std::collections::{BTreeMap, BTreeSet};
+use serde_json::value::RawValue;
 const FAST_MODELS_FILE: &str = "ai_cove_turbo_fast_models.json";
+*/
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Transport {
@@ -66,7 +71,7 @@ struct StoreState {
 pub(super) struct ModelPolicyStore {
     path: PathBuf,
     state: Mutex<StoreState>,
-    fast_models: Mutex<BTreeSet<String>>,
+    // fast_models: Mutex<BTreeSet<String>>,
 }
 
 impl Default for ModelPolicy {
@@ -155,6 +160,7 @@ impl ModelPolicy {
 impl ModelPolicyStore {
     pub(super) fn new(path: PathBuf) -> Self {
         let (policy, reason) = ModelPolicy::load(&path, None);
+        /*
         let fast_models = fs::read(path.with_file_name(FAST_MODELS_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<BTreeSet<String>>(&bytes).ok())
@@ -162,13 +168,15 @@ impl ModelPolicyStore {
             .into_iter()
             .filter(|slug| is_fast_model(slug))
             .collect();
+        */
         Self {
             path,
             state: Mutex::new(StoreState { policy, reason }),
-            fast_models: Mutex::new(fast_models),
+            // fast_models: Mutex::new(fast_models),
         }
     }
 
+    /*
     pub(super) fn fast_models(&self) -> BTreeSet<String> {
         lock(&self.fast_models).clone()
     }
@@ -233,6 +241,7 @@ impl ModelPolicyStore {
         );
         serde_json::to_vec(&fields).ok()
     }
+    */
 
     pub(super) fn reload(&self) -> ModelPolicy {
         let mut state = lock(&self.state);
@@ -279,6 +288,7 @@ impl ModelPolicyStore {
     }
 }
 
+/*
 fn is_fast_model(slug: &str) -> bool {
     slug.len() > 4
         && slug.trim() == slug
@@ -286,6 +296,7 @@ fn is_fast_model(slug: &str) -> bool {
             .get(..4)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("gpt-"))
 }
+*/
 
 impl Transport {
     const fn as_str(self) -> &'static str {
@@ -332,6 +343,8 @@ mod tests {
     use super::{ModelPolicy, ModelPolicyStore, ModelPolicyUpdate, Transport};
     use std::fs;
 
+    // Fast 暂停：随偏好读写一并恢复。
+    /*
     #[test]
     fn fast_preferences_survive_restart_and_a_failed_write_does_not_enable_fast()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -353,6 +366,7 @@ mod tests {
         assert!(restarted.set_fast("gemini-3".to_owned(), true).is_err());
         Ok(())
     }
+    */
 
     #[test]
     fn exact_model_match_defaults_to_auto() {

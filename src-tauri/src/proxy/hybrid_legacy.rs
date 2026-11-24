@@ -1,11 +1,13 @@
 use std::{sync::Arc, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+// Fast 暂停：恢复传统 WebSocket 的请求改写时重新启用这两个导入。
+// use serde::Deserialize;
+// use tokio_tungstenite::tungstenite::Utf8Bytes;
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
-        Message, Utf8Bytes,
+        Message,
         protocol::{Role, WebSocketConfig},
     },
 };
@@ -34,7 +36,7 @@ pub(super) async fn start_legacy_response(
             Arc::clone(&session.state.metrics),
             std::sync::Arc::clone(&session.state.compression_enabled),
             session.path.clone(),
-            response_create_rewriter(session),
+            // response_create_rewriter(session),
         )
         .await;
         session.state.metrics.record_websocket_closed();
@@ -55,13 +57,14 @@ pub(super) async fn start_legacy_response(
         .run(
             client,
             legacy_message(payload, original_binary),
-            response_create_rewriter(session),
+            // response_create_rewriter(session),
         )
         .await;
     session.state.metrics.record_websocket_closed();
     false
 }
 
+/*
 fn response_create_rewriter(session: &Session) -> impl FnMut(Message) -> Message + '_ {
     #[derive(Deserialize)]
     struct Create {
@@ -99,6 +102,7 @@ fn response_create_rewriter(session: &Session) -> impl FnMut(Message) -> Message
         }
     }
 }
+*/
 
 fn legacy_message(payload: Vec<u8>, original_binary: bool) -> Message {
     if original_binary {
@@ -163,7 +167,7 @@ impl<'a> StandardRelay<'a> {
         &mut self,
         client: &mut ClientWebSocket,
         initial: Message,
-        mut rewrite_request: impl FnMut(Message) -> Message,
+        // mut rewrite_request: impl FnMut(Message) -> Message,
     ) {
         if self.upstream.send(initial).await.is_err() {
             let _ = close_client(client, 1011, "websocket fallback send failed").await;
@@ -193,9 +197,9 @@ impl<'a> StandardRelay<'a> {
                                 .is_ok_and(|event_type| event_type == "response.create")
                         })
                         .map(|payload| payload.len() as u64);
-                    let outgoing = rewrite_request(client_message);
-                    let sent = outgoing.len() as u64;
-                    if self.upstream.send(outgoing).await.is_err() {
+                    // let client_message = rewrite_request(client_message);
+                    let sent = client_message.len() as u64;
+                    if self.upstream.send(client_message).await.is_err() {
                         self.record_error(1011, "standard websocket send failed before terminal");
                         return;
                     }

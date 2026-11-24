@@ -3,7 +3,7 @@ use std::io;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::{connect_local, next_event_type, next_event_value};
+use super::{connect_local, next_event_type};
 
 #[path = "hybrid_legacy_fixture.rs"]
 mod fixture;
@@ -14,6 +14,10 @@ const CREATE: &str = r#"{"type":"response.create","model":"test","input":"test"}
 const FAIL_CREATE: &str = r#"{"type":"response.create","model":"close-active","input":"test"}"#;
 const FAILED_TERMINAL_CREATE: &str =
     r#"{"type":"response.create","model":"failed-terminal","input":"test"}"#;
+
+// Fast 暂停：恢复传统 WebSocket 改写时一并启用。
+/*
+use super::next_event_value;
 
 #[tokio::test]
 async fn standard_legacy_relay_applies_fast_on_an_open_connection() -> io::Result<()> {
@@ -51,6 +55,7 @@ async fn standard_legacy_relay_applies_fast_on_an_open_connection() -> io::Resul
     fixture.stop().await;
     Ok(())
 }
+*/
 
 #[tokio::test]
 async fn standard_legacy_relay_records_each_terminal_once() -> io::Result<()> {

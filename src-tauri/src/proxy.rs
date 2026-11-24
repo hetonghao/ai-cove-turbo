@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -851,6 +851,8 @@ impl ProxyHandle {
         self.model_policy.status()
     }
 
+    // Fast 暂停：恢复偏好读写时重新启用这些方法及 BTreeSet 导入。
+    /*
     pub(crate) fn fast_models(&self) -> BTreeSet<String> {
         self.model_policy.fast_models()
     }
@@ -865,6 +867,7 @@ impl ProxyHandle {
         }
         self.model_policy.set_fast(slug, enabled)
     }
+    */
 
     pub(crate) fn update_model_policy(
         &self,
@@ -1437,6 +1440,8 @@ async fn proxy_http_with_control(
         .flatten();
     let raw_body = repaired.map_or(raw_body, Bytes::from);
     let is_json = is_compressible_json(&parts.method, &parts.headers);
+    // Fast 暂停：平台再次需要且上游支持时恢复 HTTP 请求改写。
+    /*
     // Hybrid HTTP already carries the tier selected when its WebSocket frame arrived.
     let prioritised = (state.ai_cove_private_websocket_zstd
         && traffic.route == traffic::TrafficRoute::DirectHttp
@@ -1445,6 +1450,7 @@ async fn proxy_http_with_control(
         .then(|| state.model_policy.apply_fast(&raw_body, None))
         .flatten();
     let raw_body = prioritised.map_or(raw_body, Bytes::from);
+    */
     let (raw_body, report) =
         if is_json && (is_responses_path(&path) || path == "/v1/responses/compact") {
             state
