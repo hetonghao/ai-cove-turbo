@@ -768,6 +768,17 @@ async fn real_imagine_release_installs_via_http_fixture() {
         eprintln!("skipped: platform fixture source not present (standalone turbo checkout)");
         return;
     }
+    let source_catalog: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(repo_root.join("skills/catalog.json")).expect("read source skill catalog"),
+    )
+    .expect("parse source skill catalog");
+    let expected_version = source_catalog["skills"]
+        .as_array()
+        .expect("source skill catalog contains a skills array")
+        .iter()
+        .find(|item| item["id"] == "ai-cove-imagine")
+        .and_then(|item| item["version"].as_str())
+        .expect("source skill catalog declares an Imagine version");
     let out = tempfile::tempdir().unwrap();
     let status = std::process::Command::new("python3")
         .arg(repo_root.join("deploy/build-skills.py"))
@@ -790,7 +801,7 @@ async fn real_imagine_release_installs_via_http_fixture() {
 
     let status = manager.status(true).await.unwrap();
     let skill = status_skill(&status, "ai-cove-imagine");
-    assert_eq!(skill.latest_version.as_deref(), Some("1.0.0"));
+    assert_eq!(skill.latest_version.as_deref(), Some(expected_version));
 
     let result = manager
         .install(
@@ -803,6 +814,10 @@ async fn real_imagine_release_installs_via_http_fixture() {
         .unwrap();
     let installed = status_skill(&result.status, "ai-cove-imagine");
     assert_eq!(installed.local_state, "managed");
+    assert_eq!(
+        installed.installed_version.as_deref(),
+        Some(expected_version)
+    );
     assert_eq!(installed.update_state, "current");
     for rel in [
         "SKILL.md",
