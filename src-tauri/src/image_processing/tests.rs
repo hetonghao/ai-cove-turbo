@@ -38,8 +38,11 @@ async fn client_images_reuse_results_across_turns_and_roll_back_as_one_request()
     let (_, encoded) = output.split_once(',').ok_or("invalid data URL")?;
     let decoded = image::load_from_memory(&STANDARD.decode(encoded)?)?.to_rgb8();
     assert_eq!(decoded.get_pixel(0, 2).0, [184, 77, 133]);
-    let (b, warm) = processor.prepare(raw.clone(), "a".into(), true).await;
-    assert_eq!(a, b);
+    let escaped = std::str::from_utf8(&raw)?.replace("data:", r"\u0064\u0061\u0074\u0061\u003a");
+    let (b, warm) = processor
+        .prepare(Bytes::from(escaped), "a".into(), true)
+        .await;
+    assert!(a == b, "JSON escaping changed the processed output");
     assert_eq!(warm.ok_or("missing warm")?.hits, 2);
     let (_, isolated) = processor.prepare(raw.clone(), "b".into(), true).await;
     assert_eq!(isolated.ok_or("missing isolated")?.hits, 1);
@@ -57,9 +60,13 @@ async fn client_images_reuse_results_across_turns_and_roll_back_as_one_request()
     let mut broken: Value = serde_json::from_slice(&raw)?;
     broken["input"][1]["output"][0]["image_url"] = json!("data:image/png;base64,??");
     let bad = Bytes::from(serde_json::to_vec(&broken)?);
-    let (unchanged, err) = processor.prepare(bad.clone(), "a".into(), true).await;
-    assert_eq!(unchanged, bad);
-    assert!(err.ok_or("missing failure")?.fallback);
+    let before = processor.usage();
+    for _ in 0..2 {
+        let (unchanged, err) = processor.prepare(bad.clone(), "a".into(), true).await;
+        assert!(unchanged == bad, "invalid image changed original JSON");
+        assert!(err.ok_or("missing failure")?.fallback);
+    }
+    assert_eq!(processor.usage(), before);
     let lossy = Settings {
         mode: Mode::Lossy,
         format: Format::Png,

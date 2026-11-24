@@ -280,7 +280,7 @@ async fn cancel_during_image_preparation_never_submits_a_generation()
     proxy.set_capability_for_test("gpt-6.2-sol", CapabilityTransport::WebSocket);
     let (mut client, _) = connect_local(&proxy).await?;
     let permit = proxy.images.hold_encoders_for_test().await?;
-    client.send(Message::Text(r#"{"type":"response.create","model":"gpt-6.2-sol","input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}]}]}"#.into())).await?;
+    client.send(Message::Text(r#"{"type":"response.create","model":"gpt-6.2-sol","input":[{"role":"user","content":[{"type":"input_image","image_url":"\u0064\u0061\u0074\u0061\u003aimage/png;base64,iVBORw0KGgo="}]}]}"#.into())).await?;
     send_cancel(&mut client).await?;
     let outcome =
         tokio::time::timeout(Duration::from_secs(4), next_event_type(&mut client)).await??;

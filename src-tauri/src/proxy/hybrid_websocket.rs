@@ -108,17 +108,17 @@ async fn run_websocket_worker(
 ) {
     let mut waiting = Vec::new();
     let mut waiting_bytes = 0usize;
-    let image_work = context
-        .state
-        .compression_enabled
-        .load(std::sync::atomic::Ordering::Relaxed)
-        && payload.windows(5).any(|part| part == b"data:");
+    let image_work = context.state.may_prepare_images(&payload);
     let (frame, report) = {
         let readied = async {
-            let (body, report) = context
-                .state
-                .prepare_images(payload.into(), &context.headers, context.model.as_deref())
-                .await;
+            let (body, report) = if image_work {
+                context
+                    .state
+                    .prepare_images(payload.into(), &context.headers, context.model.as_deref())
+                    .await
+            } else {
+                (payload.into(), None)
+            };
             let marker = report
                 .as_ref()
                 .and_then(crate::image_processing::Report::marker);

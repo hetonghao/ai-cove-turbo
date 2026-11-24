@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 axum = "0.8"
 base64 = "0.22"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+memchr = "2"
 bytes = "1"
 flate2 = "1"
 futures-util = "0.3"
@@ -24,6 +25,7 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "ring", "tls12"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
+ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 # Fast 暂停：恢复请求改写时重新启用 raw_value。

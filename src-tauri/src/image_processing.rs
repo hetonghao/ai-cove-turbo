@@ -1,8 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock},
@@ -14,6 +14,19 @@ mod codec;
 #[cfg(test)]
 mod tests;
 pub(crate) const HEADER: &str = "x-ai-cove-image-processing";
+
+pub(crate) fn may_have_inline_image(body: &[u8]) -> bool {
+    static DATA: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
+    static UNICODE: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
+    DATA.get_or_init(|| memchr::memmem::Finder::new(b"data:"))
+        .find(body)
+        .is_some()
+        || UNICODE
+            .get_or_init(|| memchr::memmem::Finder::new(br"\u00"))
+            .find(body)
+            .is_some()
+}
+
 /// Keep our private metadata out of user-controlled generations, the HTTP fallback, and the connection pool.
 pub(crate) fn ws_metadata(payload: Vec<u8>, marker: Option<&str>) -> Vec<u8> {
     if marker.is_none()
@@ -156,7 +169,7 @@ struct Key {
     quality: u8,
     webp: bool,
 }
-type Slot = Arc<OnceLock<Option<Encoded>>>;
+type Slot = Arc<OnceLock<Option<(Encoded, usize)>>>;
 #[derive(Debug, Default)]
 struct Cache {
     entries: HashMap<Key, (Instant, Slot, usize)>,
@@ -271,9 +284,6 @@ impl Processor {
         scope: String,
         webp: bool,
     ) -> (Bytes, Option<Report>) {
-        if !body.windows(5).any(|w| w == b"data:" || w == b"\\u00") {
-            return (body, None);
-        }
         let started = Instant::now();
         let fallback = || {
             Some(Report {
@@ -375,21 +385,33 @@ impl Processor {
                 {
                     return Err(());
                 }
-                let raw = STANDARD.decode(data).map_err(|_| ())?;
-                if raw.len() > MAX_IMAGE_BYTES || raw.is_empty() {
-                    return Err(());
-                }
-                let before = raw.len();
+                let decode = || {
+                    let raw = STANDARD.decode(data).map_err(|_| ())?;
+                    if raw.len() > MAX_IMAGE_BYTES || raw.is_empty() {
+                        return Err(());
+                    }
+                    Ok(raw)
+                };
                 let lossless = settings.mode == Mode::Lossless;
-                let (result, hit) = if lossless
-                    && (before < settings.min_bytes as usize
+                let decoded_len = data.len() / 4 * 3;
+                let padding = if data.ends_with("==") {
+                    2
+                } else {
+                    usize::from(data.ends_with('='))
+                };
+                let (result, before, hit) = if lossless
+                    && (decoded_len.saturating_sub(padding) < settings.min_bytes as usize
                         || matches!(mime, "image/jpeg" | "image/webp"))
                 {
-                    (Encoded::kept(mime, "policy"), false)
+                    (Encoded::kept(mime, "policy"), decode()?.len(), false)
                 } else {
                     let key = Key {
                         scope: scope.to_owned(),
-                        source: Sha256::digest(&raw).into(),
+                        // STANDARD accepts only canonical base64, so the decoded image has one cache key.
+                        source: digest(&SHA256, data.as_bytes())
+                            .as_ref()
+                            .try_into()
+                            .map_err(|_| ())?,
                         mime,
                         mode: settings.mode,
                         format: if lossless {
@@ -420,13 +442,16 @@ impl Processor {
                         if cold > 64 {
                             return None;
                         }
-                        codec::encode(&raw, mime, settings, webp).ok()
+                        let raw = decode().ok()?;
+                        let encoded = codec::encode(&raw, mime, settings, webp).ok()?;
+                        Some((encoded, raw.len()))
                     });
                     self.cache
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .finish(&key, &slot, value.as_ref());
-                    (value.clone().ok_or(())?, hit)
+                        .finish(&key, &slot, value.as_ref().map(|(encoded, _)| encoded));
+                    let (encoded, before) = value.clone().ok_or(())?;
+                    (encoded, before, hit)
                 };
                 if start.elapsed() > WORK_BUDGET {
                     return Err(());

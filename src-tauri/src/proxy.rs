@@ -1307,18 +1307,18 @@ async fn health() -> impl IntoResponse {
 }
 
 impl ProxyState {
+    fn may_prepare_images(&self, body: &[u8]) -> bool {
+        self.ai_cove_private_websocket_zstd
+            && self.compression_enabled.load(Ordering::Relaxed)
+            && crate::image_processing::may_have_inline_image(body)
+    }
+
     async fn prepare_images(
         &self,
         body: Bytes,
         headers: &HeaderMap,
         model: Option<&str>,
     ) -> (Bytes, Option<crate::image_processing::Report>) {
-        if !self.ai_cove_private_websocket_zstd
-            || !self.compression_enabled.load(Ordering::Relaxed)
-            || !body.windows(5).any(|s| s == b"image")
-        {
-            return (body, None);
-        }
         let Some(model) = model else {
             return (body, None);
         };
@@ -1452,7 +1452,10 @@ async fn proxy_http_with_control(
     let raw_body = prioritised.map_or(raw_body, Bytes::from);
     */
     let (raw_body, report) =
-        if is_json && (is_responses_path(&path) || path == "/v1/responses/compact") {
+        if is_json
+            && (is_responses_path(&path) || path == "/v1/responses/compact")
+            && state.may_prepare_images(&raw_body)
+        {
             state
                 .prepare_images(raw_body, &parts.headers, metadata.model.as_deref())
                 .await
@@ -2969,10 +2972,12 @@ data: {"type":"response.completed"}
         );
         let image = serde_json::json!({"type":"input_image","image_url":data});
         let pictures=serde_json::json!({"model":"fixture","input":[{"role":"user","content":vec![image;20]}]}).to_string();
+        let escaped_pictures = pictures.replace("data:", r"\u0064\u0061\u0074\u0061\u003a");
         let text = serde_json::json!({"model":"fixture","input":"word ".repeat(500)}).to_string();
         let client = reqwest::Client::new();
         for (body, active, marker, wire) in [
             (&pictures, true, Some("v1/changed/20"), true),
+            (&escaped_pictures, true, Some("v1/changed/20"), true),
             (&pictures, false, None, false),
             (&text, true, None, true),
         ] {
