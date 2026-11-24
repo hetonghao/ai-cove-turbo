@@ -666,6 +666,15 @@
       ["会话/连接", `${requestSessionSequence(threadId)} · ${requestConnectionSequence(request, threadId)}`],
       ["首帧/耗时", `${telemetry.formatDuration(request?.firstFrameMs ?? request?.first_frame_ms)} / ${telemetry.formatDuration(request?.durationMs ?? request?.duration_ms)}`],
     ];
+    const images = request?.imageCompression;
+    if (images?.fallback) rows.push(['附图','保留原图，本机未完成处理']);
+    else if (images?.count) {
+      rows.push(['附图压缩', '已压缩 '+images.changed+' / '+images.count+' 张 · 缓存命中 '+images.hits+' 张'], ['图片大小',telemetry.formatBytes(images.before)+' → '+telemetry.formatBytes(images.after)], ['本机处理',telemetry.formatDuration(images.elapsedMs)], ['请求体',telemetry.formatBytes(images.jsonBefore)+' → '+telemetry.formatBytes(images.jsonAfter)]);
+      const reasons={policy:'按策略保留',threshold:'低于阈值',preserve:'保留原图',notSmaller:'原图更小',lossless:'无损',lossy:'有损',resized:'已缩放'};
+      (images.details||[]).forEach((im,i) => rows.push(['图 '+(i+1),im.from.replace('image/','')+' → '+im.to.replace('image/','')+' · '+telemetry.formatBytes(im.before)+' → '+telemetry.formatBytes(im.after)+' · '+(im.cached?'缓存 · ':'')+(reasons[im.reason]||'保留原图')]));
+      if (images.count>(images.details||[]).length) rows.push(['其他附图',String(images.count-images.details.length)+' 张']);
+    }
+    if (request?.platformRequestId) rows.push(['平台请求号',request.platformRequestId]);
     if (exception) rows.push(["异常", exception]);
     return rows;
   }
@@ -3810,7 +3819,73 @@
     });
   }
 
+  function bindImagePreferences() {
+    const dialog = document.getElementById?.("image-settings-dialog");
+    const form = dialog?.querySelector?.("form");
+    const opener = $("[data-image-settings-open]");
+    if (!form || !opener) return;
+    const fields = form.elements;
+    const error = form.querySelector("[role='alert']");
+    const cacheButton = form.querySelector("[data-image-cache-clear]");
+    const defaults = { mode: "lossless", minBytes: 0, maxSide: 2048, quality: 85, format: "auto" };
+    function drawCache() {
+      const count = state.imageCacheEntries || 0;
+      form.querySelector("[data-image-cache-summary]").textContent = "图片缓存：" + count + " 项 · " + telemetry.formatBytes(state.imageCacheBytes || 0);
+      cacheButton.disabled = !count;
+    }
+    function syncFields() {
+      const lossy = fields.mode.value === "lossy";
+      form.querySelectorAll("[data-image-lossy]").forEach(row => { row.hidden = !lossy; });
+      form.querySelector("[data-image-mode-hint]").textContent = lossy ? "可按最长边缩小图片，并调整输出格式和质量。" : "保留全部像素。上游支持时，将 PNG 和静态 GIF 转为 WebP。";
+      fields.maxSide.disabled = fields.format.disabled = !lossy;
+      fields.quality.disabled = !lossy || fields.format.value === "png";
+      form.querySelector("[data-image-quality]").hidden = fields.quality.disabled;
+      form.querySelector("[data-image-quality-value]").value = fields.quality.value;
+      fields.minAmount.setCustomValidity("");
+    }
+    cacheButton.addEventListener("click", async () => {
+      cacheButton.disabled = true;
+      try { if (invoke) applyStatus(await invoke("clear_image_cache")); }
+      catch (err) { error.textContent = String(err); }
+      finally { drawCache(); }
+    });
+    opener.addEventListener("click", () => {
+      const settings = state.imageCompression || defaults;
+      for (const name of ["mode", "maxSide", "format", "quality"]) fields[name].value = String(settings[name]);
+      const bytes = settings.minBytes ?? 0;
+      const scale = bytes === 0 ? 1000 : [1000000, 1000, 1].find(unit => bytes % unit === 0);
+      fields.sizeUnit.value = String(scale);
+      fields.minAmount.value = String(bytes / scale);
+      drawCache(); error.textContent = ""; syncFields(); dialog.showModal(); fields.mode.focus();
+    });
+    dialog.addEventListener("close", () => opener.focus());
+    form.addEventListener("input", syncFields);
+    form.addEventListener("change", syncFields);
+    form.querySelector("[data-image-cancel]").addEventListener("click", () => dialog.close());
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      const total = fields.minAmount.valueAsNumber * Number(fields.sizeUnit.value);
+      const minBytes = Math.round(total);
+      if (!Number.isSafeInteger(minBytes) || Math.abs(total - minBytes) > 1e-7 || minBytes < 0 || minBytes > 0xffffffff) {
+        fields.minAmount.setCustomValidity("请输入换算后为整数字节、且不超过 4,294,967,295 B 的大小。");
+      }
+      if (!form.reportValidity()) return;
+      const submit = form.querySelector("[type='submit']");
+      if (submit.disabled) return;
+      const saved = state.imageCompression || defaults;
+      const settings = { mode: fields.mode.value, minBytes, maxSide: fields.maxSide.disabled ? saved.maxSide : fields.maxSide.valueAsNumber, quality: fields.quality.disabled ? saved.quality : Number(fields.quality.value), format: fields.format.value };
+      submit.disabled = true;
+      try {
+        if (invoke) applyStatus(await invoke("set_image_compression", { settings }));
+        else { state.imageCompression = settings; renderState(); }
+        dialog.close();
+      } catch (err) { error.textContent = "设置未保存：" + String(err); }
+      finally { submit.disabled = false; }
+    });
+  }
+
   function init() {
+    bindImagePreferences();
     state.tab = readTab();
     state.configView = readConfigView();
     syncLiveRequests();

@@ -128,12 +128,14 @@ async fn start_response(
     payload: Vec<u8>,
     original_binary: bool,
 ) -> bool {
+    let entered_at = std::time::Instant::now();
     let Ok(event_type) = event_type(&payload) else {
         return legacy::start_legacy_response(client, session, payload, original_binary).await;
     };
     if event_type != "response.create" {
         return legacy::start_legacy_response(client, session, payload, original_binary).await;
     }
+    let payload = crate::image_processing::ws_metadata(payload, None);
     let payload = super::super::is_responses_path(&session.path)
         .then(|| {
             session
@@ -270,9 +272,9 @@ async fn start_response(
             lease,
             payload,
             original_binary,
-            std::sync::Arc::clone(&session.state.metrics),
-            session.last_terminal_response_id.clone(),
+            session,
             fallback,
+            entered_at,
         ));
         return true;
     }

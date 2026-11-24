@@ -809,6 +809,7 @@ impl Metrics {
 
 #[derive(Debug)]
 pub(crate) struct ProxyHandle {
+    pub(crate) images: Arc<crate::image_processing::Processor>,
     endpoint: String,
     hybrid_pool: hybrid_pool::HybridPool,
     shutdown: Option<oneshot::Sender<()>>,
@@ -958,6 +959,7 @@ impl std::error::Error for ProxyError {}
 
 #[derive(Clone, Debug)]
 struct ProxyState {
+    images: Arc<crate::image_processing::Processor>,
     upstream: Url,
     compression_enabled: Arc<AtomicBool>,
     websocket_enabled: Arc<AtomicBool>,
@@ -1215,7 +1217,9 @@ pub(crate) async fn start_proxy_with_policy(
             Arc::clone(&capability_cache),
         )]))),
     };
+    let images = Arc::new(crate::image_processing::Processor::default());
     let state = ProxyState {
+        images: Arc::clone(&images),
         upstream,
         compression_enabled: options.compression_enabled,
         websocket_enabled: options.websocket_enabled,
@@ -1253,6 +1257,7 @@ pub(crate) async fn start_proxy_with_policy(
     }
 
     Ok(ProxyHandle {
+        images,
         endpoint,
         hybrid_pool,
         shutdown: Some(shutdown_tx),
@@ -1298,10 +1303,40 @@ async fn health() -> impl IntoResponse {
     )
 }
 
+impl ProxyState {
+    async fn prepare_images(
+        &self,
+        body: Bytes,
+        headers: &HeaderMap,
+        model: Option<&str>,
+    ) -> (Bytes, Option<crate::image_processing::Report>) {
+        if !self.ai_cove_private_websocket_zstd
+            || !self.compression_enabled.load(Ordering::Relaxed)
+            || !body.windows(5).any(|s| s == b"image")
+        {
+            return (body, None);
+        }
+        let Some(model) = model else {
+            return (body, None);
+        };
+        let scope = self.capability_probe.for_headers(headers);
+        let Some(webp) = scope.cache.image_webp(model) else {
+            if scope.cache.needs_refresh_for(model) {
+                scope.refresh_for_request(&[model.to_owned()])
+            }
+            return (body, None);
+        };
+        self.images.prepare(body, scope.scope, webp).await
+    }
+}
+
 async fn proxy_request(
     State(state): State<ProxyState>,
     mut request: AxumRequest,
 ) -> Response<Body> {
+    request
+        .headers_mut()
+        .remove(crate::image_processing::HEADER);
     request.headers_mut().insert(
         HeaderName::from_static("x-ai-cove-client"),
         header::HeaderValue::from_static("turbo"),
@@ -1391,7 +1426,7 @@ async fn proxy_http_with_control(
         return json_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
     };
     let raw_len = raw_body.len();
-    let metadata = traffic::request_metadata(&parts.headers, &raw_body);
+    let mut metadata = traffic::request_metadata(&parts.headers, &raw_body);
     state.metrics.observe_session_name_hint(&metadata);
     let normalized = is_responses_path(&path)
         .then(|| gemini_history::normalize_gemini_function_history(&raw_body))
@@ -1410,6 +1445,18 @@ async fn proxy_http_with_control(
         .then(|| state.model_policy.apply_fast(&raw_body, None))
         .flatten();
     let raw_body = prioritised.map_or(raw_body, Bytes::from);
+    let (raw_body, report) =
+        if is_json && (is_responses_path(&path) || path == "/v1/responses/compact") {
+            state
+                .prepare_images(raw_body, &parts.headers, metadata.model.as_deref())
+                .await
+        } else {
+            (raw_body, None)
+        };
+    let marker = report
+        .as_ref()
+        .and_then(crate::image_processing::Report::marker);
+    metadata.image_compression = report;
     let should_compress = state.compression_enabled.load(Ordering::Relaxed) && is_json;
     let (outbound_body, compressed) = if should_compress {
         match CompressionScheduler::shared()
@@ -1442,6 +1489,9 @@ async fn proxy_http_with_control(
     };
     let target = resolve_target(&state.upstream, &parts.uri);
     let mut upstream_request = state.client.request(parts.method.clone(), target.clone());
+    if let Some(marker) = marker {
+        upstream_request = upstream_request.header(crate::image_processing::HEADER, marker)
+    }
     let hop_by_hop = hop_by_hop_headers(&parts.headers);
     for (name, value) in &parts.headers {
         if !hop_by_hop.contains(name) && *name != header::HOST && *name != header::CONTENT_LENGTH {
@@ -1474,6 +1524,12 @@ async fn proxy_http_with_control(
             return json_error(StatusCode::BAD_GATEWAY, "upstream request failed");
         }
     };
+    metadata.platform_request_id = upstream_response
+        .headers()
+        .get("x-oneapi-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| v.len() <= 128)
+        .map(str::to_owned);
     let status = upstream_response.status();
     let mut timing = HttpTiming::new(HttpTimingInput {
         metrics: Arc::clone(&state.metrics),
@@ -2870,6 +2926,87 @@ data: {"type":"response.completed"}
 
         proxy.stop().await;
         upstream_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turbo_image_marker_count_and_wire_encoding_are_independent()
+    -> Result<(), Box<dyn Error>> {
+        use base64::Engine as _;
+        let captured = CapturedRequest::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let app = Router::new()
+            .route("/v1/responses", post(upstream))
+            .with_state(Arc::clone(&captured));
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let proxy = start_proxy(ProxyOptions {
+            upstream: Url::parse(&format!("http://{addr}/v1"))?,
+            compression_enabled: Arc::clone(&enabled),
+            websocket_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ai_cove_private_websocket_zstd: true,
+            metrics: Arc::default(),
+            preferred_ports: vec![0],
+            max_request_body_bytes: 1024 * 1024,
+        })
+        .await?;
+        proxy.set_capability_for_test("fixture", CapabilityTransport::HttpOnly);
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(256, 256, image::Rgb([41, 110, 86]))
+            .write_to(&mut png, image::ImageFormat::Png)?;
+        let data = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+        );
+        let image = serde_json::json!({"type":"input_image","image_url":data});
+        let pictures=serde_json::json!({"model":"fixture","input":[{"role":"user","content":vec![image;20]}]}).to_string();
+        let text = serde_json::json!({"model":"fixture","input":"word ".repeat(500)}).to_string();
+        let client = reqwest::Client::new();
+        for (body, active, marker, wire) in [
+            (&pictures, true, Some("v1/changed/20"), true),
+            (&pictures, false, None, false),
+            (&text, true, None, true),
+        ] {
+            enabled.store(active, Ordering::Relaxed);
+            let reply = client
+                .post(format!("{}/responses", proxy.endpoint()))
+                .header("content-type", "application/json")
+                .header(crate::image_processing::HEADER, "v1/changed/99")
+                .body(body.clone())
+                .send()
+                .await?;
+            assert_eq!(reply.status(), StatusCode::CREATED);
+            let _ = reply.bytes().await?;
+            let (headers, data) = captured.lock().await.take().ok_or("not sent")?;
+            assert_eq!(
+                headers
+                    .get(crate::image_processing::HEADER)
+                    .and_then(|v| v.to_str().ok()),
+                marker
+            );
+            assert_eq!(
+                headers
+                    .get("content-encoding")
+                    .and_then(|v| v.to_str().ok()),
+                wire.then_some("zstd")
+            );
+            if marker.is_some() {
+                let decoded = zstd::decode_all(std::io::Cursor::new(data))?;
+                let obj: serde_json::Value = serde_json::from_slice(&decoded)?;
+                assert!(
+                    obj["input"][0]["content"][0]["image_url"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("data:image/webp;"))
+                );
+            } else if !active {
+                assert_eq!(data.as_ref(), body.as_bytes());
+            }
+        }
+        proxy.stop().await;
+        server.abort();
         Ok(())
     }
 

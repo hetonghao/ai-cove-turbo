@@ -74,6 +74,7 @@ pub(crate) async fn start(upstream: Url, metrics: Arc<Metrics>) -> Result<ProxyH
         return Err(error);
     }
     Ok(ProxyHandle {
+        images: Arc::default(),
         endpoint,
         hybrid_pool,
         shutdown: Some(shutdown),
@@ -173,6 +174,7 @@ async fn relay_after_upgrade(
         &mut upstream,
         message,
         Arc::clone(&metrics),
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
         path,
         std::convert::identity,
     )

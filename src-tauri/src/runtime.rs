@@ -113,6 +113,7 @@ impl RuntimePaths {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 struct Preferences {
+    image_compression: crate::image_processing::Settings,
     compression_enabled: bool,
     websocket_enabled: bool,
     autostart_initialized: bool,
@@ -158,6 +159,7 @@ struct ModelSettingsJournalContext {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            image_compression: crate::image_processing::Settings::default(),
             compression_enabled: true,
             websocket_enabled: true,
             autostart_initialized: false,
@@ -175,6 +177,9 @@ impl Default for Preferences {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppStatus {
+    pub(crate) image_compression: crate::image_processing::Settings,
+    pub(crate) image_cache_bytes: usize,
+    pub(crate) image_cache_entries: usize,
     pub(crate) service_healthy: bool,
     pub(crate) endpoint: String,
     pub(crate) config_state: String,
@@ -248,6 +253,9 @@ impl AppStatus {
             original_upstream: "—".to_owned(),
             ai_cove_upstream: false,
             ai_cove_upstream_fix_available: false,
+            image_compression: preferences.image_compression,
+            image_cache_bytes: 0,
+            image_cache_entries: 0,
             compression_enabled: preferences.compression_enabled,
             compression_verified: false,
             websocket_enabled: preferences.websocket_enabled,
@@ -476,6 +484,9 @@ impl AppRuntime {
                 return;
             }
         };
+        proxy
+            .images
+            .configure(lock_mutex(&self.preferences).image_compression);
         let endpoint = proxy.endpoint().to_owned();
         let websocket_enabled = self.websocket_enabled.load(Ordering::Relaxed);
 
@@ -589,6 +600,9 @@ impl AppRuntime {
             self.update_status(|status| status.catalog = catalog);
         }
         let mut status = read_lock(&self.status).clone();
+        if let Some(proxy) = self.proxy.lock().await.as_ref() {
+            (status.image_cache_bytes, status.image_cache_entries) = proxy.images.usage();
+        }
         self.refresh_transport_status(&mut status).await;
         status.requests = metrics.requests;
         status.raw_bytes = metrics.raw_bytes;
@@ -725,6 +739,35 @@ impl AppRuntime {
             .as_ref()
             .ok_or_else(|| "Turbo 代理尚未启动".to_owned())?
             .set_model_fast(slug, enabled)
+    }
+
+    pub(crate) async fn clear_image_cache(&self) {
+        if let Some(proxy) = self.proxy.lock().await.as_ref() {
+            proxy.images.clear();
+        }
+    }
+
+    pub(crate) async fn set_image_compression(
+        &self,
+        value: crate::image_processing::Settings,
+    ) -> Result<(), String> {
+        if !value.valid() {
+            return Err("图片压缩参数超出范围".to_owned());
+        }
+        let proxy = self.proxy.lock().await;
+        {
+            let mut prefs = lock_mutex(&self.preferences);
+            let mut next = prefs.clone();
+            next.image_compression = value;
+            save_preferences(&self.paths.preferences_path(), &next)
+                .map_err(|error| error.to_string())?;
+            *prefs = next;
+        }
+        if let Some(proxy) = proxy.as_ref() {
+            proxy.images.configure(value)
+        }
+        self.update_status(|status| status.image_compression = value);
+        Ok(())
     }
 
     pub(crate) fn set_compression(&self, enabled: bool) {
@@ -1527,6 +1570,9 @@ impl AppRuntime {
         )
         .await
         .map_err(|error| error.to_string())?;
+        proxy
+            .images
+            .configure(lock_mutex(&self.preferences).image_compression);
         let endpoint = proxy.endpoint().to_owned();
         let websocket_enabled = self.websocket_enabled.load(Ordering::Relaxed);
         let managed = match take_over(check, &endpoint, websocket_enabled, recovery_path) {
@@ -2226,10 +2272,14 @@ async fn persist_traffic_once(
 }
 
 fn load_preferences(path: &Path) -> Preferences {
-    fs::read(path)
+    let mut prefs: Preferences = fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if !prefs.image_compression.valid() {
+        prefs.image_compression = crate::image_processing::Settings::default();
+    }
+    prefs
 }
 
 fn read_optional_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -2496,6 +2546,7 @@ mod tests {
                 allowed: true,
                 transport: CapabilityTransport::WebSocket,
                 reason_code: "ok".to_owned(),
+                image_processing: None,
             },
         );
 

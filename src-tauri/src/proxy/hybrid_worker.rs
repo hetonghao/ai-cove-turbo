@@ -102,6 +102,18 @@ pub(super) async fn handle_worker_event(
         return super::transport_fallback::handle_stopped_worker(client).await;
     };
     match event {
+        WorkerEvent::ImagesPrepared(report) => {
+            if let Some(meta) = session.request_metadata.as_mut() {
+                meta.image_compression = Some(report);
+            }
+            true
+        }
+        WorkerEvent::PlatformRequestId(id) => {
+            if let Some(m) = session.request_metadata.as_mut() {
+                m.platform_request_id = Some(id)
+            };
+            true
+        }
         WorkerEvent::Message(message) => {
             let from_websocket = active
                 .as_ref()

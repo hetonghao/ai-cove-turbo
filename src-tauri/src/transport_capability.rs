@@ -25,6 +25,8 @@ pub(crate) struct CapabilityModelStatus {
     pub(crate) allowed: bool,
     pub(crate) transport: CapabilityTransport,
     pub(crate) reason_code: String,
+    #[serde(default)]
+    pub(crate) image_processing: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -59,6 +61,8 @@ struct CapabilityItem {
     allowed: bool,
     http: bool,
     responses_websocket: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_processing: Option<String>,
     reason_code: String,
 }
 
@@ -201,6 +205,7 @@ impl CapabilityCache {
                     allowed: item.allowed,
                     transport,
                     reason_code: item.reason_code.clone(),
+                    image_processing: item.image_processing.clone(),
                 },
             )
         });
@@ -277,6 +282,7 @@ impl CapabilityCache {
                 allowed: true,
                 transport: CapabilityTransport::HttpOnly,
                 reason_code: String::new(),
+                image_processing: None,
             });
         status.transport = CapabilityTransport::HttpOnly;
         status.reason_code = "responses_websocket_unavailable".to_owned();
@@ -350,6 +356,22 @@ impl CapabilityCache {
             .map(|status| state.effective_status(status).transport)
     }
 
+    pub(super) fn image_webp(&self, model: &str) -> Option<bool> {
+        let state = lock(&self.0);
+        if state.expires_at.is_none_or(|v| Instant::now() >= v) {
+            return None;
+        }
+        let item = state.statuses.get(model)?;
+        if !item.allowed {
+            return None;
+        }
+        match item.image_processing.as_deref() {
+            Some("v1") => Some(false),
+            Some("v1/webp") => Some(true),
+            _ => None,
+        }
+    }
+
     pub(super) fn snapshot_response(&self) -> CapabilityResponse {
         let state = lock(&self.0);
         let mut data = state
@@ -365,6 +387,7 @@ impl CapabilityCache {
                     http,
                     responses_websocket,
                     reason_code: status.reason_code.clone(),
+                    image_processing: status.image_processing.clone(),
                 }
             })
             .collect::<Vec<_>>();
@@ -423,6 +446,7 @@ impl CapabilityCache {
                 allowed: true,
                 transport,
                 reason_code: "test".to_owned(),
+                image_processing: Some("v1/webp".into()),
             },
         );
         state.expires_at = Some(Instant::now() + CAPABILITY_TTL);

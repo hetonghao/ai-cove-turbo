@@ -9,6 +9,7 @@ mod catalog_discovery;
 mod codex_desktop_windows;
 mod codex_thread_title;
 pub(crate) mod config;
+mod image_processing;
 pub(crate) mod proxy;
 pub(crate) mod runtime;
 mod session_names;
@@ -124,6 +125,8 @@ pub fn run() -> tauri::Result<()> {
             reclaim_model_catalog,
             open_ai_cove,
             set_compression,
+            set_image_compression,
+            clear_image_cache,
             set_websocket,
             set_autostart,
             set_dock_visible,
@@ -472,6 +475,21 @@ async fn reclaim_model_catalog(
 #[tauri::command]
 fn open_ai_cove() -> Result<(), String> {
     open_ai_cove_url()
+}
+
+#[tauri::command]
+async fn clear_image_cache(runtime: State<'_, Arc<AppRuntime>>) -> Result<AppStatus, String> {
+    runtime.clear_image_cache().await;
+    Ok(runtime.status().await)
+}
+
+#[tauri::command]
+async fn set_image_compression(
+    runtime: State<'_, Arc<AppRuntime>>,
+    settings: image_processing::Settings,
+) -> Result<AppStatus, String> {
+    runtime.set_image_compression(settings).await?;
+    Ok(runtime.status().await)
 }
 
 #[tauri::command]

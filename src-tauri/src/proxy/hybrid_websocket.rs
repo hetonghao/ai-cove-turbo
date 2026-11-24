@@ -1,6 +1,5 @@
 use std::{
     pin::Pin,
-    sync::Arc,
     time::{Duration, Instant as StdInstant},
 };
 
@@ -20,7 +19,6 @@ use super::{
     private_websocket,
     sse::{HttpFallback, is_terminal_event, success_terminal_response_id},
 };
-use crate::proxy::Metrics;
 
 const ACTIVE_KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const ACTIVE_KEEPALIVE_PAYLOAD: &[u8] = b"turbo-hybrid-active";
@@ -29,15 +27,21 @@ pub(super) fn start_websocket_worker(
     lease: Lease,
     payload: Vec<u8>,
     original_binary: bool,
-    metrics: Arc<Metrics>,
-    previous_response_id: Option<String>,
+    session: &super::Session,
     fallback: HttpFallback,
+    entered_at: StdInstant,
 ) -> Active {
     let (command_tx, command_rx) = mpsc::channel(8);
     let (event_tx, event_rx) = mpsc::channel(8);
     let context = WorkerContext {
-        metrics,
-        previous_response_id,
+        original: (entered_at, payload.len()),
+        state: session.state.clone(),
+        headers: session.client_headers.clone(),
+        model: session
+            .request_metadata
+            .as_ref()
+            .and_then(|m| m.model.clone()),
+        previous_response_id: session.last_terminal_response_id.clone(),
     };
     let task = tokio::spawn(run_websocket_worker(
         context,
@@ -63,7 +67,10 @@ pub(super) fn start_websocket_worker(
 }
 
 struct WorkerContext {
-    metrics: Arc<Metrics>,
+    original: (StdInstant, usize),
+    state: crate::proxy::ProxyState,
+    headers: axum::http::HeaderMap,
+    model: Option<String>,
     previous_response_id: Option<String>,
 }
 
@@ -96,20 +103,93 @@ async fn run_websocket_worker(
     mut lease: Lease,
     payload: Vec<u8>,
     original_binary: bool,
-    commands: mpsc::Receiver<WorkerCommand>,
+    mut commands: mpsc::Receiver<WorkerCommand>,
     events: mpsc::Sender<WorkerEvent>,
 ) {
-    let Some(receipt) =
-        send_initial_application(&mut lease, payload, original_binary, &events, &context).await
-    else {
+    let mut waiting = Vec::new();
+    let mut waiting_bytes = 0usize;
+    let image_work = context
+        .state
+        .compression_enabled
+        .load(std::sync::atomic::Ordering::Relaxed)
+        && payload.windows(5).any(|part| part == b"data:");
+    let (frame, report) = {
+        let readied = async {
+            let (body, report) = context
+                .state
+                .prepare_images(payload.into(), &context.headers, context.model.as_deref())
+                .await;
+            let marker = report
+                .as_ref()
+                .and_then(crate::image_processing::Report::marker);
+            let payload = crate::image_processing::ws_metadata(body.into(), marker.as_deref());
+            let frame = private_websocket::encode_outbound(
+                payload,
+                original_binary,
+                context
+                    .state
+                    .compression_enabled
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .await;
+            (frame, report)
+        };
+        tokio::pin!(readied);
+        if !image_work {
+            readied.await
+        } else {
+            loop {
+                tokio::select! {biased;
+                    cmd=commands.recv()=> match cmd {
+                        Some(WorkerCommand::Cancel(_))=>{let _=events.send(WorkerEvent::Cancelled{lease:Some(Box::new(lease))}).await;return},
+                        None=>return,
+                        Some(WorkerCommand::Forward(data,bin))=>{waiting_bytes=waiting_bytes.saturating_add(data.len()); if waiting.len()>=8 || waiting_bytes>1024*1024 {send_worker_error(&events,&context,1009,"too many events before submission").await;return} waiting.push(WorkerCommand::Forward(data,bin));}
+                    }, result=&mut readied=>break result,
+                }
+            }
+        }
+    };
+    let Ok(frame) = frame else {
+        send_worker_error(&events, &context, 1011, "private websocket encoding failed").await;
         return;
     };
+    let receipt = WebSocketSendReceipt {
+        raw_bytes: context.original.1 as u64,
+        sent_bytes: frame.bytes.len() as u64,
+        compressed: frame.compressed,
+        started_at: Some(context.original.0),
+    };
+    let Some(upstream) = lease.upstream_mut() else {
+        send_worker_error(&events, &context, 1011, "private websocket lease is empty").await;
+        return;
+    };
+    if let Err(err) = upstream.send(Message::Binary(frame.bytes.into())).await {
+        let reason = format!(
+            "private websocket send failed · {}",
+            private_websocket::websocket_error_kind(&err)
+        );
+        send_worker_error(&events, &context, 1011, &reason).await;
+        return;
+    }
+    if let Some(report) = report
+        && events
+            .send(WorkerEvent::ImagesPrepared(report))
+            .await
+            .is_err()
+    {
+        return;
+    }
+    for command in waiting {
+        if !handle_worker_command(&mut lease, Some(command), &context, &events).await {
+            return;
+        }
+    }
     if events
         .send(WorkerEvent::WebSocketSent(receipt))
         .await
         .is_err()
     {
-        context.metrics.record_websocket_closed();
+        context.state.metrics.record_websocket_closed();
         return;
     }
     run_websocket_loop(context, lease, commands, events).await;
@@ -138,7 +218,7 @@ async fn run_websocket_loop(
                     Message::Binary(envelope) => match handle_binary_response(envelope, &events, &context).await {
                         BinaryOutcome::Continue => {}
                         BinaryOutcome::Failure(event) => {
-                            context.metrics.record_websocket_closed();
+                            context.state.metrics.record_websocket_closed();
                             let _ = events.send(*event).await;
                             return;
                         }
@@ -235,27 +315,6 @@ async fn handle_keepalive(
     true
 }
 
-async fn send_initial_application(
-    lease: &mut Lease,
-    payload: Vec<u8>,
-    original_binary: bool,
-    events: &mpsc::Sender<WorkerEvent>,
-    context: &WorkerContext,
-) -> Option<WebSocketSendReceipt> {
-    let Some(upstream) = lease.upstream_mut() else {
-        send_worker_error(events, context, 1011, "private websocket lease is empty").await;
-        return None;
-    };
-    match send_private_application(upstream, payload, original_binary).await {
-        Ok(receipt) => Some(receipt),
-        Err(failure) => {
-            let reason = format!("private websocket send failed · {}", failure.reason());
-            send_worker_error(events, context, 1011, &reason).await;
-            None
-        }
-    }
-}
-
 async fn resolve_active_message(
     message: Option<Result<Message, WebSocketError>>,
     events: &mpsc::Sender<WorkerEvent>,
@@ -306,7 +365,7 @@ async fn handle_active_close(
         frame.reason.to_string()
     };
     if super::super::is_context_length_exceeded(code) {
-        context.metrics.record_websocket_closed();
+        context.state.metrics.record_websocket_closed();
         let _ = events
             .send(WorkerEvent::FailedTerminal {
                 response: context_length_exceeded_message(),
@@ -334,6 +393,21 @@ async fn handle_binary_response(
         .await;
         return BinaryOutcome::Stop;
     };
+    if decoded.payload.len() < 256
+        && event_type(&decoded.payload).is_ok_and(|v| v == "ai_cove.image_receipt")
+    {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&decoded.payload)
+            && let Some(id) = value
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 128)
+        {
+            let _ = events
+                .send(WorkerEvent::PlatformRequestId(id.to_owned()))
+                .await;
+        }
+        return BinaryOutcome::Continue;
+    }
     let terminal = is_terminal_event(&decoded.payload);
     let cancelled_terminal = event_type(&decoded.payload).is_ok_and(|event_type| {
         matches!(
@@ -386,7 +460,7 @@ async fn handle_binary_response(
         return BinaryOutcome::Cancelled;
     }
     if events.send(WorkerEvent::Message(message)).await.is_err() {
-        context.metrics.record_websocket_closed();
+        context.state.metrics.record_websocket_closed();
         return BinaryOutcome::Stop;
     }
     if terminal {
@@ -449,7 +523,7 @@ async fn handle_worker_command(
         if let Some(upstream) = lease.upstream_mut() {
             let _ = upstream.close(None).await;
         }
-        context.metrics.record_websocket_closed();
+        context.state.metrics.record_websocket_closed();
         return false;
     };
     let (payload, original_binary, message) = match command {
@@ -462,7 +536,17 @@ async fn handle_worker_command(
         send_worker_error(events, context, 1011, "private websocket lease is empty").await;
         return false;
     };
-    if let Err(failure) = send_private_application(upstream, payload, original_binary).await {
+    if let Err(failure) = send_private_application(
+        upstream,
+        payload,
+        original_binary,
+        context
+            .state
+            .compression_enabled
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )
+    .await
+    {
         let reason = format!("{message} · {}", failure.reason());
         send_worker_error(events, context, 1011, &reason).await;
         return false;
@@ -476,7 +560,7 @@ async fn send_worker_error(
     code: u16,
     message: &str,
 ) {
-    context.metrics.record_websocket_closed();
+    context.state.metrics.record_websocket_closed();
     let _ = events
         .send(WorkerEvent::Error {
             code,
@@ -489,10 +573,11 @@ async fn send_private_application(
     upstream: &mut PrivateWebSocket,
     payload: Vec<u8>,
     original_binary: bool,
+    compression: bool,
 ) -> Result<WebSocketSendReceipt, SendFailure> {
     let started_at = StdInstant::now();
     let raw_bytes = u64::try_from(payload.len()).map_err(|_| SendFailure::PayloadSize)?;
-    let encoded = private_websocket::encode_private_message_async(payload, original_binary)
+    let encoded = private_websocket::encode_outbound(payload, original_binary, compression)
         .await
         .map_err(|_| SendFailure::Encoding)?;
     let sent_bytes = u64::try_from(encoded.bytes.len()).map_err(|_| SendFailure::PayloadSize)?;

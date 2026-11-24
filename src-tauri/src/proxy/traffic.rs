@@ -91,6 +91,10 @@ pub(crate) enum FailurePhase {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RequestEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_compression: Option<crate::image_processing::Report>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    platform_request_id: Option<String>,
     pub(crate) id: u64,
     timestamp_ms: u64,
     status: u16,
@@ -140,6 +144,8 @@ impl RequestEvent {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RequestMetadata {
+    pub(crate) image_compression: Option<crate::image_processing::Report>,
+    pub(crate) platform_request_id: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) thread_id: Option<String>,
     pub(crate) session_id: Option<String>,
@@ -164,6 +170,8 @@ pub(crate) fn request_metadata(headers: &axum::http::HeaderMap, payload: &[u8]) 
     let header_session_id = header_string(headers, "session-id");
 
     RequestMetadata {
+        image_compression: None,
+        platform_request_id: None,
         model: object
             .and_then(|object| object.get("model"))
             .and_then(serde_json::Value::as_str)
@@ -445,6 +453,10 @@ impl TrafficStore {
             return;
         }
         let event = RequestEvent {
+            image_compression: metadata.as_ref().and_then(|m| m.image_compression.clone()),
+            platform_request_id: metadata
+                .as_ref()
+                .and_then(|m| m.platform_request_id.clone()),
             id: 0,
             timestamp_ms: record.timestamp_ms,
             status: record.status,

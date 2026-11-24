@@ -208,6 +208,32 @@ async fn send_create_with_size(client: &mut ClientWebSocket, bytes: usize) -> io
         .map_err(io::Error::other)
 }
 
+#[tokio::test]
+async fn cancel_during_image_preparation_never_submits_a_generation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::start(FixtureConfig {
+        private: PrivateBehavior::Stateful,
+        delay_http: false,
+    })
+    .await?;
+    let (proxy, _) = start_test_proxy(&server).await?;
+    proxy.set_capability_for_test("gpt-6.2-sol", CapabilityTransport::WebSocket);
+    let (mut client, _) = connect_local(&proxy).await?;
+    let permit = proxy.images.hold_encoders_for_test().await?;
+    client.send(Message::Text(r#"{"type":"response.create","model":"gpt-6.2-sol","input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}]}]}"#.into())).await?;
+    send_cancel(&mut client).await?;
+    let outcome =
+        tokio::time::timeout(Duration::from_secs(4), next_event_type(&mut client)).await??;
+    assert_eq!(outcome, "response.cancelled");
+    assert!(server.fixture.private_payloads().await.is_empty());
+    assert!(server.fixture.http_payloads().await.is_empty());
+    drop(permit);
+    drop(client);
+    proxy.stop().await;
+    server.stop().await;
+    Ok(())
+}
+
 async fn send_cancel(client: &mut ClientWebSocket) -> io::Result<()> {
     client
         .send(Message::Text(r#"{"type":"response.cancel"}"#.into()))

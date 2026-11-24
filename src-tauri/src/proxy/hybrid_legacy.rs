@@ -32,6 +32,7 @@ pub(super) async fn start_legacy_response(
             &mut upstream,
             legacy_message(payload, original_binary),
             Arc::clone(&session.state.metrics),
+            std::sync::Arc::clone(&session.state.compression_enabled),
             session.path.clone(),
             response_create_rewriter(session),
         )

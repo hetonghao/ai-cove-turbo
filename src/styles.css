@@ -5698,6 +5698,34 @@ body[data-active-tab="config"][data-config-view="catalog"] #panel-config .b-mode
   }
 }
 
+.b-image-control { display: flex; align-items: center; gap: 4px; }
+.b-image-control > .b-control { flex: 1; min-width: 0; }
+.b-image-settings { display: grid; place-items: center; width: 34px; height: 36px; flex: none; color: var(--b-muted); background: transparent; border: 1px solid var(--b-line); border-radius: 8px; cursor: pointer; }
+.b-image-settings svg { width: 16px; height: 16px; }
+.b-image-settings:hover, .b-image-settings:focus-visible { color: var(--b-ink); border-color: currentColor; }
+.b-model-dialog.b-image-dialog { inline-size: min(560px, calc(100vw - 24px)); block-size: fit-content; min-height: 0; max-height: calc(100dvh - 24px); overflow-y: auto; }
+.b-image-dialog .b-model-dialog__surface { display: block; block-size: auto; min-height: 0; }
+.b-image-fields { padding: 18px 22px; display: grid; gap: 14px; }
+.b-image-options { border: 1px solid var(--b-line); border-radius: 12px; overflow: hidden; }
+.b-image-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(130px, 41%); align-items: start; gap: 16px; padding: 14px; }
+.b-image-row + .b-image-row:not([hidden]) { border-top: 1px solid var(--b-line); }
+.b-image-row label { font-weight: 600; font-size: .85rem; }
+.b-image-fields p { margin: 4px 0 0; font-size: .77rem; color: var(--b-muted); line-height: 1.5; }
+.b-image-row :is(input,select) { box-sizing: border-box; min-width: 0; width: 100%; font: inherit; font-size: .83rem; color: var(--b-ink); }
+.b-image-row :is(input[type="number"],select) { min-height: 33px; padding: 5px 8px; background: var(--b-surface); border: 1px solid var(--b-line); border-radius: 7px; }
+.b-image-value { display: grid; grid-template-columns: minmax(0, 1fr) minmax(56px, 41%); gap: 6px; align-items: center; }
+.b-image-value--unit, .b-image-value--quality { grid-template-columns: minmax(0, 1fr) auto; }
+.b-image-value span, .b-image-value output { font-size: .8rem; color: var(--b-muted); }
+.b-image-value input[type="range"] { accent-color: var(--b-accent); }
+.b-image-cache { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: .75rem; color: var(--b-muted); }
+.b-image-fields [role="alert"]:empty, .b-image-fields [hidden] { display: none; }
+.b-image-dialog .b-model-dialog__surface > footer { justify-content: flex-end; }
+.b-image-dialog .b-image-save { font-weight: 650; }
+@media (max-width: 450px) {
+  .b-image-fields { padding: 14px; }
+  .b-image-row { padding: 12px; gap: 8px; grid-template-columns: minmax(0, 1fr) minmax(108px, 41%); }
+}
+
 /* 模型编辑器：只保留一个滚动容器，让每个决策层级清楚。 */
 .b-model-dialog {
   width: min(720px, calc(100vw - 24px));

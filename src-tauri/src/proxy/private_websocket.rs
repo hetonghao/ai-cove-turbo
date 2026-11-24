@@ -58,6 +58,18 @@ pub(super) async fn encode_private_message_async(
         .await
 }
 
+pub(super) async fn encode_outbound(
+    payload: Vec<u8>,
+    original_binary: bool,
+    enabled: bool,
+) -> Result<EncodedPrivateMessage, PrivateProtocolError> {
+    if enabled {
+        encode_private_message_async(payload, original_binary).await
+    } else {
+        codec::uncompressed_message(&payload, original_binary)
+    }
+}
+
 pub(super) async fn decode_private_message_async(
     envelope: Bytes,
 ) -> Result<codec::DecodedPrivateMessage, PrivateProtocolError> {

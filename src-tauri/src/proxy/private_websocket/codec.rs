@@ -76,6 +76,14 @@ pub(in crate::proxy) fn encode_private_message(
     payload: &[u8],
     original_binary: bool,
 ) -> Result<Vec<u8>, PrivateProtocolError> {
+    encode_body(payload, original_binary, true)
+}
+
+fn encode_body(
+    payload: &[u8],
+    original_binary: bool,
+    zstd: bool,
+) -> Result<Vec<u8>, PrivateProtocolError> {
     if payload.len() > PRIVATE_MESSAGE_MAX_BYTES {
         return Err(PrivateProtocolError::too_large(
             "original message exceeds 128 MiB",
@@ -87,7 +95,7 @@ pub(in crate::proxy) fn encode_private_message(
         ));
     }
 
-    let compressed = if payload.len() >= super::super::MIN_COMPRESSION_INPUT_BYTES {
+    let compressed = if zstd && payload.len() >= super::super::MIN_COMPRESSION_INPUT_BYTES {
         Some(
             zstd::stream::encode_all(Cursor::new(payload), ZSTD_LEVEL)
                 .map_err(|_| PrivateProtocolError::internal("zstd compression failed"))?,
@@ -114,6 +122,16 @@ pub(in crate::proxy) fn encode_private_message(
     envelope.extend_from_slice(&original_len.to_be_bytes());
     envelope.extend_from_slice(wire_payload);
     Ok(envelope)
+}
+
+pub(in crate::proxy) fn uncompressed_message(
+    payload: &[u8],
+    original_binary: bool,
+) -> Result<EncodedPrivateMessage, PrivateProtocolError> {
+    Ok(EncodedPrivateMessage {
+        bytes: encode_body(payload, original_binary, false)?,
+        compressed: false,
+    })
 }
 
 pub(in crate::proxy) fn encode_private_message_with_metadata(

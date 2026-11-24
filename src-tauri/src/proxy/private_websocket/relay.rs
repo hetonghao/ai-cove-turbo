@@ -14,7 +14,7 @@ use tokio_tungstenite::{
 use super::{
     PrivateUpstream,
     codec::{DecodedPrivateMessage, PrivateProtocolError},
-    decode_private_message_async, encode_private_message_async,
+    decode_private_message_async, encode_outbound,
 };
 use crate::proxy::Metrics;
 
@@ -26,11 +26,28 @@ pub(in crate::proxy) async fn relay_private_from_message(
     upstream: &mut PrivateUpstream,
     initial: Message,
     metrics: Arc<Metrics>,
+    compression: Arc<std::sync::atomic::AtomicBool>,
     path: String,
     rewrite_request: impl FnMut(Message) -> Message,
 ) {
-    if forward_client_message(client, upstream, initial, &metrics, &path).await {
-        relay_private_refs(client, upstream, metrics, path, rewrite_request).await;
+    if forward_client_message(
+        client,
+        upstream,
+        initial,
+        &metrics,
+        &path,
+        compression.load(std::sync::atomic::Ordering::Relaxed),
+    )
+    .await
+    {
+        relay_private_refs(
+            client,
+            upstream,
+            metrics,
+            compression,
+            path, rewrite_request,
+        )
+        .await;
     }
 }
 
@@ -38,6 +55,7 @@ async fn relay_private_refs(
     client: &mut WebSocketStream<TokioIo<Upgraded>>,
     upstream: &mut PrivateUpstream,
     metrics: Arc<Metrics>,
+    compression: Arc<std::sync::atomic::AtomicBool>,
     path: String,
     mut rewrite_request: impl FnMut(Message) -> Message,
 ) {
@@ -57,7 +75,7 @@ async fn relay_private_refs(
                         break;
                     }
                 };
-                if !forward_client_message(client, upstream, rewrite_request(message), &metrics, &path).await {
+                if !forward_client_message(client, upstream, rewrite_request(message), &metrics, &path, compression.load(std::sync::atomic::Ordering::Relaxed)).await {
                     break;
                 }
             }
@@ -89,6 +107,7 @@ async fn forward_client_message(
     message: Message,
     metrics: &Metrics,
     path: &str,
+    compression: bool,
 ) -> bool {
     match message {
         Message::Text(text) => {
@@ -99,12 +118,21 @@ async fn forward_client_message(
                 false,
                 metrics,
                 path,
+                compression,
             )
             .await
         }
         Message::Binary(payload) => {
-            forward_application_or_close(client, upstream, payload.to_vec(), true, metrics, path)
-                .await
+            forward_application_or_close(
+                client,
+                upstream,
+                payload.to_vec(),
+                true,
+                metrics,
+                path,
+                compression,
+            )
+            .await
         }
         Message::Ping(_) | Message::Pong(_) => true,
         Message::Close(frame) => {
@@ -126,8 +154,18 @@ async fn forward_application_or_close(
     original_binary: bool,
     metrics: &Metrics,
     path: &str,
+    compression: bool,
 ) -> bool {
-    match forward_private_application(upstream, payload, original_binary, metrics, path).await {
+    match forward_private_application(
+        upstream,
+        payload,
+        original_binary,
+        metrics,
+        path,
+        compression,
+    )
+    .await
+    {
         Ok(()) => true,
         Err(error) => {
             metrics.record_websocket_error(path, error.close_code);
@@ -192,9 +230,10 @@ async fn forward_private_application(
     original_binary: bool,
     metrics: &Metrics,
     path: &str,
+    compression: bool,
 ) -> Result<(), PrivateProtocolError> {
     let raw_len = payload.len();
-    let encoded = encode_private_message_async(payload, original_binary).await?;
+    let encoded = encode_outbound(payload, original_binary, compression).await?;
     let sent_len = encoded.bytes.len();
     upstream
         .send(Message::Binary(Bytes::from(encoded.bytes)))

@@ -145,6 +145,8 @@ enum WorkerCommand {
 }
 
 enum WorkerEvent {
+    ImagesPrepared(crate::image_processing::Report),
+    PlatformRequestId(String),
     Message(Message),
     WebSocketSent(WebSocketSendReceipt),
     Terminal {
