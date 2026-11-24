@@ -4,10 +4,10 @@
 
 `.github/workflows/desktop-release.yml` 使用原生 runner：
 
-- `macos-14`：macOS arm64
+- `macos-15`：macOS arm64
 - `windows-latest`：Windows x64
 
-每个平台先执行 `npm run check` 和 `npm test`，再执行 Tauri 构建。平台产物上传后，在 Ubuntu 汇总 job 中合并并校验 `latest.json`；Windows 同时收集安装器 `.exe` 和 updater 实际消费的 `.exe.zip` 及签名。
+每个平台先执行 `npm run check` 和 `npm test`，再执行 Tauri 构建。平台产物上传后，在 Ubuntu 汇总 job 中合并并校验 `latest.json`；Windows 的 NSIS 安装器和 updater 使用同一份 `.exe`，并随包提供 `.exe.sig`。
 
 ## 签名 Secrets
 
@@ -38,12 +38,18 @@ https://ai-cove.com/downloads/turbo/
 
 GitHub Actions 会生成 `ai-cove-turbo-downloads` 汇总 artifact，并在 tag 发布时附加 GitHub Release。将该目录同步到正式静态下载目录的动作需要由现有 AI Cove 发布链路承接。
 
+## 正式发版
+
+1. 在 `main` 上提交已通过本地检查的发布版本。推送发布提交与对应的 `turbo-v<版本>` 标签，例如 `turbo-v1.2.0`。标签推送触发 `desktop-release.yml`。
+2. 确认 Actions 的 macOS、Windows 和 Assemble 三个任务全绿，且该次运行的提交与标签一致。下载本次运行的 `ai-cove-turbo-downloads`；本地签名包不能用于正式发布。
+3. 从平台仓库根目录执行 `AI_COVE_TURBO_RELEASE_DIR=<下载目录> ./deploy/release-all.sh turbo-publish`。它先发布并验证安装包、更新包和签名，再更新稳定渠道的 `latest.json`。
+
 ## 当前客户端接入状态
 
 - `src-tauri/tauri.conf.json` 已配置正式 updater endpoint、平台图标和安装目标。
 - `tauri-plugin-updater` 已注册，前端可检查、下载并安装签名更新；未注入独立公钥的本地构建会明确显示“未配置”。
-- `src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json` 当前版本均为 `0.1.0`。
-- 正式构建仍必须提供上述私钥、密码和公钥；缺少任一签名参数时工作流应直接失败。
+- 发布版本须在 `package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json` 和 `src/index.html` 一致。
+- 私钥和对应公钥不能为空；签名私钥有密码时必须提供对应 Secret。macOS 构建另用临时签名身份 `-`，并运行 `codesign --verify --deep --strict`。
 
 ## WebSocket 发布验证
 
