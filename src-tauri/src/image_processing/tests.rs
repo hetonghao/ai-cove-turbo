@@ -103,6 +103,64 @@ async fn client_images_reuse_results_across_turns_and_roll_back_as_one_request()
     assert_eq!(processor.usage(), (0, 0));
     Ok(())
 }
+#[tokio::test]
+async fn lossless_png_shrinks_a_screenshot_without_losing_its_color_or_orientation()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Display P3, sRGB transfer, RGB matrix, full range (cICP chunk including its CRC).
+    const COLOR: &[u8] = b"\0\0\0\x04cICP\x0c\x0d\0\x01\x6e\x03\xe3\xef";
+    const EXIF: &[u8] = b"II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
+    let pixels = image::RgbaImage::from_fn(128, 64, |x, y| {
+        image::Rgba(if (x / 8 + y / 16) % 2 == 0 {
+            [224, 81, 23, 255]
+        } else {
+            [38, 83, 170, 0]
+        })
+    });
+    let mut raw = Vec::new();
+    let mut encoder = PngEncoder::new_with_quality(
+        &mut raw,
+        CompressionType::Uncompressed,
+        FilterType::NoFilter,
+    );
+    encoder.set_exif_metadata(EXIF.to_vec())?;
+    encoder.write_image(pixels.as_raw(), 128, 64, image::ExtendedColorType::Rgba8)?;
+    raw.splice(33..33, COLOR.iter().copied()); // Immediately after IHDR.
+    let url = format!("data:image/png;base64,{}", STANDARD.encode(&raw));
+    let body = Bytes::from(serde_json::to_vec(
+        &json!({"input":[{"role":"user","content":[
+            {"type":"input_image", "image_url":url}
+        ]}]}),
+    )?);
+
+    let processor = Arc::new(Processor::default());
+    for webp in [false, true] {
+        let (out, report) = processor.prepare(body.clone(), "scope".into(), webp).await;
+        let report = report.ok_or("missing report")?;
+        assert_eq!(report.marker().as_deref(), Some("v1/changed/1"));
+        assert!(report.after < raw.len());
+        let obj: Value = serde_json::from_slice(&out)?;
+        let encoded = obj
+            .pointer("/input/0/content/0/image_url")
+            .and_then(Value::as_str)
+            .and_then(|url| url.strip_prefix("data:image/png;base64,"))
+            .ok_or("expected the original PNG format")?;
+        let png = STANDARD.decode(encoded)?;
+        assert_eq!(png.len(), report.after);
+        assert_eq!(image::load_from_memory(&png)?.into_rgba8(), pixels);
+        let mut decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(&png))?;
+        assert_eq!(
+            image::ImageDecoder::exif_metadata(&mut decoder)?.as_deref(),
+            Some(EXIF)
+        );
+        assert!(png.windows(COLOR.len()).any(|chunk| chunk == COLOR));
+
+        let (cached, warm) = processor.prepare(body.clone(), "scope".into(), webp).await;
+        assert_eq!(cached, out);
+        assert_eq!(warm.ok_or("missing cached report")?.hits, 1);
+    }
+    Ok(())
+}
+
 #[test]
 fn metadata_only_uses_own_decision_and_never_survives_the_http_fallback()
 -> Result<(), Box<dyn std::error::Error>> {

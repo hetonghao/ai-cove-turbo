@@ -10,37 +10,53 @@ use image::{
 };
 use std::{io::Cursor, sync::Arc};
 
-fn guarded_png(raw: &[u8]) -> bool {
-    let Some(mut chunks) = raw.get(8..) else {
-        return true;
-    };
-    while let Some((header, rest)) = chunks.split_at_checked(8) {
-        let Some(n) = header
-            .get(..4)
-            .and_then(|v| v.try_into().ok())
-            .map(u32::from_be_bytes)
-        else {
-            return true;
-        };
-        let kind = header.get(4..);
-        if matches!(
-            kind,
-            Some(b"acTL" | b"iCCP" | b"eXIf" | b"cICP" | b"gAMA" | b"cHRM")
-        ) {
-            return true;
+struct PngChunks<'a> {
+    before_idat: &'a [u8],
+    idat: &'a [u8],
+    after_idat: &'a [u8],
+    keep_format: bool,
+}
+
+impl<'a> PngChunks<'a> {
+    fn read(raw: &'a [u8]) -> Option<Self> {
+        let mut chunks = raw.get(8..)?;
+        let mut idat = None::<std::ops::Range<usize>>;
+        let mut keep_format = false;
+        loop {
+            let (header, rest) = chunks.split_at_checked(8)?;
+            let size = usize::try_from(u32::from_be_bytes(*header.first_chunk()?)).ok()?;
+            let next = rest.get(size.checked_add(4)?..)?;
+            match header.get(4..)? {
+                b"IEND" => break,
+                b"IDAT" => {
+                    let start = raw.len() - chunks.len();
+                    let end = raw.len() - next.len();
+                    if let Some(range) = &mut idat {
+                        if start != range.end {
+                            return None;
+                        }
+                        range.end = end;
+                    } else {
+                        idat = Some(start..end);
+                    }
+                }
+                b"iCCP" | b"eXIf" | b"cICP" | b"gAMA" | b"cHRM" | b"sRGB" | b"sBIT" | b"bKGD"
+                | b"mDCv" | b"cLLi" => keep_format = true,
+                b"IHDR" | b"PLTE" | b"tRNS" | b"tIME" => {}
+                // Do not rewrite APNG or an unfamiliar chunk marked unsafe to copy.
+                [.., last] if last.is_ascii_lowercase() => {}
+                _ => return None,
+            }
+            chunks = next;
         }
-        let Some(end) = usize::try_from(n).ok().and_then(|n| n.checked_add(4)) else {
-            return true;
-        };
-        let Some(next) = rest.get(end..) else {
-            return true;
-        };
-        if kind == Some(b"IEND") {
-            return false;
-        }
-        chunks = next;
+        let range = idat?;
+        Some(Self {
+            before_idat: raw.get(..range.start)?,
+            idat: raw.get(range.clone())?,
+            after_idat: raw.get(range.end..)?,
+            keep_format,
+        })
     }
-    true
 }
 
 pub(super) fn encode(
@@ -63,9 +79,18 @@ pub(super) fn encode(
     {
         return Ok(Encoded::kept(mime, "threshold"));
     }
-    if fmt == ImageFormat::Png && guarded_png(raw) {
-        return Ok(Encoded::kept(mime, "preserve"));
-    }
+    let lossless = cfg.mode == Mode::Lossless;
+    let protected_png = if fmt == ImageFormat::Png {
+        let Some(chunks) = PngChunks::read(raw) else {
+            return Ok(Encoded::kept(mime, "preserve"));
+        };
+        if chunks.keep_format && !lossless {
+            return Ok(Encoded::kept(mime, "preserve"));
+        }
+        Some(chunks).filter(|chunks| chunks.keep_format)
+    } else {
+        None
+    };
     if fmt == ImageFormat::WebP
         && image::codecs::webp::WebPDecoder::new(Cursor::new(raw))
             .map_err(|_| ())?
@@ -84,8 +109,9 @@ pub(super) fn encode(
             | image::ColorType::Rgba8
             | image::ColorType::L8
             | image::ColorType::La8
-    ) || dec.icc_profile().map_err(|_| ())?.is_some()
-        || dec.exif_metadata().map_err(|_| ())?.is_some()
+    ) || (protected_png.is_none()
+        && (dec.icc_profile().map_err(|_| ())?.is_some()
+            || dec.exif_metadata().map_err(|_| ())?.is_some()))
     {
         return Ok(Encoded::kept(mime, "preserve"));
     }
@@ -101,7 +127,6 @@ pub(super) fn encode(
     } else {
         DynamicImage::from_decoder(dec).map_err(|_| ())?
     };
-    let lossless = cfg.mode == Mode::Lossless;
     let resized = !lossless && w.max(h) > cfg.max_side;
     if resized {
         img = img.resize(
@@ -111,7 +136,7 @@ pub(super) fn encode(
         )
     }
     let mut out = Vec::new();
-    let target = if lossless && webp {
+    let target = if lossless && webp && protected_png.is_none() {
         "image/webp"
     } else if lossless
         || cfg.format == Format::Png
@@ -157,6 +182,18 @@ pub(super) fn encode(
                 img.color().into(),
             )
             .map_err(|_| ())?;
+    }
+    if let Some(original) = protected_png {
+        let new = PngChunks::read(&out).ok_or(())?;
+        // Replace only pixel data, and only when the full PNG header still agrees.
+        // This keeps color and orientation chunks byte for byte.
+        if original.before_idat.first_chunk::<33>() != new.before_idat.first_chunk::<33>() {
+            return Ok(Encoded::kept(mime, "preserve"));
+        }
+        if new.idat.len() >= original.idat.len() {
+            return Ok(Encoded::kept(mime, "notSmaller"));
+        }
+        out = [original.before_idat, new.idat, original.after_idat].concat();
     }
     if out.len() >= raw.len() {
         return Ok(Encoded::kept(mime, "notSmaller"));
