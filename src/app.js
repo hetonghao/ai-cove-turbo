@@ -50,6 +50,7 @@
     upstreamHttp: "上游 HTTP",
     unknown: "未知网络阶段",
   });
+  const IMAGE_RESULT_LABELS = { policy: "按策略保留", threshold: "低于阈值", preserve: "保留原图", notSmaller: "原图更小", lossless: "无损", lossy: "有损", resized: "已缩放" };
   const REQUEST_FAILURE_LABELS = Object.freeze({
     499: "请求已取消",
     401: "认证失败",
@@ -661,7 +662,43 @@
     return isHttp ? "—（无需长连接）" : "—";
   }
 
-  function requestDetailRows(request, exception) {
+  function detailField(label, value, className = "") {
+    const attr = className ? ` class="${className}"` : "";
+    return `<div${attr}><dt>${label}</dt><dd>${escapeHtml(value).replaceAll("\n", "<br>")}</dd></div>`;
+  }
+
+  function detailBytes(before, after, noteUnchanged = false) {
+    if (!(before > 0 && after > 0)) return "—";
+    const size = (bytes) => `<span class="c-detail-size">${telemetry.formatBytes(bytes)}</span>`;
+    if (before === after) return size(after) + (noteUnchanged ? ' <span class="c-detail-note">未变</span>' : "");
+    return `${size(before)} <span class="c-detail-size"><span class="c-detail-note">→</span> ${telemetry.formatBytes(after)}</span>`;
+  }
+
+  function detailSaving(before, after) {
+    const rate = telemetry.formatRate(before, after);
+    return `<span class="c-detail-saving${after < before ? " is-reduced" : ""}">节省 <b>${rate}</b></span>`;
+  }
+
+  function requestImagesMarkup(images) {
+    if (images?.fallback) return '<dl class="c-detail-fallback">' + detailField("附图", "保留原图，本机未完成处理") + '</dl>';
+    if (!images?.count) return "";
+    const details = images.details || [];
+    const format = (mime) => String(mime || "—").replace(/^image\//, "").toUpperCase();
+    const rows = details.map((item, index) => {
+      const from = format(item.from), to = format(item.to);
+      const formats = escapeHtml(from === to ? from : `${from} → ${to}`);
+      const reason = Object.hasOwn(IMAGE_RESULT_LABELS, item.reason) ? IMAGE_RESULT_LABELS[item.reason] : "保留原图";
+      return `<tr><th scope="row">图 ${index + 1} <span class="c-detail-format">${formats}</span></th><td>${detailBytes(item.before, item.after)}</td><td>${reason}${item.cached ? ' <span class="c-detail-note">· 缓存</span>' : ""}</td></tr>`;
+    }).join("");
+    const table = rows ? `<table class="c-detail-images" aria-label="逐图处理明细"><thead><tr><th scope="col">图片 / 格式</th><th scope="col">大小（前 → 后）</th><th scope="col">处理结果</th></tr></thead><tbody>${rows}</tbody></table>` : "";
+    const other = images.count > details.length ? `<p class="c-detail-note">其他附图 ${numberFormatter.format(images.count - details.length)} 张</p>` : "";
+    return `<section class="c-detail-attachments"><div class="c-detail-line"><h3>附图压缩</h3>${detailSaving(images.before, images.after)}</div>
+      <p class="c-detail-counts"><span>已压缩 <b>${numberFormatter.format(images.changed)} / ${numberFormatter.format(images.count)}</b> 张</span><span>缓存命中 ${numberFormatter.format(images.hits)} 张</span><span>本机处理 ${telemetry.formatDuration(images.elapsedMs)}</span></p>
+      <dl class="c-detail-totals"><div><dt>图片大小</dt><dd>${detailBytes(images.before, images.after, true)}</dd></div><div><dt>请求体（压图前后）</dt><dd>${detailBytes(images.jsonBefore, images.jsonAfter, true)}</dd></div></dl>
+      ${table}${other}</section>`;
+  }
+
+  function requestDetailContentMarkup(request, exception) {
     const threadId = String(request?.threadId || request?.thread_id || "").trim();
     const info = threadId ? sessionInfos.get(String(threadId)) : null;
     const suppliedSessionName = request?.sessionName || request?.session_name;
@@ -675,40 +712,26 @@
       : request?.route === "hybridPolicyHttp"
         ? "策略 → 压缩 HTTP"
         : null;
-    const rows = [
-      ...(isSubagent ? [["所属父会话", parentName]] : []),
-      ["会话名称", sessionName],
-      ["模型", request?.model || request?.modelSlug || "—"],
-      ...(routeName ? [["路由", routeName]] : []),
-      ["会话/连接", `${requestSessionSequence(threadId)} · ${requestConnectionSequence(request, threadId)}`],
-      ["首帧/耗时", `${telemetry.formatDuration(request?.firstFrameMs ?? request?.first_frame_ms)} / ${telemetry.formatDuration(request?.durationMs ?? request?.duration_ms)}`],
-    ];
-    const images = request?.imageCompression;
-    if (images?.fallback) rows.push(['附图','保留原图，本机未完成处理']);
-    else if (images?.count) {
-      rows.push(['附图压缩', '已压缩 '+images.changed+' / '+images.count+' 张 · 缓存命中 '+images.hits+' 张'], ['图片大小',telemetry.formatBytes(images.before)+' → '+telemetry.formatBytes(images.after)], ['本机处理',telemetry.formatDuration(images.elapsedMs)], ['请求体',telemetry.formatBytes(images.jsonBefore)+' → '+telemetry.formatBytes(images.jsonAfter)]);
-      const reasons={policy:'按策略保留',threshold:'低于阈值',preserve:'保留原图',notSmaller:'原图更小',lossless:'无损',lossy:'有损',resized:'已缩放'};
-      (images.details||[]).forEach((im,i) => rows.push(['图 '+(i+1),im.from.replace('image/','')+' → '+im.to.replace('image/','')+' · '+telemetry.formatBytes(im.before)+' → '+telemetry.formatBytes(im.after)+' · '+(im.cached?'缓存 · ':'')+(reasons[im.reason]||'保留原图')]));
-      if (images.count>(images.details||[]).length) rows.push(['其他附图',String(images.count-images.details.length)+' 张']);
-    }
-    if (request?.platformRequestId) rows.push(['平台请求号',request.platformRequestId]);
-    if (exception) rows.push(["异常", exception]);
-    return rows;
+    const identity = (isSubagent ? detailField("所属父会话", parentName, "c-detail-parent") : "")
+      + detailField("会话名称", sessionName, "c-detail-name");
+    const meta = [
+      detailField("模型", request?.model || request?.modelSlug || "—"),
+      detailField("会话/连接", `${requestSessionSequence(threadId)} · ${requestConnectionSequence(request, threadId)}`),
+      detailField("首帧/耗时", `${telemetry.formatDuration(request?.firstFrameMs ?? request?.first_frame_ms)} / ${telemetry.formatDuration(request?.durationMs ?? request?.duration_ms)}`),
+      routeName ? detailField("路由", routeName) : "",
+    ].join("");
+    const { rawBytes, sentBytes } = request;
+    const wire = rawBytes > 0 && sentBytes > 0 ? `<div class="c-detail-wire c-detail-line"><h3>请求传输</h3><span class="c-detail-wire-size">${detailBytes(rawBytes, sentBytes, true)}</span>${detailSaving(rawBytes, sentBytes)}</div>` : "";
+    return `<strong>请求详情</strong><dl class="c-detail-identity">${identity}</dl><dl class="c-detail-meta">${meta}</dl>${exception ? '<dl class="c-detail-error">' + detailField("异常", exception) + '</dl>' : ""}${wire}${requestImagesMarkup(request?.imageCompression)}${request?.platformRequestId ? '<dl class="c-detail-trace">' + detailField("平台请求号", request.platformRequestId) + '</dl>' : ""}`;
   }
 
-  function requestDetailContentMarkup(request, exception) {
-    const rows = requestDetailRows(request, exception)
-      .map(([key, value]) => `<div class="c-transport__tooltip-row${key === "异常" ? " c-transport__tooltip-row--exception" : ""}"><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value).replaceAll("\n", "<br>")}</dd></div>`)
-      .join("");
-    return `<strong>请求详情</strong><dl>${rows}</dl>`;
-  }
 
   function requestDetailTooltipId(requestId) {
     return `request-detail-${String(requestId).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   }
 
   function requestDetailMarkup(request, exception, tooltipId, label = requestFailureLabel(request)) {
-    return `<span class="c-transport__detail" tabindex="0" aria-describedby="${tooltipId}">${escapeHtml(label)}</span><span class="c-transport__tooltip" id="${tooltipId}" role="tooltip">${requestDetailContentMarkup(request, exception)}</span>`;
+    return `<span class="c-transport__detail" tabindex="0" aria-describedby="${tooltipId}">${escapeHtml(label)}</span><div class="c-transport__tooltip c-request-detail" id="${tooltipId}" role="tooltip">${requestDetailContentMarkup(request, exception)}</div>`;
   }
 
   function refreshRequestDetailRows(threadId) {
@@ -2317,7 +2340,7 @@
     const tooltipBounds = tooltip.getBoundingClientRect();
     const viewportMargin = 16;
     const topBoundary = 70;
-    const gap = tooltip.id === "websocket-no-models-tooltip" ? 0 : 9;
+    const gap = tooltip.matches?.(".c-request-detail") || tooltip.id === "websocket-no-models-tooltip" ? 0 : 9;
     const width = Math.min(tooltipBounds.width, window.innerWidth - viewportMargin * 2);
     const left = Math.max(viewportMargin, Math.min(triggerBounds.right - width, window.innerWidth - width - viewportMargin));
     const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || 720;
@@ -3108,7 +3131,7 @@
             ? `${protocol} · ${requestFailureLabel(request)}`
             : route ?? (fallback ? `${request.transport} · 回退` : request.transport);
     const networkMarkup = requestDetailMarkup(request, detail, tooltipId, transportLabel);
-    return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><span class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}">${networkMarkup}</span></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
+    return `<tr class="c-request-row${isNew ? " is-new" : ""}" data-request-id="${escapeHtml(request.id)}"><td>${telemetry.formatClock(request.timestampMs)}</td><td><span class="c-request-status c-request-status--${status < 400 && !failed ? "success" : "error"}">${numberFormatter.format(status)}</span></td><td><code>${escapeHtml(request.path)}</code></td><td><strong>${telemetry.formatBytes(request.rawBytes)}</strong><span aria-hidden="true">→</span><strong>${telemetry.formatBytes(request.sentBytes)}</strong></td><td><div class="c-transport${fallback || recovering ? " c-transport--fallback" : failed ? " c-transport--error" : ""}">${networkMarkup}</div></td><td>${telemetry.formatRate(request.rawBytes, request.sentBytes)}</td></tr>`;
   }
 
   function renderLiveFollow() {
@@ -4078,8 +4101,7 @@
       if (connectionTrigger && !connectionTrigger.contains?.(event.relatedTarget)) closeConnectionHoverCardFor(connectionTrigger);
     });
     window.addEventListener("resize", () => {
-      const detail = document.activeElement?.closest?.(".c-transport__detail");
-      if (detail) positionNetworkTooltip(detail);
+      if (activeNetworkTooltip) positionNetworkTooltip(activeNetworkTooltip.trigger);
       positionConnectionHoverCard();
       if (routeResetOpen) positionRouteResetPopover();
       if (pendingDeleteSlug) positionRouteResetPopover(modelDeleteTrigger, $("[data-model-delete-popover]"));
@@ -4091,6 +4113,17 @@
         event.preventDefault();
         registerUpstreamClick(upstreamTrigger, event.timeStamp);
         return;
+      }
+      if (activeNetworkTooltip && activeNetworkTooltip.trigger === event.target) {
+        const { tooltip } = activeNetworkTooltip;
+        if (tooltip.matches?.(".c-request-detail") && tooltip.scrollHeight > tooltip.clientHeight) {
+          const step = { ArrowUp: -32, ArrowDown: 32, PageUp: -tooltip.clientHeight, PageDown: tooltip.clientHeight, Home: -tooltip.scrollHeight, End: tooltip.scrollHeight }[event.key];
+          if (typeof step === "number") {
+            event.preventDefault();
+            tooltip.scrollTop += step;
+            return;
+          }
+        }
       }
       if (event.key === "Escape" && activeNetworkTooltip) {
         closeNetworkTooltip();
