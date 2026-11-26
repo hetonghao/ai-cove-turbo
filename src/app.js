@@ -556,16 +556,19 @@
     renderedUpdateState = updateState;
   }
 
+  function modelCapabilityUnavailable(capability) {
+    return capability?.allowed === false || capability?.reasonCode === "model_not_allowed";
+  }
+
   function noUpstreamWebsocketModels() {
     const { catalog, transportCapabilities } = state;
-    return state.websocketEnabled && state.serviceHealthy && configReady()
-      && catalog?.state === "owned" && catalog.models.length > 0
-      && catalog.models.every(({ slug }) => {
-        const capability = transportCapabilities?.[slug];
-        return capability?.allowed === true && capability.transport === "http"
-          && (capability.reasonCode === "no_responses_websocket_channel"
-            || capability.reasonCode === "responses_websocket_unavailable");
-      });
+    if (!state.websocketEnabled || !state.serviceHealthy || !configReady() || catalog?.state !== "owned") return false;
+    const candidates = catalog.models.map(({ slug }) => transportCapabilities?.[slug])
+      .filter((capability) => !modelCapabilityUnavailable(capability));
+    return candidates.length > 0 && candidates.every((capability) =>
+      capability?.allowed === true && capability.transport === "http"
+      && (capability.reasonCode === "no_responses_websocket_channel"
+        || capability.reasonCode === "responses_websocket_unavailable"));
   }
 
   function activationSummary(noWebsocketModels) {
@@ -1156,7 +1159,7 @@
     const wsTooltip = "来自于 AI Cove 的模型能力：支持 Hybrid WebSocket 加速，建议配置传输方式：自动。";
     const httpTooltip = "来自于 AI Cove 的模型能力：支持 压缩 HTTP，建议配置传输方式：HTTP。无需 WS 预热。";
     const unavailableTooltip = "来自于 AI Cove 的提示：当前密钥或分组下此模型暂不可用";
-    const unavailable = capability?.allowed === false || capability?.reasonCode === "model_not_allowed";
+    const unavailable = modelCapabilityUnavailable(capability);
     const isWs = state.websocketEnabled && autoPolicy && capability?.transport === "websocket";
     const pending = !capability || capability.reasonCode === "capability_expired";
     const label = !capability

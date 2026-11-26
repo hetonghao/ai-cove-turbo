@@ -874,19 +874,23 @@ test("过期能力显示实际 HTTP 路由与待刷新状态", async () => {
   assert.doesNotMatch(harness.list.innerHTML, /WS 可用/);
 });
 
-test("只有全部候选确认可用 HTTP 时才显示 HTTP 已生效", async () => {
+test("已确认不可用的候选不影响仅 HTTP 状态，且至少有一个候选可用", async () => {
   const confirmed = { allowed: true, transport: "http", reasonCode: "no_responses_websocket_channel" };
+  const denied = { allowed: false, transport: "http", reasonCode: "model_not_allowed" };
+  const websocket = { allowed: true, transport: "websocket", reasonCode: "ok" };
   const cases = [
-    ["仅 HTTP", confirmed, true],
-    ["WS 暂不可用", { allowed: true, transport: "http", reasonCode: "responses_websocket_unavailable" }, true],
-    ["模型被拒绝", { allowed: false, transport: "http", reasonCode: "model_not_allowed" }, false],
-    ["没有 HTTP 渠道", { allowed: true, transport: "http", reasonCode: "no_http_channel" }, false],
-    ["能力过期", { allowed: true, transport: "http", reasonCode: "capability_expired" }, false],
-    ["缺少能力", null, false],
-    ["支持 WS", { allowed: true, transport: "websocket", reasonCode: "ok" }, false],
+    ["仅 HTTP", confirmed, confirmed, true],
+    ["WS 暂不可用", confirmed, { allowed: true, transport: "http", reasonCode: "responses_websocket_unavailable" }, true],
+    ["部分模型不可用", confirmed, denied, true],
+    ["全部模型不可用", denied, denied, false],
+    ["没有 HTTP 渠道", confirmed, { allowed: true, transport: "http", reasonCode: "no_http_channel" }, false],
+    ["能力过期", confirmed, { allowed: true, transport: "http", reasonCode: "capability_expired" }, false],
+    ["缺少能力", confirmed, null, false],
+    ["支持 WS", confirmed, websocket, false],
+    ["支持 WS 与不可用并存", websocket, denied, false],
   ];
-  for (const [name, capability, httpOnly] of cases) {
-    const harness = await catalogHarness({ capabilityOverrides: { alpha: confirmed, beta: capability } });
+  for (const [name, alpha, beta, httpOnly] of cases) {
+    const harness = await catalogHarness({ capabilityOverrides: { alpha, beta } });
     assert.equal(harness.httpOnlyBadge.hidden, !httpOnly, name);
     assert.equal(harness.websocketVerification.hidden, httpOnly, name);
     assert.equal(harness.activationSummary.textContent === "HTTP 已生效", httpOnly, name);
